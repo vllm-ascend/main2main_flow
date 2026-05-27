@@ -50,11 +50,12 @@ class ContentFlow(Flow[ContentState]):
         else:
             return "PASS_FAIL"
 
-    @listen("PASS")
+    @router("PASS")
     def pass_step(self):
+        self.end_to_adapt = True
         return "NEXT_STEP"
 
-    @listen("PASS_FAIL")
+    @listen("END")
     def push(self):
         return "NEXT_STEP"
 
