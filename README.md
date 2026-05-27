@@ -1,56 +1,16 @@
-# {{crew_name}} Crew
+# Upstream Main2Main Upgrade Flow
 
-Welcome to the {{crew_name}} Crew project, powered by [crewAI](https://crewai.com). This template is designed to help you set up a multi-agent AI system with ease, leveraging the powerful and flexible framework provided by crewAI. Our goal is to enable your agents to collaborate effectively on complex tasks, maximizing their collective intelligence and capabilities.
+## how to use
 
-## Installation
-
-Ensure you have Python >=3.10 <3.14 installed on your system. This project uses [UV](https://docs.astral.sh/uv/) for dependency management and package handling, offering a seamless setup and execution experience.
-
-First, if you haven't already, install uv:
-
+1. install crewai
 ```bash
-pip install uv
+pip install crewai
 ```
-
-Next, navigate to your project directory and install the dependencies:
-
-(Optional) Lock the dependencies and install them by using the CLI command:
+2. install the package
 ```bash
-crewai install
+pip install -e .
 ```
-
-### Customizing
-
-**Add your `OPENAI_API_KEY` into the `.env` file**
-
-- Modify `src/main2main_flow/config/agents.yaml` to define your agents
-- Modify `src/main2main_flow/config/tasks.yaml` to define your tasks
-- Modify `src/main2main_flow/crew.py` to add your own logic, tools and specific args
-- Modify `src/main2main_flow/main.py` to add custom inputs for your agents and tasks
-
-## Running the Project
-
-To kickstart your flow and begin execution, run this from the root folder of your project:
-
+3. run the flow
 ```bash
-crewai run
+python main.py
 ```
-
-This command initializes the main2main_flow Flow as defined in your configuration.
-
-This example, unmodified, will run a content creation flow on AI Agents and save the output to `output/post.md`.
-
-## Understanding Your Crew
-
-The main2main_flow Crew is composed of multiple AI agents, each with unique roles, goals, and tools. These agents collaborate on a series of tasks, defined in `config/tasks.yaml`, leveraging their collective skills to achieve complex objectives. The `config/agents.yaml` file outlines the capabilities and configurations of each agent in your crew.
-
-## Support
-
-For support, questions, or feedback regarding the {{crew_name}} Crew or crewAI.
-
-- Visit our [documentation](https://docs.crewai.com)
-- Reach out to us through our [GitHub repository](https://github.com/joaomdmoura/crewai)
-- [Join our Discord](https://discord.com/invite/X4JWnZnxPb)
-- [Chat with our docs](https://chatg.pt/DWjSBZn)
-
-Let's create wonders together with the power and simplicity of crewAI.

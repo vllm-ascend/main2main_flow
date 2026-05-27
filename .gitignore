@@ -4,3 +4,4 @@ lib/
 .DS_Store
 uv.lock
 .venv
+output
