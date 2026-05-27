@@ -13,20 +13,28 @@ from main2main_flow.scripts.plan_steps import run_plan
 from main2main_flow.scripts.push_to_github import push_and_create_pr
 from main2main_flow.utils import UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded, resolve_path, cleanup_temp_dirs
 from main2main_flow.crews.summary_crew.summary_crew import SummaryCrew
+from main2main_flow.scripts.run_tests import run_tests
 
 
 class Main2MainState(BaseModel):
     # 输入：两个仓库路径，从环境变量读取
-    vllm_path: str = ""
-    vllm_ascend_path: str = ""
-    target_commit: str = ""   # 可选：指定升级目标 commit，默认使用 vllm HEAD
-
+    vllm_path: str = "/vllm-workspace/vllm"
+    vllm_ascend_path: str = "/vllm-workspace/vllm-ascend"
+    test_log_dir: str = "/vllm-workspace/test-logs"
+    
     # Step 1 输出：后续 step 需要读取
     has_drift: bool = False        # vllm 上游是否有未同步的 commit
     steps: list = []              # 规划好的 adaptation 步骤列表
 
     # 流程计数，原来放在 self.xxx 实例属性上
     current_step: int = 0
+    retry_count: int = 0
+    
+    # Step 2.4: 测试验证
+    cur_vllm_commit: str = ""
+    cur_ascend_commit: str = ""
+    cur_patch_path: str = ""
+    
     retry_count: int = 0
 
 
@@ -95,10 +103,23 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @router(ai_analysis)
     def run_e2e_test(self) -> Literal["StepCompleted", "UpgradeCompleted", "UpgradeFailed", "StepRetryNeeded"]:
-        # run e2e test 卫军
-        print("run_e2e_test")
-        test_reslut = True
-        if test_reslut:
+        step_id = self.state.steps[self.state.current_step]
+        print(f"run_e2e_test: {step_id}")
+
+        result = run_tests(
+            vllm_path=self.state.vllm_path,
+            vllm_commit=self.state.cur_vllm_commit,
+            ascend_path=self.state.vllm_ascend_path,
+            ascend_commit=self.state.cur_ascend_commit,
+            patch_path=self.state.cur_patch_path or None,
+            step_id=step_id,
+            workspace=self.state.test_log_dir,
+        )
+
+        test_result = result.get("can_commit", False)
+        print(f"test_result={test_result}, ci_result={result.get('ci_result')}")
+
+        if test_result:
             self.state.current_step += 1
             if self.state.current_step >= len(self.state.steps):
                 return UpgradeCompleted
