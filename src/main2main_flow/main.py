@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -6,32 +7,68 @@ from pydantic import BaseModel
 
 from crewai.flow import Flow, listen, start, router, or_
 
-from main2main_flow.crews.content_crew.content_crew import ContentCrew
+from main2main_flow.scripts.detect_commits import detect, get_repo_head
+from main2main_flow.scripts.plan_steps import run_plan
 from main2main_flow.utils import UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded
 
-class ContentState(BaseModel):
-    topic: str = ""
-    outline: str = ""
-    draft: str = ""
-    final_post: str = ""
+
+class Main2MainState(BaseModel):
+    # 输入：两个仓库路径，从环境变量读取
+    vllm_path: str = ""
+    vllm_ascend_path: str = ""
+
+    # Step 1 输出：后续 step 需要读取
+    has_drift: bool = False        # vllm 上游是否有未同步的 commit
+    steps: list = []              # 规划好的 adaptation 步骤列表
+
+    # 流程计数，原来放在 self.xxx 实例属性上
+    current_step: int = 0
+    retry_count: int = 0
 
 
-class ContentFlow(Flow[ContentState]):
+class Main2MainFlow(Flow[Main2MainState]):
 
     @start()
     def initialize(self):
-        self.max_step = 0
-        self.current_step=0
-        self.retry_count=0
+        self.state.vllm_path = self.state.vllm_path or os.getenv("VLLM_PATH", "")
+        self.state.vllm_ascend_path = self.state.vllm_ascend_path or os.getenv("VLLM_ASCEND_PATH", "")
 
     @listen(initialize)
     def analyze_commit_and_plan_step(self):
-        # 笑爽
-        print("analyze_commit_and_plan_step")
-        self.max_step = 10
-        return "Analysize"
+        vllm_path = Path(self.state.vllm_path)
+        vllm_ascend_path = Path(self.state.vllm_ascend_path)
 
-    @listen(or_(analyze_commit_and_plan_step, StepCompleted, StepRetryNeeded))
+        # 1. 检测漂移：ascend 固定的 base_commit vs vllm 最新 HEAD
+        result = detect(vllm_path, vllm_ascend_path)
+        self.state.has_drift = result["has_drift"]
+        print(f"[analyze] base={result['base_commit'][:8]}  "
+              f"target={result['target_commit'][:8]}  "
+              f"has_drift={self.state.has_drift}")
+
+        if not self.state.has_drift:
+            print("[analyze] 已同步，无需适配。")
+            return
+
+        # 2. 规划 adaptation 步骤
+        plan = run_plan(vllm_path, result["base_commit"], result["target_commit"])
+        self.state.steps = plan["steps"]
+        print(f"[analyze] 规划了 {len(self.state.steps)} 个步骤，"
+              f"共 {plan['total_commits']} 个 commit。")
+        print("===========================================")
+        import json
+        print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
+
+    @router(analyze_commit_and_plan_step)
+    def after_analyze(self) -> Literal["NO_DRIFT", "HAS_DRIFT"]:
+        if not self.state.has_drift:
+            return "NO_DRIFT"
+        return "HAS_DRIFT"
+
+    @listen("NO_DRIFT")
+    def done_no_drift(self):
+        print("[done] 仓库已同步，无需适配，流程结束。")
+
+    @listen(or_("HAS_DRIFT", StepCompleted, StepRetryNeeded))
     def ai_analysis(self):
         # 逢春
         # Call Agent
@@ -44,15 +81,15 @@ class ContentFlow(Flow[ContentState]):
         print("run_e2e_test")
         test_reslut = True
         if test_reslut:
-            self.current_step+=1
-            if self.current_step>=self.max_step:
+            self.state.current_step += 1
+            if self.state.current_step >= len(self.state.steps):
                 return UpgradeCompleted
             else:
                 return StepCompleted
         else:
-            self.retry_count+=1
-            if self.retry_count>=3:
-                self.retry_count=0
+            self.state.retry_count += 1
+            if self.state.retry_count >= 3:
+                self.state.retry_count = 0
                 return UpgradeFailed
             else:
                 return StepRetryNeeded
@@ -71,14 +108,18 @@ class ContentFlow(Flow[ContentState]):
         return "PushToGithub"
 
 def kickoff():
-    content_flow = ContentFlow()
-    content_flow.kickoff()
+    Main2MainFlow().kickoff()
 
 
 def plot():
-    content_flow = ContentFlow()
-    content_flow.plot()
-
+    import shutil
+    output_dir = Path(__file__).parent.parent.parent / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    flow = Main2MainFlow()
+    tmp_html = Path(flow.plot(filename="flow.html", show=False))
+    for f in tmp_html.parent.iterdir():
+        shutil.copy2(f, output_dir / f.name)
+    print(f"Flow plot saved to: {output_dir / tmp_html.name}")
 
 def run_with_trigger():
     """
@@ -98,10 +139,10 @@ def run_with_trigger():
 
     # Create flow and kickoff with trigger payload
     # The @start() methods will automatically receive crewai_trigger_payload parameter
-    content_flow = ContentFlow()
+    flow = Main2MainFlow()
 
     try:
-        result = content_flow.kickoff({"crewai_trigger_payload": trigger_payload})
+        result = flow.kickoff({"crewai_trigger_payload": trigger_payload})
         return result
     except Exception as e:
         raise Exception(f"An error occurred while running the flow with trigger: {e}")
