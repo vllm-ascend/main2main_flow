@@ -79,7 +79,7 @@ def detect(vllm_path: Path, ascend_path: Path, target_commit: str | None = None)
         "base_commit": conf["base_commit"],
         "target_commit": target,
         "compat_tag": conf["compat_tag"],
-        "has_drift": conf["base_commit"] != target,
+        "has_commit": conf["base_commit"] != target,
     }
 
     workspace = Path("/tmp/main2main")

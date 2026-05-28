@@ -6,6 +6,8 @@ UpgradeCompleted = "UpgradeCompleted"
 StepCompleted = "StepCompleted"
 UpgradeFailed = "UpgradeFailed"
 StepRetryNeeded = "StepRetryNeeded"
+HasCommit = "HasCommit"
+HasNoCommit = "HasNoCommit"
 
 
 def is_git_url(path: str) -> bool:

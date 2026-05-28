@@ -12,6 +12,13 @@ from pydantic import BaseModel
 from crewai.flow import Flow, listen, start, router, or_, and_
 
 from main2main_flow.crews.adapter_crew.adapter_crew import AdapterCrew
+from main2main_flow.scripts.detect_commits import detect, get_repo_head
+from main2main_flow.scripts.plan_steps import run_plan
+from main2main_flow.scripts.push_to_github import push_and_create_pr
+from main2main_flow.utils import (
+    UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded,
+    HasCommit, HasNoCommit, resolve_path, cleanup_temp_dirs
+)
 from main2main_flow.crews.summary_crew.summary_crew import SummaryCrew
 from main2main_flow.scripts.detect_commits import detect
 from main2main_flow.scripts.plan_steps import run_plan
@@ -25,28 +32,26 @@ _REFERENCE_DIR = str(Path(__file__).parent / "reference")
 
 
 class Main2MainState(BaseModel):
-    # 输入：两个仓库路径，从环境变量读取
-    vllm_path: str = "/vllm-workspace/vllm"
-    vllm_ascend_path: str = "/vllm-workspace/vllm-ascend"
-    test_log_dir: str = "/vllm-workspace/test-logs"
+    vllm_path: str = ""
+    vllm_ascend_path: str = ""
     target_commit: str = ""
-
-    # Step 1 输出：后续 step 需要读取
-    has_drift: bool = False
-    steps: list = []
-    release_tag: str = ""         # main_vllm_tag from conf.py，用于 vllm_version_is() 校验
-
-    # 流程计数
-    current_step: int = 0
-    retry_count: int = 0
+    test_log_dir: str = "/vllm-workspace/test-logs"
 
     # Step 2.4: 测试验证
+
+    has_commit: bool = False        # vllm 上游是否有未同步的 commit
+    steps: list = []              # 规划好的 adaptation 步骤列表
+    release_tag: str = ""         # main_vllm_tag from conf.py，用于 vllm_version_is() 校验
+
+    current_step: int = 0
+
     cur_vllm_commit: str = ""
     cur_ascend_commit: str = ""
     cur_patch_path: str = ""
 
     # e2e CI 失败时由 run_e2e_test 写入，ai_analysis 读取后进入修复模式
     test_errors: list = []
+    retry_count: int = 0
 
 
 class Main2MainFlow(Flow[Main2MainState]):
@@ -57,8 +62,15 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @start()
     def initialize(self):
+        """Initialize state"""
         raw_vllm = self.state.vllm_path or os.getenv("VLLM_PATH")
         raw_ascend = self.state.vllm_ascend_path or os.getenv("VLLM_ASCEND_PATH")
+        if not raw_vllm or not raw_ascend:
+            raise ValueError(
+                "Can't find vllm or vllm-ascend source. Please set "
+                "--vllm-path and --vllm-ascend-path or VLLM_PATH and " \
+                "VLLM_ASCEND_PATH environment variables.")
+
         self.state.vllm_path = resolve_path(raw_vllm, "vllm", self._temp_dirs)
         self.state.vllm_ascend_path = resolve_path(raw_ascend, "vllm-ascend", self._temp_dirs)
         self.state.target_commit = (
@@ -72,13 +84,13 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         result = detect(vllm_path, vllm_ascend_path,
                         target_commit=self.state.target_commit or None)
-        self.state.has_drift = result["has_drift"]
         self.state.release_tag = result.get("compat_tag") or ""
+        self.state.has_commit = result["has_commit"]
         print(f"[analyze] base={result['base_commit'][:8]}  "
               f"target={result['target_commit'][:8]}  "
-              f"has_drift={self.state.has_drift}")
+              f"has_commit={self.state.has_commit}")
 
-        if not self.state.has_drift:
+        if not self.state.has_commit:
             print("[analyze] 已同步，无需适配。")
             return
 
@@ -90,16 +102,16 @@ class Main2MainFlow(Flow[Main2MainState]):
         print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
 
     @router(analyze_commit_and_plan_step)
-    def after_analyze(self) -> Literal["NO_DRIFT", "HAS_DRIFT"]:
-        if not self.state.has_drift:
-            return "NO_DRIFT"
-        return "HAS_DRIFT"
+    def after_analyze(self) -> Literal["HasCommit", "HasNoCommit"]:
+        if self.state.has_commit:
+            return HasCommit
+        return HasNoCommit
 
-    @listen("NO_DRIFT")
-    def done_no_drift(self):
+    @listen(HasNoCommit)
+    def done_no_commit(self):
         print("[done] 仓库已同步，无需适配，流程结束。")
 
-    @listen(or_("HAS_DRIFT", StepCompleted, StepRetryNeeded))
+    @listen(or_(HasCommit, StepCompleted, StepRetryNeeded))
     def ai_analysis(self):
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
