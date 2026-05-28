@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from crewai.flow import Flow, listen, start, router, or_, and_
 
-from main2main_flow.crews.adapter_crew.adapter_crew import AdapterCrew
+from main2main_flow.crews.adapter_crew.opencode_adapter import AdaptResult, run_opencode_adapter
 from main2main_flow.crews.summary_crew.summary_crew import SummaryCrew
 from main2main_flow.scripts.detect_commits import detect
 from main2main_flow.scripts.plan_steps import run_plan
@@ -162,10 +162,11 @@ class Main2MainFlow(Flow[Main2MainState]):
         error_logs: list[str] = list(self.state.test_errors)
         adapt_result = None
 
+        adapt_result: AdaptResult | None = None
         for attempt in range(1, 4):
             mode = "fix" if error_logs else "adapt"
-            print(f"[ai_analysis] {step_id}: crew attempt {attempt}, mode={mode}")
-            crew_result = AdapterCrew().crew().kickoff(inputs={
+            print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, mode={mode}")
+            adapt_result = run_opencode_adapter({
                 "step_id": step_id,
                 "patch_path": str(patch_path),
                 "changed_files_path": str(changed_files_path),
@@ -176,7 +177,6 @@ class Main2MainFlow(Flow[Main2MainState]):
                 "mode": mode,
                 "error_logs": json.dumps(error_logs, ensure_ascii=False),
             })
-            adapt_result = crew_result.pydantic
 
             check_result = run_check(ascend_path, self.state.release_tag)
             log_path = step_dir / f"pre_ci_check-round-{attempt}.json"
@@ -214,7 +214,7 @@ class Main2MainFlow(Flow[Main2MainState]):
               f"is_noop={getattr(adapt_result, 'is_noop', False)}, "
               f"modified={getattr(adapt_result, 'modified_files', [])}, "
               f"vllm={step['end_commit'][:8]}, ascend={ascend_head[:8]}")
-        return crew_result.raw
+        return adapt_result.step_summary if adapt_result else ""
 
     @router(ai_analysis)
     def run_e2e_test(self) -> Literal["StepCompleted", "UpgradeCompleted", "UpgradeFailed", "StepRetryNeeded"]:
