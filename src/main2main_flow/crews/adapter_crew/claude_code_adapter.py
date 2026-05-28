@@ -78,7 +78,23 @@ def run_claude_code_adapter(inputs: dict[str, Any]) -> AdaptResult:
     return _parse_result("".join(lines))
 
 
-# ── event printer + logger ───────────────────────────────────────────────────
+# ── agent tracker ─────────────────────────────────────────────────────────────
+
+_agent_ids: dict[str, str] = {}
+
+def _tag_for(block: dict) -> str:
+    """Return a display tag for a tool_use or tool_result block."""
+    name = block.get("name", "")
+    if name == "Agent":
+        inp = block.get("input", {})
+        agent_name = inp.get("name", "") or inp.get("subagent_type", "?")
+        # Track this tool_use id so tool_result can find it
+        _agent_ids[block.get("id", "")] = agent_name
+        return f"[Team: {agent_name}]"
+    return f"[TeamLead: {name}]"
+
+
+# ── event printer ─────────────────────────────────────────────────────────────
 
 def _print_event(line: str) -> None:
     try:
@@ -94,20 +110,20 @@ def _print_event(line: str) -> None:
             if btype == "text":
                 print(block.get("text", ""), end="", flush=True)
             elif btype == "tool_use":
-                name = block.get("name", "")
-                inp  = block.get("input", {})
-                if name == "Agent":
+                tag = _tag_for(block)
+                if block.get("name") == "Agent":
                     print(f"\n{'━'*60}", flush=True)
-                    print(f"▶ subagent [{inp.get('subagent_type', '?')}] starting", flush=True)
+                    print(f"▶ {tag} starting", flush=True)
                     print(f"{'━'*60}", flush=True)
                 else:
-                    brief = json.dumps(inp, ensure_ascii=False)[:200]
-                    print(f"\n[{name}] ← {brief}", flush=True)
+                    brief = json.dumps(block.get("input", {}), ensure_ascii=False)[:200]
+                    print(f"\n{tag} ← {brief}", flush=True)
 
     elif t == "user":
         for block in ev.get("message", {}).get("content", []):
             if block.get("type") != "tool_result":
                 continue
+            agent = _agent_ids.get(block.get("tool_use_id", ""), "?")
             content = block.get("content", "")
             texts = (
                 [c["text"] for c in content if c.get("type") == "text" and c.get("text")]
@@ -115,7 +131,7 @@ def _print_event(line: str) -> None:
                 else ([content] if isinstance(content, str) and content else [])
             )
             for text in texts:
-                print(f"\n{'─'*60}\n◀ tool result:\n{text}\n{'─'*60}\n", flush=True)
+                print(f"\n{'─'*60}\n[Team: {agent}] output:\n{text}\n{'─'*60}\n", flush=True)
 
     elif t == "result" and ev.get("is_error"):
         print(f"\n[error] {ev.get('result', '')}", flush=True)
@@ -138,17 +154,14 @@ def _log_event(line: str, fh: Any) -> None:
             if btype == "text":
                 fh.write(block.get("text", ""))
             elif btype == "tool_use":
-                name = block.get("name", "")
-                inp  = block.get("input", {})
-                if name == "Agent":
-                    fh.write(f"\n{'━'*60}\n▶ subagent [{inp.get('subagent_type','?')}] starting\n{'━'*60}\n")
-                else:
-                    fh.write(f"\n[{name}] ← {json.dumps(inp, ensure_ascii=False)[:500]}\n")
+                tag = _tag_for(block)
+                fh.write(f"\n{tag} ← tool call\n")
 
     elif t == "user":
         for block in ev.get("message", {}).get("content", []):
             if block.get("type") != "tool_result":
                 continue
+            agent = _agent_ids.get(block.get("tool_use_id", ""), "?")
             content = block.get("content", "")
             texts = (
                 [c["text"] for c in content if c.get("type") == "text" and c.get("text")]
@@ -156,10 +169,10 @@ def _log_event(line: str, fh: Any) -> None:
                 else ([content] if isinstance(content, str) and content else [])
             )
             for text in texts:
-                fh.write(f"\n{'─'*60}\n◀ tool result:\n{text}\n{'─'*60}\n")
+                fh.write(f"\n{'─'*60}\n[Team: {agent}]\n{text}\n{'─'*60}\n")
 
     elif t == "result":
-        fh.write(f"\n{'═'*60}\nFINAL RESULT:\n{ev.get('result','')}\n{'═'*60}\n")
+        fh.write(f"\n{'═'*60}\n[TeamLead] FINAL RESULT:\n{ev.get('result','')}\n{'═'*60}\n")
 
     fh.flush()
 
