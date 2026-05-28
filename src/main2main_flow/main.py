@@ -77,8 +77,8 @@ class Main2MainFlow(Flow[Main2MainState]):
             self.state.target_commit or os.getenv("VLLM_TARGET_COMMIT", "")
         )
 
-    @listen(initialize)
-    def analyze_commit_and_plan_step(self):
+    @router(initialize)
+    def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
         vllm_path = Path(self.state.vllm_path)
         vllm_ascend_path = Path(self.state.vllm_ascend_path)
 
@@ -100,15 +100,12 @@ class Main2MainFlow(Flow[Main2MainState]):
               f"共 {plan['total_commits']} 个 commit。")
         print("===========================================")
         print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
-
-    @router(analyze_commit_and_plan_step)
-    def after_analyze(self) -> Literal["HasCommit", "HasNoCommit"]:
         if self.state.has_commit:
             return HasCommit
         return HasNoCommit
 
     @listen(HasNoCommit)
-    def done_no_commit(self):
+    def has_no_commit(self):
         print("[done] 仓库已同步，无需适配，流程结束。")
 
     @listen(or_(HasCommit, StepCompleted, StepRetryNeeded))
