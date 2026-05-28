@@ -92,45 +92,10 @@ def run_claude_code_adapter(inputs: dict[str, Any]) -> AdaptResult:
 # ── event state ───────────────────────────────────────────────────────────────
 
 class _EventState:
-    """Tracks tool_use id → agent name so tool_results can be attributed."""
+    """Tracks callID → tool name for attributing output."""
     def __init__(self) -> None:
         self.lines: list[str] = []
-        self.tool_to_agent: dict[str, str] = {}
-        # Map teammate names to their Agent tool_use id
-        self.agent_ids: set[str] = set()
-
-    def tag_tool(self, block: dict) -> str:
-        name = block.get("name", "")
-        if name == "Agent":
-            inp = block.get("input", {})
-            agent_name = inp.get("name", "") or inp.get("subagent_type", "?")
-            self.tool_to_agent[block.get("id", "")] = agent_name
-            self.agent_ids.add(agent_name)
-            return f"[Team: {agent_name}]"
-        return f"[TeamLead: {name}]"
-
-    def tag_result(self, block: dict) -> str:
-        agent = self.tool_to_agent.get(block.get("tool_use_id", ""), "")
-        if agent:
-            return f"[Team: {agent}]"
-        return "[TeamLead]"
-
-    def resolve_agent(self, block: dict) -> str:
-        """Best-effort agent name for a tool_result."""
-        return self.tool_to_agent.get(block.get("tool_use_id", ""), "TeamLead")
-
-
-# ── content extractor ─────────────────────────────────────────────────────────
-
-def _extract_texts(content: Any) -> list[str]:
-    """Extract readable text from tool_result content, which can be a string
-    or a list of content blocks."""
-    if isinstance(content, str):
-        return [content] if content else []
-    if isinstance(content, list):
-        return [c["text"] for c in content
-                if isinstance(c, dict) and c.get("type") == "text" and c.get("text")]
-    return []
+        self._tool_by_call: dict[str, str] = {}
 
 
 # ── event printer ─────────────────────────────────────────────────────────────
@@ -142,46 +107,51 @@ def _print_event(line: str, state: _EventState) -> None:
         return
 
     t = ev.get("type")
+    part = ev.get("part", {})
 
-    if t == "assistant":
-        for block in ev.get("message", {}).get("content", []):
-            btype = block.get("type")
-            if btype == "text":
-                print(block.get("text", ""), end="", flush=True)
-            elif btype == "tool_use":
-                tag = state.tag_tool(block)
-                name = block.get("name", "")
-                if name == "Agent":
-                    inp = block.get("input", {})
-                    agent_name = inp.get("name", "") or inp.get("subagent_type", "?")
-                    print(f"\n{'━'*60}", flush=True)
-                    print(f"▶ {tag} starting ({agent_name})", flush=True)
-                    print(f"{'━'*60}", flush=True)
-                else:
-                    brief = json.dumps(block.get("input", {}), ensure_ascii=False)[:200]
-                    print(f"\n{tag} ← {brief}", flush=True)
+    if t == "text":
+        text = part.get("text", "")
+        if text:
+            print(text, end="", flush=True)
 
-    elif t == "user":
-        for block in ev.get("message", {}).get("content", []):
-            btype = block.get("type")
-            if btype == "tool_result":
-                agent = state.resolve_agent(block)
-                for text in _extract_texts(block.get("content", "")):
-                    print(f"\n{'─'*60}\n[Team: {agent}] output:\n{text}\n{'─'*60}\n", flush=True)
-            elif btype == "text":
-                # Messages from teammates arrive as text blocks in user events
-                sender = ev.get("sender", "") or block.get("sender", "") or "teammate"
-                text = block.get("text", "")
-                if text:
-                    print(f"\n{'─'*60}\n[Team: {sender}] message:\n{text}\n{'─'*60}\n", flush=True)
+    elif t == "tool_use":
+        tool = part.get("tool", "")
+        call_id = part.get("callID", "")
+        st = part.get("state", {})
+        status = st.get("status", "")
+        inp = st.get("input", {})
 
-    elif t == "result" and ev.get("is_error"):
-        print(f"\n[error] {ev.get('result', '')}", flush=True)
+        if status == "pending":
+            state._tool_by_call[call_id] = tool
+            if tool == "Agent":
+                agent_name = inp.get("name", "") or inp.get("subagent_type", "?")
+                print(f"\n{'━'*60}", flush=True)
+                print(f"▶ [Team: {agent_name}] spawning ({tool})", flush=True)
+                print(f"{'━'*60}", flush=True)
+            elif tool == "TeamCreate":
+                team_name = inp.get("team_name", "?")
+                print(f"\n▶ [TeamLead] creating team '{team_name}'", flush=True)
+            elif tool == "SendMessage":
+                to = inp.get("to", "?")
+                summary = inp.get("summary", "")
+                print(f"\n▶ [TeamLead] → {to}: {summary}", flush=True)
+            else:
+                brief = json.dumps(inp, ensure_ascii=False)[:200]
+                print(f"\n[TeamLead: {tool}] ← {brief}", flush=True)
+
+        elif status == "completed":
+            output = st.get("output", "")
+            if output:
+                agent = state._tool_by_call.get(call_id, "")
+                label = f"Team: {agent}" if agent else "TeamLead"
+                # Truncate very long outputs for display
+                display = output if len(output) <= 3000 else output[:3000] + "\n... [truncated]"
+                print(f"\n{'─'*60}\n[{label}] output:\n{display}\n{'─'*60}", flush=True)
 
 
 # ── event logger ─────────────────────────────────────────────────────────────
 
-def _log_event(line: str, state: _EventState, fh: Any) -> None:
+def _log_event(line: str, state: _EventState, fh: Any) -> None:  # noqa: ARG001
     try:
         ev = json.loads(line)
     except json.JSONDecodeError:
@@ -189,35 +159,21 @@ def _log_event(line: str, state: _EventState, fh: Any) -> None:
         return
 
     t = ev.get("type")
+    part = ev.get("part", {})
 
-    if t == "assistant":
-        for block in ev.get("message", {}).get("content", []):
-            btype = block.get("type")
-            if btype == "text":
-                fh.write(block.get("text", ""))
-            elif btype == "tool_use":
-                tag = state.tag_tool(block)
-                inp = json.dumps(block.get("input", {}), ensure_ascii=False)
-                fh.write(f"\n{tag} ← {inp[:500]}\n")
+    if t == "text":
+        text = part.get("text", "")
+        if text:
+            fh.write(text)
 
-    elif t == "user":
-        for block in ev.get("message", {}).get("content", []):
-            btype = block.get("type")
-            if btype == "tool_result":
-                agent = state.resolve_agent(block)
-                for text in _extract_texts(block.get("content", "")):
-                    fh.write(f"\n{'─'*60}\n[Team: {agent}]\n{text}\n{'─'*60}\n")
-            elif btype == "text":
-                sender = ev.get("sender", "") or block.get("sender", "") or "teammate"
-                text = block.get("text", "")
-                if text:
-                    fh.write(f"\n{'─'*60}\n[Team: {sender}] message:\n{text}\n{'─'*60}\n")
-
-    elif t == "result":
-        result_text = ev.get("result", "")
-        is_error = ev.get("is_error", False)
-        prefix = "[TeamLead] FINAL RESULT (ERROR):" if is_error else "[TeamLead] FINAL RESULT:"
-        fh.write(f"\n{'═'*60}\n{prefix}\n{result_text}\n{'═'*60}\n")
+    elif t == "tool_use":
+        tool = part.get("tool", "")
+        st = part.get("state", {})
+        inp = json.dumps(st.get("input", {}), ensure_ascii=False)
+        fh.write(f"\n[TeamLead: {tool}] ← {inp[:500]}\n")
+        output = st.get("output", "")
+        if output:
+            fh.write(f"{'─'*60}\n[output]\n{output[:4000]}\n{'─'*60}\n")
 
     fh.flush()
 
@@ -231,12 +187,8 @@ def _parse_result(jsonl: str) -> AdaptResult:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if ev.get("type") == "assistant":
-            for block in ev.get("message", {}).get("content", []):
-                if block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-        elif ev.get("type") == "result":
-            text_parts.append(ev.get("result", ""))
+        if ev.get("type") == "text":
+            text_parts.append(ev.get("part", {}).get("text", ""))
 
     full_text = "\n".join(text_parts)
     matches = re.findall(r"```json\s*(.*?)\s*```", full_text, re.DOTALL)
