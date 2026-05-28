@@ -55,6 +55,7 @@ class AdapterCrew:
             tools=[FileReadTool()],
             allow_delegation=False,
             verbose=True,
+            max_iter=500,
         )
 
     @agent
@@ -64,6 +65,7 @@ class AdapterCrew:
             tools=[FileReadTool()],
             allow_delegation=True,
             verbose=True,
+            max_iter=500,
         )
 
     @agent
@@ -73,6 +75,7 @@ class AdapterCrew:
             tools=[FileReadTool(), FileWriterTool(), ShellCommandTool()],
             allow_delegation=False,
             verbose=True,
+            max_iter=500,
         )
 
     @agent
@@ -82,6 +85,7 @@ class AdapterCrew:
             tools=[FileReadTool(), ShellCommandTool()],
             allow_delegation=True,
             verbose=True,
+            max_iter=500,
         )
 
     @task

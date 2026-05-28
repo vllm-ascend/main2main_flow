@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -280,10 +281,11 @@ def run_plan(vllm_path: Path, base_commit: str, target_commit: str) -> dict[str,
         _render_markdown(plan), encoding="utf-8"
     )
 
-    for step in plan["steps"]:
-        step_dir = WORKSPACE_DIR / "steps" / step["id"]
-        step_dir.mkdir(parents=True, exist_ok=True)
-        (step_dir / "ci").mkdir(exist_ok=True)
+    # Clean up step dirs from previous runs
+    steps_root = WORKSPACE_DIR / "steps"
+    if steps_root.exists():
+        shutil.rmtree(steps_root)
+    steps_root.mkdir(parents=True)
 
     return plan
 

@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +59,10 @@ class Main2MainFlow(Flow[Main2MainState]):
     @start()
     def initialize(self):
         """Initialize state; all paths default to workspace/ under the project root."""
+        if WORKSPACE_DIR.exists():
+            shutil.rmtree(WORKSPACE_DIR)
+        WORKSPACE_DIR.mkdir(parents=True)
+
         raw_vllm = (self.state.vllm_path
                     or os.getenv("VLLM_PATH")
                     or str(WORKSPACE_DIR / "repos" / "vllm"))

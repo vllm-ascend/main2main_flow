@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,8 +24,10 @@ def clone_repo(url: str, target: str) -> None:
 
 def resolve_path(raw: str, name: str) -> str:
     if is_git_url(raw):
-        target = str(WORKSPACE_DIR / "repos" / name)
-        Path(target).mkdir(parents=True, exist_ok=True)
-        clone_repo(raw, target)
-        return target
+        target = WORKSPACE_DIR / "repos" / name
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+        clone_repo(raw, str(target))
+        return str(target)
     return raw
