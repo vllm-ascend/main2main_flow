@@ -182,15 +182,26 @@ class Main2MainFlow(Flow[Main2MainState]):
         summary = adapt_result.step_summary if adapt_result else ""
         (step_dir / "summary.md").write_text(summary, encoding="utf-8")
 
+        adaptation_patch_path = step_dir / "adaptation.patch"
         adaptation_patch = subprocess.run(
             ["git", "-C", ascend_path, "diff", "HEAD"],
             capture_output=True, text=True, check=True,
         ).stdout
-        (step_dir / "adaptation.patch").write_text(adaptation_patch, encoding="utf-8")
+        adaptation_patch_path.write_text(adaptation_patch, encoding="utf-8")
+
+        ascend_head = subprocess.run(
+            ["git", "-C", ascend_path, "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        self.state.cur_vllm_commit = step["end_commit"]
+        self.state.cur_ascend_commit = ascend_head
+        self.state.cur_patch_path = str(adaptation_patch_path)
 
         print(f"[ai_analysis] {step_id}: done, "
               f"is_noop={getattr(adapt_result, 'is_noop', False)}, "
-              f"modified={getattr(adapt_result, 'modified_files', [])}")
+              f"modified={getattr(adapt_result, 'modified_files', [])}, "
+              f"vllm={step['end_commit'][:8]}, ascend={ascend_head[:8]}")
         return crew_result.raw
 
     @router(ai_analysis)
