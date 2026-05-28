@@ -123,7 +123,7 @@ def _print_event(line: str) -> None:
         for block in ev.get("message", {}).get("content", []):
             if block.get("type") != "tool_result":
                 continue
-            agent = _agent_ids.get(block.get("tool_use_id", ""), "?")
+            agent = _agent_ids.get(block.get("tool_use_id", ""), "TeamLead")
             content = block.get("content", "")
             texts = (
                 [c["text"] for c in content if c.get("type") == "text" and c.get("text")]
@@ -161,7 +161,7 @@ def _log_event(line: str, fh: Any) -> None:
         for block in ev.get("message", {}).get("content", []):
             if block.get("type") != "tool_result":
                 continue
-            agent = _agent_ids.get(block.get("tool_use_id", ""), "?")
+            agent = _agent_ids.get(block.get("tool_use_id", ""), "TeamLead")
             content = block.get("content", "")
             texts = (
                 [c["text"] for c in content if c.get("type") == "text" and c.get("text")]
