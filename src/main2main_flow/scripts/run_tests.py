@@ -207,11 +207,13 @@ def setup_env(
 
 
 def _setup_mirrors() -> None:
-    """Configure pip mirrors locally."""
-    subprocess.run(
-        ["sh", "-c", "pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"],
-        capture_output=True, text=True,
-    )
+    """Configure git proxy and pip mirrors locally."""
+    cmds = [
+        "git config --global url.https://ghfast.top/https://github.com/.insteadOf https://github.com/",
+        "pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple",
+    ]
+    for cmd in cmds:
+        subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
 
 
 # ---- Shell helpers for remote execution ----
@@ -269,6 +271,7 @@ cd {ap} && git am {pp} || exit 1
     return f'''#!/bin/sh
 set -e
 echo "=== Setup mirrors ==="
+git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
 echo "=== Setup vLLM ==="
@@ -521,7 +524,7 @@ def run_tests(
     suites: list[str] | None = None,
     total_cards: int = 1,
     remote: str | None = None,
-    log_dir: str | Path = "/tmp/main2main",
+    log_dir: str | Path = "",
     remote_log_dir: str | Path | None = None,
     round_number: int = 1,
     dry_run: bool = False,
@@ -534,7 +537,7 @@ def run_tests(
     1. Resolves remote target and ensures container is running
     2. Clones/checkouts repos, applies patch, pip-installs on target
     3. Schedules and executes CI suites
-    4. Writes result JSON to <log_dir>/steps/<id>/tests/round-<round>-result.json
+    4. Writes result JSON to <log_dir>/<id>/tests/round-<round>-result.json
     5. Returns the result dict (includes ``can_commit`` bool and ``ci_result`` str)
 
     Returns:
@@ -587,10 +590,13 @@ def run_tests(
 
     # ---- Step 3: Verify run_suite.py exists ----
     run_suite = ascend_path / ".github" / "workflows" / "scripts" / "run_suite.py"
-    # ci_log_summary always runs locally — use the local checkout, not the
-    # remote ascend_path which may not exist on this machine.
-    _repo_root = Path(__file__).resolve().parents[3]
-    ci_log_summary = _repo_root / ".github" / "workflows" / "scripts" / "ci_log_summary.py"
+    # ci_log_summary always runs locally. In remote mode ascend_path points
+    # to the remote filesystem; use the script's own repo root instead.
+    if remote_host:
+        _repo_root = Path(__file__).resolve().parents[3]
+        ci_log_summary = _repo_root / ".github" / "workflows" / "scripts" / "ci_log_summary.py"
+    else:
+        ci_log_summary = ascend_path / ".github" / "workflows" / "scripts" / "ci_log_summary.py"
 
     if not remote_host and not run_suite.exists():
         print(f"Error: run_suite.py not found: {run_suite}", file=sys.stderr)
@@ -602,7 +608,7 @@ def run_tests(
     env.setdefault("VLLM_USE_MODELSCOPE", "true")
 
     # ---- Step 5: Determine output dirs ----
-    ci_dir = log_dir / "steps" / str(step_id) / "tests"
+    ci_dir = log_dir / str(step_id) / "tests"
     result_path = ci_dir / f"round-{round_number}-result.json"
 
     suite_names = suites or DEFAULT_SUITES
@@ -752,7 +758,7 @@ def run_tests(
 
         # Pull remote logs back to local log_dir
         if remote_host:
-            remote_ci_dir = f"{remote_log_dir}/steps/{step_id}/tests/"
+            remote_ci_dir = f"{remote_log_dir}/{step_id}/tests/"
             print(f"  Pulling remote logs: {remote_host}:{remote_ci_dir} -> {ci_dir}", flush=True)
             scp_result = subprocess.run(
                 ["scp", "-r", "-o", "StrictHostKeyChecking=no",
@@ -839,8 +845,8 @@ def main() -> None:
     parser.add_argument("--suite", action="append",
                         help="run_suite.py suite name. Can be specified multiple times. "
                              "Defaults to e2e-singlecard-light.")
-    parser.add_argument("--log-dir", type=Path, default=Path("/tmp/main2main"),
-                        help="Directory for test logs (local path)")
+    parser.add_argument("--log-dir", type=Path, default=Path("."),
+                        help="Directory for test logs (receives './tests/')")
     parser.add_argument("--total-cards", type=int, default=1,
                         help="Total NPU cards available on the target machine "
                              "(default: 1)")

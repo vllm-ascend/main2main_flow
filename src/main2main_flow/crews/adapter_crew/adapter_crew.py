@@ -120,7 +120,7 @@ class AdapterCrew:
             agents=self.agents,
             tasks=self.tasks,
             process=Process.hierarchical,
-            manager_llm="glm-5.1",
+            manager_llm="deepseek/deepseek-v4-flash",
             verbose=True,
             output_log_file="logs.txt",
         )

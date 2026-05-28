@@ -234,7 +234,7 @@ class Main2MainFlow(Flow[Main2MainState]):
             patch_path=self.state.cur_patch_path or None,
             step_id=step_id,
             round_number=round_n,
-            log_dir=self.state.test_log_dir,
+            log_dir=str(WORKSPACE_DIR / "steps"),
         )
 
         test_passed = result.get("can_commit", False)
