@@ -16,7 +16,6 @@ Algorithm:
 
 Output:
   - <workspace>/steps.json  — machine-readable plan
-  - <workspace>/steps.md    — human-readable summary
   - stdout (from main()): JSON summary
 """
 from __future__ import annotations
@@ -250,35 +249,23 @@ def run_plan(vllm_path: Path, base_commit: str, target_commit: str) -> dict[str,
     Returns the plan dict.
     """
     commits = _list_commits(vllm_path, base_commit, target_commit)
+    stats_per_commit: dict[str, dict[str, Any]] = {}
+    for c in commits:
+        files = _numstat(vllm_path, c["sha"])
+        stats_per_commit[c["sha"]] = _commit_stats(files)
 
-    if not commits:
-        plan: dict[str, Any] = {
-            "base_commit": base_commit,
-            "target_commit": target_commit,
-            "total_commits": 0,
-            "steps": [],
-        }
-    else:
-        stats_per_commit: dict[str, dict[str, Any]] = {}
-        for c in commits:
-            files = _numstat(vllm_path, c["sha"])
-            stats_per_commit[c["sha"]] = _commit_stats(files)
-
-        steps = _plan_steps(commits, stats_per_commit, base_commit)
-        plan = {
-            "base_commit": base_commit,
-            "target_commit": target_commit,
-            "total_commits": len(commits),
-            "steps": steps,
-        }
+    steps = _plan_steps(commits, stats_per_commit, base_commit)
+    plan = {
+        "base_commit": base_commit,
+        "target_commit": target_commit,
+        "total_commits": len(commits),
+        "steps": steps,
+    }
 
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
     (WORKSPACE_DIR / "steps.json").write_text(
         json.dumps(plan, indent=2) + "\n", encoding="utf-8"
-    )
-    (WORKSPACE_DIR / "steps.md").write_text(
-        _render_markdown(plan), encoding="utf-8"
     )
 
     # Clean up step dirs from previous runs
