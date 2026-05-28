@@ -116,7 +116,7 @@ class AdapterCrew:
             agents=self.agents,
             tasks=self.tasks,
             process=Process.hierarchical,
-            manager_llm="claude-sonnet-4-6",
+            manager_llm="glm-5.1",
             verbose=True,
             output_log_file="logs.txt",
         )
