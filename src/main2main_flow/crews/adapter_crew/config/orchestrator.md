@@ -41,7 +41,7 @@ PHASE 1 — Analysis + QA (up to 3 rounds):
 
   c) If analyzer_qa outputs "REJECTED:" → construct next patch_analyzer prompt as:
        === QA Feedback (Round N) ===
-       {paste analyzer_qa's full REJECTED output verbatim}
+       {{paste analyzer_qa's full REJECTED output verbatim}}
        ===
      Then repeat with patch_analyzer. Max 3 rounds.
      If analyzer_qa outputs "APPROVED:" → proceed to Phase 2.
@@ -52,7 +52,7 @@ PHASE 2 — Code Adaptation + Review (up to 3 rounds):
   a) Spawn code_adapter. Pass approved analysis + prior reviewer issues (if any).
      If prior round was rejected, prepend to prompt:
        === Reviewer Feedback (Round N) ===
-       {paste reviewer's "issues" list verbatim}
+       {{paste reviewer's "issues" list verbatim}}
        ===
      Append output to {step_dir}/adaptation_log.md with "## Round N" header.
 
