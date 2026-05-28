@@ -12,13 +12,6 @@ from pydantic import BaseModel
 from crewai.flow import Flow, listen, start, router, or_, and_
 
 from main2main_flow.crews.adapter_crew.adapter_crew import AdapterCrew
-from main2main_flow.scripts.detect_commits import detect, get_repo_head
-from main2main_flow.scripts.plan_steps import run_plan
-from main2main_flow.scripts.push_to_github import push_and_create_pr
-from main2main_flow.utils import (
-    UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded,
-    HasCommit, HasNoCommit, resolve_path, cleanup_temp_dirs
-)
 from main2main_flow.crews.summary_crew.summary_crew import SummaryCrew
 from main2main_flow.scripts.detect_commits import detect
 from main2main_flow.scripts.plan_steps import run_plan
@@ -26,7 +19,10 @@ from main2main_flow.scripts.pre_ci_check import run_check
 from main2main_flow.scripts.push_to_github import push_and_create_pr
 from main2main_flow.scripts.run_tests import run_tests
 from main2main_flow.scripts.update_commit_reference import run_update
-from main2main_flow.utils import UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded, resolve_path, cleanup_temp_dirs
+from main2main_flow.utils import (
+    UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded,
+    HasCommit, HasNoCommit, resolve_path, cleanup_temp_dirs,
+)
 
 _REFERENCE_DIR = str(Path(__file__).parent / "reference")
 
@@ -92,7 +88,7 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         if not self.state.has_commit:
             print("[analyze] 已同步，无需适配。")
-            return
+            return HasNoCommit
 
         plan = run_plan(vllm_path, result["base_commit"], result["target_commit"])
         self.state.steps = plan["steps"]
@@ -100,9 +96,7 @@ class Main2MainFlow(Flow[Main2MainState]):
               f"共 {plan['total_commits']} 个 commit。")
         print("===========================================")
         print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
-        if self.state.has_commit:
-            return HasCommit
-        return HasNoCommit
+        return HasCommit
 
     @listen(HasNoCommit)
     def has_no_commit(self):
