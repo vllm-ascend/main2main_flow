@@ -25,22 +25,27 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
     prompt = _build_prompt(inputs)
     adapter_crew_dir = Path(__file__).parent
 
-    result = subprocess.run(
+    proc = subprocess.Popen(
         [
             "opencode", "run",
             "--format", "json",
             "--dangerously-skip-permissions",
             prompt,
         ],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=None,   # stderr goes directly to terminal
         text=True,
         cwd=str(adapter_crew_dir),
     )
 
-    if result.returncode != 0:
-        print(f"[opencode] stderr: {result.stderr[-2000:]}")
+    lines: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        lines.append(line)
+    proc.wait()
 
-    return _parse_result(result.stdout)
+    return _parse_result("".join(lines))
 
 
 def _build_prompt(inputs: dict[str, Any]) -> str:
