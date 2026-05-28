@@ -8,13 +8,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-_CONFIG_DIR = Path(__file__).parent / "config"
+_PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
 # ── prompt loader ─────────────────────────────────────────────────────────────
 
 def _orchestrator_prompt(inputs: dict[str, Any]) -> str:
-    template = (_CONFIG_DIR / "prompt.md").read_text(encoding="utf-8")
+    template = _PROMPT_PATH.read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
     return template.format_map(ctx)
 
