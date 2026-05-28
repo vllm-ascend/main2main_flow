@@ -31,6 +31,7 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
     proc = subprocess.Popen(
         [
             "opencode", "run",
+            "--format", "json",
             "--dangerously-skip-permissions",
             prompt,
         ],
@@ -41,14 +42,70 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
         cwd=str(adapter_crew_dir),
     )
 
-    chunks: list[str] = []
+    lines: list[str] = []
     assert proc.stdout is not None
     for line in proc.stdout:
-        print(line, end="", flush=True)
-        chunks.append(line)
+        lines.append(line)
+        _print_event(line)
     proc.wait()
 
-    return _parse_result("".join(chunks))
+    return _parse_result("".join(lines))
+
+
+def _print_event(line: str) -> None:
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        return
+
+    t = ev.get("type")
+
+    if t == "text":
+        text = ev.get("text", "")
+        if text:
+            print(text, end="", flush=True)
+
+    elif t == "tool_use":
+        part = ev.get("part", {})
+        tool = part.get("tool", "")
+        state = part.get("state", {})
+        status = state.get("status", "")
+
+        if tool == "task":
+            # subagent invocation
+            if status == "running":
+                inp = state.get("input", {})
+                agent = inp.get("subagent_type", "?") if isinstance(inp, dict) else "?"
+                print(f"\n{'━'*60}", flush=True)
+                print(f"▶ subagent [{agent}] starting", flush=True)
+                print(f"{'━'*60}", flush=True)
+            elif status == "completed":
+                out = state.get("output", "")
+                inp = state.get("input", {})
+                agent = inp.get("subagent_type", "?") if isinstance(inp, dict) else "?"
+                print(f"\n{'─'*60}", flush=True)
+                print(f"◀ subagent [{agent}] output:", flush=True)
+                print(out, flush=True)
+                print(f"{'─'*60}\n", flush=True)
+            elif status == "error":
+                inp = state.get("input", {})
+                agent = inp.get("subagent_type", "?") if isinstance(inp, dict) else "?"
+                print(f"\n✗ subagent [{agent}] error: {state.get('output', '')}", flush=True)
+        else:
+            # regular tool call
+            if status == "running":
+                inp = state.get("input", "")
+                if isinstance(inp, dict):
+                    inp = json.dumps(inp, ensure_ascii=False)
+                print(f"\n[{tool}] ← {str(inp)[:200]}", flush=True)
+            elif status == "completed":
+                out = str(state.get("output", ""))
+                print(f"[{tool}] → {out[:300]}", flush=True)
+            elif status == "error":
+                print(f"[{tool}] ✗ {str(state.get('output', ''))[:300]}", flush=True)
+
+    elif t == "error":
+        print(f"\n[opencode error] {ev.get('message', '')}", flush=True)
 
 
 def _build_prompt(inputs: dict[str, Any]) -> str:
@@ -152,9 +209,28 @@ Return the code_reviewer's final JSON block verbatim as your answer:
 """
 
 
-def _parse_result(output: str) -> AdaptResult:
-    # Extract the last JSON block from the output
-    matches = re.findall(r"```json\s*(.*?)\s*```", output, re.DOTALL)
+def _parse_result(jsonl: str) -> AdaptResult:
+    # Collect all text and subagent task outputs from JSONL events
+    text_parts: list[str] = []
+    for line in jsonl.strip().splitlines():
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        t = ev.get("type")
+        if t == "text":
+            text_parts.append(ev.get("text", ""))
+        elif t == "tool_use":
+            part = ev.get("part", {})
+            if part.get("tool") == "task":
+                state = part.get("state", {})
+                if state.get("status") == "completed":
+                    text_parts.append(state.get("output", ""))
+
+    full_text = "\n".join(text_parts)
+
+    # Extract the last JSON block
+    matches = re.findall(r"```json\s*(.*?)\s*```", full_text, re.DOTALL)
     if matches:
         try:
             data = json.loads(matches[-1])
@@ -162,5 +238,4 @@ def _parse_result(output: str) -> AdaptResult:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Fallback: return summary with raw text tail
-    return AdaptResult(step_summary=output[-4000:] if output else "")
+    return AdaptResult(step_summary=full_text[-4000:] if full_text else "")
