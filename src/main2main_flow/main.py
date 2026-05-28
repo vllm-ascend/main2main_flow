@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 import argparse
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -8,12 +11,17 @@ from pydantic import BaseModel
 
 from crewai.flow import Flow, listen, start, router, or_, and_
 
-from main2main_flow.scripts.detect_commits import detect, get_repo_head
-from main2main_flow.scripts.plan_steps import run_plan
-from main2main_flow.scripts.push_to_github import push_and_create_pr
-from main2main_flow.utils import UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded, resolve_path, cleanup_temp_dirs
+from main2main_flow.crews.adapter_crew.adapter_crew import AdapterCrew
 from main2main_flow.crews.summary_crew.summary_crew import SummaryCrew
+from main2main_flow.scripts.detect_commits import detect
+from main2main_flow.scripts.plan_steps import run_plan
+from main2main_flow.scripts.pre_ci_check import run_check
+from main2main_flow.scripts.push_to_github import push_and_create_pr
 from main2main_flow.scripts.run_tests import run_tests
+from main2main_flow.scripts.update_commit_reference import run_update
+from main2main_flow.utils import UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded, resolve_path, cleanup_temp_dirs
+
+_REFERENCE_DIR = str(Path(__file__).parent / "reference")
 
 
 class Main2MainState(BaseModel):
@@ -21,21 +29,24 @@ class Main2MainState(BaseModel):
     vllm_path: str = "/vllm-workspace/vllm"
     vllm_ascend_path: str = "/vllm-workspace/vllm-ascend"
     test_log_dir: str = "/vllm-workspace/test-logs"
-    
-    # Step 1 输出：后续 step 需要读取
-    has_drift: bool = False        # vllm 上游是否有未同步的 commit
-    steps: list = []              # 规划好的 adaptation 步骤列表
+    target_commit: str = ""
 
-    # 流程计数，原来放在 self.xxx 实例属性上
+    # Step 1 输出：后续 step 需要读取
+    has_drift: bool = False
+    steps: list = []
+    release_tag: str = ""         # main_vllm_tag from conf.py，用于 vllm_version_is() 校验
+
+    # 流程计数
     current_step: int = 0
     retry_count: int = 0
-    
+
     # Step 2.4: 测试验证
     cur_vllm_commit: str = ""
     cur_ascend_commit: str = ""
     cur_patch_path: str = ""
-    
-    retry_count: int = 0
+
+    # e2e CI 失败时由 run_e2e_test 写入，ai_analysis 读取后进入修复模式
+    test_errors: list = []
 
 
 class Main2MainFlow(Flow[Main2MainState]):
@@ -46,12 +57,8 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @start()
     def initialize(self):
-        raw_vllm = (
-            self.state.vllm_path or os.getenv("VLLM_PATH")
-        )
-        raw_ascend = (
-            self.state.vllm_ascend_path or os.getenv("VLLM_ASCEND_PATH")
-        )
+        raw_vllm = self.state.vllm_path or os.getenv("VLLM_PATH")
+        raw_ascend = self.state.vllm_ascend_path or os.getenv("VLLM_ASCEND_PATH")
         self.state.vllm_path = resolve_path(raw_vllm, "vllm", self._temp_dirs)
         self.state.vllm_ascend_path = resolve_path(raw_ascend, "vllm-ascend", self._temp_dirs)
         self.state.target_commit = (
@@ -63,10 +70,10 @@ class Main2MainFlow(Flow[Main2MainState]):
         vllm_path = Path(self.state.vllm_path)
         vllm_ascend_path = Path(self.state.vllm_ascend_path)
 
-        # 1. 检测漂移：ascend 固定的 base_commit vs 目标 commit（默认 vllm HEAD）
         result = detect(vllm_path, vllm_ascend_path,
                         target_commit=self.state.target_commit or None)
         self.state.has_drift = result["has_drift"]
+        self.state.release_tag = result.get("compat_tag") or ""
         print(f"[analyze] base={result['base_commit'][:8]}  "
               f"target={result['target_commit'][:8]}  "
               f"has_drift={self.state.has_drift}")
@@ -75,13 +82,11 @@ class Main2MainFlow(Flow[Main2MainState]):
             print("[analyze] 已同步，无需适配。")
             return
 
-        # 2. 规划 adaptation 步骤
         plan = run_plan(vllm_path, result["base_commit"], result["target_commit"])
         self.state.steps = plan["steps"]
         print(f"[analyze] 规划了 {len(self.state.steps)} 个步骤，"
               f"共 {plan['total_commits']} 个 commit。")
         print("===========================================")
-        import json
         print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
 
     @router(analyze_commit_and_plan_step)
@@ -96,15 +101,104 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @listen(or_("HAS_DRIFT", StepCompleted, StepRetryNeeded))
     def ai_analysis(self):
-        # 逢春
-        # Call Agent
-        print("commit_adapt")
-        return "ADAPT_OK"
+        step = self.state.steps[self.state.current_step]
+        step_id = step["id"]
+        step_dir = Path(f"/tmp/main2main/steps/{step_id}")
+        step_dir.mkdir(parents=True, exist_ok=True)
+
+        vllm_path = self.state.vllm_path
+        ascend_path = self.state.vllm_ascend_path
+
+        # 1. checkout vllm 到本轮目标 commit
+        subprocess.run(
+            ["git", "-C", vllm_path, "checkout", step["end_commit"]],
+            check=True,
+        )
+        print(f"[ai_analysis] {step_id}: vllm checked out to {step['end_commit'][:8]}")
+
+        # 2. 生成本轮 upstream patch
+        patch_path = step_dir / "upstream.patch"
+        changed_files_path = step_dir / "changed-files.txt"
+        with open(patch_path, "w") as f:
+            subprocess.run(
+                ["git", "-C", vllm_path, "diff",
+                 f"{step['start_commit']}..{step['end_commit']}"],
+                stdout=f, check=True,
+            )
+        with open(changed_files_path, "w") as f:
+            subprocess.run(
+                ["git", "-C", vllm_path, "diff", "--name-only",
+                 f"{step['start_commit']}..{step['end_commit']}"],
+                stdout=f, check=True,
+            )
+
+        # 3. 更新所有 tracked 文件里的 vllm commit 引用（retry 时跳过）
+        try:
+            ref_result = run_update(
+                ascend_path=Path(ascend_path),
+                old_commit=step["start_commit"],
+                new_commit=step["end_commit"],
+            )
+            print(f"[ai_analysis] {step_id}: updated commit ref in "
+                  f"{len(ref_result['files_updated'])} file(s): "
+                  f"{ref_result['files_updated']}")
+        except ValueError:
+            print(f"[ai_analysis] {step_id}: commit ref already updated, skipping")
+
+        # 4. AI 适配 + pre_ci 校验循环
+        # error_logs 统一为日志文件路径列表，来源不区分（pre_ci 或 e2e CI）
+        error_logs: list[str] = list(self.state.test_errors)
+        adapt_result = None
+
+        for attempt in range(1, 4):
+            mode = "fix" if error_logs else "adapt"
+            print(f"[ai_analysis] {step_id}: crew attempt {attempt}, mode={mode}")
+            crew_result = AdapterCrew().crew().kickoff(inputs={
+                "step_id": step_id,
+                "patch_path": str(patch_path),
+                "changed_files_path": str(changed_files_path),
+                "ascend_path": ascend_path,
+                "release_tag": self.state.release_tag,
+                "vllm_path": vllm_path,
+                "reference_dir": _REFERENCE_DIR,
+                "mode": mode,
+                "error_logs": json.dumps(error_logs, ensure_ascii=False),
+            })
+            adapt_result = crew_result.pydantic
+
+            check_result = run_check(ascend_path, self.state.release_tag)
+            log_path = step_dir / f"pre_ci_check-round-{attempt}.json"
+            log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
+
+            if check_result["all_passed"]:
+                print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
+                break
+            error_logs = [str(log_path)]
+            print(f"[ai_analysis] {step_id}: pre_ci failed → {log_path}")
+
+        self.state.test_errors = []
+
+        # 5. 输出两个文件：本轮总结 + 全量累积 patch
+        summary = adapt_result.step_summary if adapt_result else ""
+        (step_dir / "summary.md").write_text(summary, encoding="utf-8")
+
+        adaptation_patch = subprocess.run(
+            ["git", "-C", ascend_path, "diff", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        (step_dir / "adaptation.patch").write_text(adaptation_patch, encoding="utf-8")
+
+        print(f"[ai_analysis] {step_id}: done, "
+              f"is_noop={getattr(adapt_result, 'is_noop', False)}, "
+              f"modified={getattr(adapt_result, 'modified_files', [])}")
+        return crew_result.raw
 
     @router(ai_analysis)
     def run_e2e_test(self) -> Literal["StepCompleted", "UpgradeCompleted", "UpgradeFailed", "StepRetryNeeded"]:
-        step_id = self.state.steps[self.state.current_step]
-        print(f"run_e2e_test: {step_id}")
+        step = self.state.steps[self.state.current_step]
+        step_id = step["id"]
+        round_n = self.state.retry_count + 1
+        print(f"run_e2e_test: {step_id} round={round_n}")
 
         result = run_tests(
             vllm_path=self.state.vllm_path,
@@ -116,10 +210,12 @@ class Main2MainFlow(Flow[Main2MainState]):
             workspace=self.state.test_log_dir,
         )
 
-        test_result = result.get("can_commit", False)
-        print(f"test_result={test_result}, ci_result={result.get('ci_result')}")
+        test_passed = result.get("can_commit", False)
+        summary_log = f"/tmp/main2main/steps/{step_id}/ci/round-{round_n}-summary.json"
+        print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
 
-        if test_result:
+        if test_passed:
+            self.state.retry_count = 0
             self.state.current_step += 1
             if self.state.current_step >= len(self.state.steps):
                 return UpgradeCompleted
@@ -127,8 +223,10 @@ class Main2MainFlow(Flow[Main2MainState]):
                 return StepCompleted
         else:
             self.state.retry_count += 1
+            self.state.test_errors = [summary_log]
             if self.state.retry_count >= 3:
                 self.state.retry_count = 0
+                self.state.test_errors = []
                 return UpgradeFailed
             else:
                 return StepRetryNeeded
@@ -140,12 +238,10 @@ class Main2MainFlow(Flow[Main2MainState]):
         result = (
             SummaryCrew()
             .crew()
-            .kickoff(
-                inputs={
-                    "ci_results_dir": ci_results_dir,
-                    "steps_dir": steps_dir,
-                }
-            )
+            .kickoff(inputs={
+                "ci_results_dir": ci_results_dir,
+                "steps_dir": steps_dir,
+            })
         )
         return result
 
@@ -163,18 +259,12 @@ class Main2MainFlow(Flow[Main2MainState]):
 
 def kickoff():
     parser = argparse.ArgumentParser(description="Run Main2Main Flow")
-    parser.add_argument(
-        "--vllm-path", default=None,
-        help="Local path or GitHub URL for the vllm repo",
-    )
-    parser.add_argument(
-        "--vllm-ascend-path", default=None,
-        help="Local path or GitHub URL for the vllm-ascend repo",
-    )
-    parser.add_argument(
-        "--target-commit", default=None,
-        help="Target vllm commit SHA to upgrade to (default: vllm HEAD)",
-    )
+    parser.add_argument("--vllm-path", default=None,
+                        help="Local path or GitHub URL for the vllm repo")
+    parser.add_argument("--vllm-ascend-path", default=None,
+                        help="Local path or GitHub URL for the vllm-ascend repo")
+    parser.add_argument("--target-commit", default=None,
+                        help="Target vllm commit SHA to upgrade to (default: vllm HEAD)")
     args = parser.parse_args()
 
     inputs = {}
@@ -202,26 +292,17 @@ def plot():
         shutil.copy2(f, output_dir / f.name)
     print(f"Flow plot saved to: {output_dir / tmp_html.name}")
 
-def run_with_trigger():
-    """
-    Run the flow with trigger payload.
-    """
-    import json
-    import sys
 
-    # Get trigger payload from command line argument
+def run_with_trigger():
+    """Run the flow with a JSON trigger payload passed as a CLI argument."""
     if len(sys.argv) < 2:
         raise Exception("No trigger payload provided. Please provide JSON payload as argument.")
-
     try:
         trigger_payload = json.loads(sys.argv[1])
     except json.JSONDecodeError:
         raise Exception("Invalid JSON payload provided as argument")
 
-    # Create flow and kickoff with trigger payload
-    # The @start() methods will automatically receive crewai_trigger_payload parameter
     flow = Main2MainFlow()
-
     try:
         result = flow.kickoff({"crewai_trigger_payload": trigger_payload})
         return result
