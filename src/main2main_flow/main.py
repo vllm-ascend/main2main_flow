@@ -83,15 +83,13 @@ class Main2MainFlow(Flow[Main2MainState]):
         vllm_path = Path(self.state.vllm_path)
         vllm_ascend_path = Path(self.state.vllm_ascend_path)
 
-        result = detect(vllm_path, vllm_ascend_path,
+        result, has_commit = detect(vllm_path, vllm_ascend_path,
                         target_commit=self.state.target_commit or None)
         self.state.release_tag = result.get("compat_tag") or ""
-        self.state.has_commit = result["has_commit"]
         print(f"[analyze] base={result['base_commit'][:8]}  "
-              f"target={result['target_commit'][:8]}  "
-              f"has_commit={self.state.has_commit}")
+              f"target={result['target_commit'][:8]}")
 
-        if not self.state.has_commit:
+        if not has_commit:
             print("[analyze] 已同步，无需适配。")
             return HasNoCommit
 

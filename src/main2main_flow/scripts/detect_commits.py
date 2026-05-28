@@ -77,7 +77,6 @@ def detect(
         "base_commit": conf["base_commit"],
         "target_commit": target,
         "compat_tag": conf["compat_tag"],
-        "has_commit": conf["base_commit"] != target,
     }
 
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -86,7 +85,7 @@ def detect(
         json.dumps(result, indent=2) + "\n", encoding="utf-8"
     )
 
-    return result
+    return result, conf["base_commit"] != target
 
 
 def main() -> None:
