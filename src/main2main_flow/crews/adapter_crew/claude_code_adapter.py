@@ -52,6 +52,7 @@ def run_claude_code_adapter(inputs: dict[str, Any]) -> AdaptResult:
             "claude",
             "-p", prompt,
             "--output-format", "stream-json",
+            "--verbose",
             "--dangerously-skip-permissions",
         ],
         stdout=subprocess.PIPE,
@@ -175,72 +176,92 @@ ARCHIVE DIRECTORY: {step_dir}
 TASK CONTEXT:
 {task_context}
 
-YOUR WORKFLOW — use the Agent tool to spawn subagents in sequence:
+━━━ YOUR TEAM ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━ PHASE 1: Analysis + QA (up to 3 rounds) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You have 4 specialist subagents. Spawn each via the Agent tool with
+subagent_type="claude" and the prompt described below.
 
-For each round (max 3):
-  a) Spawn Agent with subagent_type="claude", prompt=
-     ---
-     {analyzer_prompt}
+┌─ patch_analyzer ──────────────────────────────────────────────────────────┐
+│ Role: Senior systems engineer specializing in vLLM plugin/adapter codebases│
+│ Job:  Read the upstream patch and reference guides, determine which        │
+│       vllm-ascend files need to change and exactly what must change.       │
+│ Does NOT modify any files.                                                 │
+│ System prompt:                                                             │
+│ {analyzer_prompt}
+└───────────────────────────────────────────────────────────────────────────┘
 
-     INPUTS: {task_context}
-     ascend_path: {ascend_path}
-     Prior QA feedback (if any): <insert rejection from previous round>
-     ---
-     Save output to {step_dir}/analysis.md (append with "## Round N" header).
+┌─ analyzer_qa ─────────────────────────────────────────────────────────────┐
+│ Role: Senior QA engineer who catches analysis mistakes before coding starts│
+│ Job:  Cross-check patch_analyzer's output against the actual patch and     │
+│       vllm-ascend source. Returns APPROVED or REJECTED with specifics.     │
+│ Does NOT modify any files.                                                 │
+│ System prompt:                                                             │
+│ {qa_prompt}
+└───────────────────────────────────────────────────────────────────────────┘
 
-  b) Spawn Agent with subagent_type="claude", prompt=
-     ---
-     {qa_prompt}
+┌─ code_adapter ────────────────────────────────────────────────────────────┐
+│ Role: Expert hardware plugin developer for ML inference frameworks         │
+│ Job:  Apply targeted code changes to vllm-ascend based on the approved     │
+│       analysis. Strict guardrails: only edits vllm-ascend, uses            │
+│       vllm_version_is() for version guards, never git add .                │
+│ System prompt:                                                             │
+│ {adapter_prompt}
+└───────────────────────────────────────────────────────────────────────────┘
 
-     INPUTS:
-     patch_analyzer output: <insert output from step a>
-     patch_path: {patch_path}
-     changed_files_path: {changed_files_path}
-     reference_dir: {reference_dir}
-     ---
-     Save output to {step_dir}/analysis_qa.md (append with "## Round N" header).
+┌─ code_reviewer ───────────────────────────────────────────────────────────┐
+│ Role: Principal engineer reviewing hardware adaptation PRs                 │
+│ Job:  Verify every change is correct, complete, and safe. Catches missed   │
+│       call sites, wrong signatures, bad version guards. Returns a final    │
+│       JSON block with modified_files, is_noop, step_summary.              │
+│ Does NOT modify any files.                                                 │
+│ System prompt:                                                             │
+│ {reviewer_prompt}
+└───────────────────────────────────────────────────────────────────────────┘
 
-  c) If REJECTED → loop back to a) with the rejection feedback.
-     If APPROVED or max rounds reached → proceed to Phase 2.
+━━━ WORKFLOW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━ PHASE 2: Code Adaptation + Review (up to 3 rounds) ━━━━━━━━━━━━━━━━━━━━━
+PHASE 1 — Analysis + QA (up to 3 rounds):
 
-For each round (max 3):
-  a) Spawn Agent with subagent_type="claude", prompt=
-     ---
-     {adapter_prompt}
+  Round loop:
+  a) Spawn patch_analyzer. Pass:
+       - The full TASK CONTEXT above
+       - ascend_path: {ascend_path}
+       - Prior QA rejection feedback (if any)
+     Append output to {step_dir}/analysis.md with "## Round N" header.
 
-     INPUTS:
-     Analysis: <insert approved patch_analyzer output>
-     ascend_path: {ascend_path}
-     patch_path: {patch_path}
-     release_tag: {release_tag}
-     reference_dir: {reference_dir}
-     Prior reviewer feedback (if any): <insert from previous round>
-     ---
-     Save output to {step_dir}/adaptation_log.md (append with "## Round N" header).
+  b) Spawn analyzer_qa. Pass:
+       - patch_analyzer's full output
+       - patch_path: {patch_path}
+       - changed_files_path: {changed_files_path}
+       - reference_dir: {reference_dir}
+     Append output to {step_dir}/analysis_qa.md with "## Round N" header.
 
-  b) Spawn Agent with subagent_type="claude", prompt=
-     ---
-     {reviewer_prompt}
+  c) REJECTED → feed rejection back to patch_analyzer, repeat (max 3).
+     APPROVED → proceed to Phase 2.
 
-     INPUTS:
-     Analysis plan: <insert patch_analyzer output>
-     Code changes: <insert code_adapter output>
-     ascend_path: {ascend_path}
-     release_tag: {release_tag}
-     reference_dir: {reference_dir}
-     ---
-     Save output to {step_dir}/review.md (append with "## Round N" header).
+PHASE 2 — Code Adaptation + Review (up to 3 rounds):
 
-  c) If reviewer finds issues → loop back to a) with feedback.
-     If APPROVED or max rounds reached → output final JSON.
+  Round loop:
+  a) Spawn code_adapter. Pass:
+       - Approved patch_analyzer output
+       - ascend_path: {ascend_path}, patch_path: {patch_path}
+       - release_tag: {release_tag}, reference_dir: {reference_dir}
+       - Prior reviewer feedback (if any)
+     Append output to {step_dir}/adaptation_log.md with "## Round N" header.
 
-━━━ FINAL OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  b) Spawn code_reviewer. Pass:
+       - patch_analyzer's approved plan
+       - code_adapter's full output
+       - ascend_path: {ascend_path}, release_tag: {release_tag}
+       - reference_dir: {reference_dir}
+     Append output to {step_dir}/review.md with "## Round N" header.
 
-Return the code_reviewer's JSON block verbatim:
+  c) Issues found → feed back to code_adapter, repeat (max 3).
+     APPROVED → output final result.
+
+━━━ FINAL OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return the code_reviewer's final JSON block verbatim as your answer:
 ```json
 {{
   "modified_files": ["vllm_ascend/foo.py"],
