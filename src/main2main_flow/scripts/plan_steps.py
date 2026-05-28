@@ -15,8 +15,8 @@ Algorithm:
   6. A single commit with vllm_changed_lines > LINE_BUDGET becomes its own step
 
 Output:
-  - /tmp/main2main/steps.json  — machine-readable plan
-  - /tmp/main2main/steps.md    — human-readable summary
+  - <workspace>/steps.json  — machine-readable plan
+  - <workspace>/steps.md    — human-readable summary
   - stdout (from main()): JSON summary
 """
 from __future__ import annotations
@@ -28,6 +28,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from main2main_flow.utils import WORKSPACE_DIR
 
 LINE_BUDGET = 1000
 BASE_LINE_BUDGET = 1000
@@ -242,7 +244,7 @@ def _render_markdown(plan: dict[str, Any]) -> str:
 
 
 def run_plan(vllm_path: Path, base_commit: str, target_commit: str) -> dict[str, Any]:
-    """Build the step plan and write output files to /tmp/main2main/.
+    """Build the step plan and write output files to <workspace>/.
 
     Returns the plan dict.
     """
@@ -269,18 +271,17 @@ def run_plan(vllm_path: Path, base_commit: str, target_commit: str) -> dict[str,
             "steps": steps,
         }
 
-    output_dir = Path("/tmp/main2main")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
-    (output_dir / "steps.json").write_text(
+    (WORKSPACE_DIR / "steps.json").write_text(
         json.dumps(plan, indent=2) + "\n", encoding="utf-8"
     )
-    (output_dir / "steps.md").write_text(
+    (WORKSPACE_DIR / "steps.md").write_text(
         _render_markdown(plan), encoding="utf-8"
     )
 
     for step in plan["steps"]:
-        step_dir = output_dir / "steps" / step["id"]
+        step_dir = WORKSPACE_DIR / "steps" / step["id"]
         step_dir.mkdir(parents=True, exist_ok=True)
         (step_dir / "ci").mkdir(exist_ok=True)
 
