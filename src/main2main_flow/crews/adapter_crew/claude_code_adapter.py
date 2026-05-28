@@ -1,7 +1,7 @@
-"""Claude Code team adapter — spawns team lead via `claude -p` subprocess.
+"""OpenCode team adapter — spawns team lead via `opencode run` subprocess.
 
 The team lead uses TeamCreate + Agent tools to build a team of 4 specialists.
-All stream-json events are printed to console and logged to step_dir.
+All JSON events are printed to console and logged to step_dir.
 """
 from __future__ import annotations
 
@@ -56,11 +56,10 @@ def run_claude_code_adapter(inputs: dict[str, Any]) -> AdaptResult:
 
     proc = subprocess.Popen(
         [
-            "claude",
-            "-p", prompt,
-            "--output-format", "stream-json",
-            "--verbose",
+            "opencode", "run",
+            "--format", "json",
             "--dangerously-skip-permissions",
+            prompt,
         ],
         stdout=subprocess.PIPE,
         stderr=None,
