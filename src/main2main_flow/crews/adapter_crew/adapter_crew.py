@@ -122,5 +122,5 @@ class AdapterCrew:
             process=Process.hierarchical,
             manager_llm="deepseek/deepseek-v4-flash",
             verbose=True,
-            output_log_file="logs.txt",
+            output_log_file=True,
         )

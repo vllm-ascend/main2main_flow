@@ -1,0 +1,70 @@
+diff --git a/.github/workflows/dockerfiles/Dockerfile.lint b/.github/workflows/dockerfiles/Dockerfile.lint
+index ea13bc9..5e093d1 100644
+--- a/.github/workflows/dockerfiles/Dockerfile.lint
++++ b/.github/workflows/dockerfiles/Dockerfile.lint
+@@ -27,7 +27,7 @@ RUN apt-get update -y && \
+ 
+ ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ # For lint purpose, actually we need make a main2main matching.
+-ARG VLLM_COMMIT=1ac10f159a09897baada01b14b6a0dd6442aefd6
++ARG VLLM_COMMIT=f5d3dc7115cf77472ba5e274f6becbbeddbf4bd5
+ RUN git init /vllm-workspace/vllm && \
+     git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO $VLLM_COMMIT && \
+     git -C /vllm-workspace/vllm checkout FETCH_HEAD
+diff --git a/.github/workflows/pr_test_full.yaml b/.github/workflows/pr_test_full.yaml
+index b0afbbd..da31e8e 100644
+--- a/.github/workflows/pr_test_full.yaml
++++ b/.github/workflows/pr_test_full.yaml
+@@ -80,7 +80,7 @@ jobs:
+     name: e2e-full
+     strategy:
+       matrix:
+-        vllm_version: [1ac10f159a09897baada01b14b6a0dd6442aefd6, v0.20.2]
++        vllm_version: [f5d3dc7115cf77472ba5e274f6becbbeddbf4bd5, v0.20.2]
+     needs: [changes]
+     if: ${{ needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.e2e_tracker == true }}
+     uses: ./.github/workflows/_e2e_test.yaml
+diff --git a/.github/workflows/pr_test_light.yaml b/.github/workflows/pr_test_light.yaml
+index 177d51c..5f74e09 100644
+--- a/.github/workflows/pr_test_light.yaml
++++ b/.github/workflows/pr_test_light.yaml
+@@ -41,7 +41,7 @@ jobs:
+   lint:
+     uses: ./.github/workflows/_pre_commit.yml
+     with:
+-      vllm: 1ac10f159a09897baada01b14b6a0dd6442aefd6
++      vllm: f5d3dc7115cf77472ba5e274f6becbbeddbf4bd5
+   changes:
+     runs-on: linux-aarch64-a2b3-0
+     container:
+@@ -157,7 +157,7 @@ jobs:
+     if: ${{ needs.lint.result == 'success' && needs.changes.outputs.has_tests == 'true' }}
+     strategy:
+       matrix:
+-        vllm_version: [1ac10f159a09897baada01b14b6a0dd6442aefd6, v0.20.2]
++        vllm_version: [f5d3dc7115cf77472ba5e274f6becbbeddbf4bd5, v0.20.2]
+     uses: ./.github/workflows/_optional_smart_e2e.yaml
+     with:
+       vllm: ${{ matrix.vllm_version }}
+@@ -167,7 +167,7 @@ jobs:
+     name: e2e-light
+     strategy:
+       matrix:
+-        vllm_version: [1ac10f159a09897baada01b14b6a0dd6442aefd6, v0.20.2]
++        vllm_version: [f5d3dc7115cf77472ba5e274f6becbbeddbf4bd5, v0.20.2]
+     # Note (yikun): If CI resource are limited we can split job into two chain jobs
+     needs: [lint, changes]
+     # only trigger e2e test after lint passed and the change is e2e related with pull request.
+diff --git a/docs/source/conf.py b/docs/source/conf.py
+index fd040c1..4fbec26 100644
+--- a/docs/source/conf.py
++++ b/docs/source/conf.py
+@@ -81,7 +81,7 @@ myst_substitutions = {
+     # CANN image tag
+     "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
+     # vLLM commit hash for main branch
+-    "main_vllm_commit": "1ac10f159a09897baada01b14b6a0dd6442aefd6",
++    "main_vllm_commit": "f5d3dc7115cf77472ba5e274f6becbbeddbf4bd5",
+     # vLLM tag for main branch
+     "main_vllm_tag": "v0.20.2",
+     # Python version for main branch
