@@ -1,0 +1,4099 @@
+{
+  "base_commit": "1ac10f159a09897baada01b14b6a0dd6442aefd6",
+  "target_commit": "33e94fc3adcb888a8c6d62285f70bc78fb068ec7",
+  "total_commits": 285,
+  "steps": [
+    {
+      "index": 1,
+      "id": "step-1",
+      "commits": [
+        {
+          "sha": "f5d3dc7115cf77472ba5e274f6becbbeddbf4bd5",
+          "subject": "[Model Runner v2] Support update_config (#42783)"
+        },
+        {
+          "sha": "78e7a7b9b0b9c285bf6978c3fc09eeecea3ff230",
+          "subject": "Refactor AWQ Marlin MoE onto modular WNA16 oracle (#42483)"
+        }
+      ],
+      "commit_count": 2,
+      "start_commit": "1ac10f159a09897baada01b14b6a0dd6442aefd6",
+      "end_commit": "78e7a7b9b0b9c285bf6978c3fc09eeecea3ff230",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 530,
+      "total_changed_lines": 622,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/kernels/moe/test_moe.py",
+        "vllm/model_executor/layers/fused_moe/config.py",
+        "vllm/model_executor/layers/fused_moe/experts/marlin_moe.py",
+        "vllm/model_executor/layers/fused_moe/oracle/int_wna16.py",
+        "vllm/model_executor/layers/quantization/auto_gptq.py",
+        "vllm/model_executor/layers/quantization/awq_marlin.py",
+        "vllm/v1/worker/gpu/model_runner.py"
+      ]
+    },
+    {
+      "index": 2,
+      "id": "step-2",
+      "commits": [
+        {
+          "sha": "4a39b4f55374d48ebaa2ca02312e24639db8e0b8",
+          "subject": "[Model] Add Apertus Tool Parser (#41154)"
+        },
+        {
+          "sha": "47829b1159335a010521ea3e5361d51744a36b0a",
+          "subject": "[Bugfix] mamba: run single-token extends as decodes (#42430)"
+        },
+        {
+          "sha": "e26736973a1981dbb4054dc1ac430e78d8006ef2",
+          "subject": "[Model Runner V2] Fix prompt logprobs calculation `Sizes of tensors must match` error (#42778)"
+        },
+        {
+          "sha": "b12745e4f31ffacf401cc20a97c592d6a49f3269",
+          "subject": "Fix `--convert` passed without `--runner` on causal models (#42935)"
+        },
+        {
+          "sha": "8c296de63b47664fc5979831e1ae2d2a14a05b1a",
+          "subject": "[Perf] Re-enable flashinfer autotune by default and cleanup (#42857)"
+        },
+        {
+          "sha": "67f58ce23f469e118688a50687ef0fbb14a1c028",
+          "subject": "[Bugfix] Fix DSV4 MTP after ROCm mHC integration (#42930)"
+        },
+        {
+          "sha": "6859ca76159fdd403b687c0c296e5a12850ba24e",
+          "subject": "[Bugfix] fix swiglu limit issue for humming backend + deepseek v4 (#42541)"
+        }
+      ],
+      "commit_count": 7,
+      "start_commit": "78e7a7b9b0b9c285bf6978c3fc09eeecea3ff230",
+      "end_commit": "6859ca76159fdd403b687c0c296e5a12850ba24e",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 860,
+      "total_changed_lines": 1807,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/features/tool_calling.md",
+        "examples/tool_chat_template_apertus.jinja",
+        "tests/tool_parsers/test_apertus_tool_parser.py",
+        "tests/v1/attention/test_mamba_update_block_table.py",
+        "tests/v1/attention/utils.py",
+        "tests/v1/kv_connector/unit/test_nixl_connector_hma.py",
+        "vllm/config/model.py",
+        "vllm/config/vllm.py",
+        "vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/trtllm_mxfp4_moe.py",
+        "vllm/model_executor/layers/fused_moe/oracle/mxfp4.py",
+        "vllm/model_executor/layers/quantization/utils/humming_utils.py",
+        "vllm/model_executor/models/deepseek_v4.py",
+        "vllm/model_executor/models/deepseek_v4_mtp.py",
+        "vllm/model_executor/warmup/kernel_warmup.py",
+        "vllm/tool_parsers/__init__.py",
+        "vllm/tool_parsers/apertus_tool_parser.py",
+        "vllm/utils/flashinfer.py",
+        "vllm/v1/attention/backends/mamba_attn.py",
+        "vllm/v1/worker/gpu/sample/prompt_logprob.py"
+      ]
+    },
+    {
+      "index": 3,
+      "id": "step-3",
+      "commits": [
+        {
+          "sha": "a2c8fc66573664395f491a94da1882fdf92e034b",
+          "subject": "[ROCm][Quantization][3/N] Refactor quark_moe w4a4 w/ oracle (#41436)"
+        },
+        {
+          "sha": "9758a6e5c5a556275c030db456d5d434ee999d58",
+          "subject": "[BugFix] support PP for Cohere vision model (#42819)"
+        },
+        {
+          "sha": "00e20e76f775b88f47469ae9fcb0f1ecd7580bb9",
+          "subject": "[Refactor] Remove dead cuda kernels (#42767)"
+        },
+        {
+          "sha": "ce88f01c9ac4fcde9dd43a983074d4e893cde65d",
+          "subject": "[Docs] update attribution to reflect EDEN foundation (#41666)"
+        },
+        {
+          "sha": "8fc1c284b94668b60c30737e178cb7e6cd651e89",
+          "subject": "[ROCm] Guard AITER GDN decode fast path by layout (#42880)"
+        }
+      ],
+      "commit_count": 5,
+      "start_commit": "6859ca76159fdd403b687c0c296e5a12850ba24e",
+      "end_commit": "8fc1c284b94668b60c30737e178cb7e6cd651e89",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 483,
+      "total_changed_lines": 1069,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "CMakeLists.txt",
+        "csrc/attention/vertical_slash_index.cu",
+        "csrc/moe/torch_bindings.cpp",
+        "csrc/ops.h",
+        "csrc/torch_bindings.cpp",
+        "tests/evals/gsm8k/configs/Qwen3.5-35B-A3B-MXFP4-AITER-TP2.yaml",
+        "tests/evals/gsm8k/configs/Qwen3.5-35B-A3B-MXFP4-EMU-TP2.yaml",
+        "tests/evals/gsm8k/configs/Qwen3.5-35B-A3B-MXFP4-TP2.yaml",
+        "tests/evals/gsm8k/configs/models-mi3xx.txt",
+        "tests/evals/gsm8k/configs/models-qwen35-mi355.txt",
+        "tests/quantization/test_gfx950_moe.py",
+        "vllm/_custom_ops.py",
+        "vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py",
+        "vllm/model_executor/layers/fused_moe/oracle/mxfp4.py",
+        "vllm/model_executor/layers/mamba/gdn_linear_attn.py",
+        "vllm/model_executor/layers/quantization/quark/quark_moe.py",
+        "vllm/model_executor/layers/quantization/turboquant/__init__.py",
+        "vllm/model_executor/layers/quantization/turboquant/config.py",
+        "vllm/model_executor/models/cohere2_vision.py"
+      ]
+    },
+    {
+      "index": 4,
+      "id": "step-4",
+      "commits": [
+        {
+          "sha": "84747489ded65265ee7d43815bfa3373b0d42279",
+          "subject": "Tier offload followup (#42529)"
+        },
+        {
+          "sha": "cd49a05d5aa3cc296912297b3c2b577efe4183c8",
+          "subject": "[Refactor] Remove dead code (#42889)"
+        },
+        {
+          "sha": "0191354827560fe38f68b4e7207f8824d6152ca3",
+          "subject": "[Perf][MLA] Enable FULL cudagraph capture for TRITON_MLA decode (#42885)"
+        },
+        {
+          "sha": "57fef4e0bf0bfaddf117dfdc9367e1fb957b423f",
+          "subject": "[Refactor] Extract shared coerce_to_schema_type utility from Minimax M2 tool parser (#43006)"
+        },
+        {
+          "sha": "37ece593c105b5bb818aa94885617b863d390d7f",
+          "subject": "[Perf] Padded nvfp4 quant kernel to remove additional copy, 2.4%~5.7% e2e performance improvement (#42774)"
+        },
+        {
+          "sha": "a171e6b52dff47dc567657e7d51f641bdcb22774",
+          "subject": "Add parallel drafting to v2 model runner unsupported features (#43010)"
+        },
+        {
+          "sha": "f85c76d701fc049a722c17b3affd9401380be1bf",
+          "subject": "[CI/Build] Bump nvidia-cutlass-dsl to 4.5.1 (#42991)"
+        },
+        {
+          "sha": "239b5ff30cf46f9196149c888a20be2096fdff03",
+          "subject": "[Frontend] Add --spec-method/--spec-model/--spec-tokens CLI aliases (#42476)"
+        }
+      ],
+      "commit_count": 8,
+      "start_commit": "8fc1c284b94668b60c30737e178cb7e6cd651e89",
+      "end_commit": "239b5ff30cf46f9196149c888a20be2096fdff03",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 963,
+      "total_changed_lines": 1396,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu",
+        "requirements/cuda.txt",
+        "tests/kernels/quantization/test_nvfp4_quant.py",
+        "tests/tool_parsers/test_utils.py",
+        "tests/v1/kv_offload/test_tiering_offloading.py",
+        "vllm/_custom_ops.py",
+        "vllm/config/vllm.py",
+        "vllm/engine/arg_utils.py",
+        "vllm/entrypoints/llm.py",
+        "vllm/model_executor/kernels/linear/nvfp4/cutlass.py",
+        "vllm/model_executor/kernels/linear/nvfp4/flashinfer.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/schemes/__init__.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_24.py",
+        "vllm/model_executor/layers/quantization/schema.py",
+        "vllm/model_executor/layers/quantization/turboquant/quantizer.py",
+        "vllm/tool_parsers/minimax_m2_tool_parser.py",
+        "vllm/tool_parsers/utils.py",
+        "vllm/v1/attention/backends/mla/triton_mla.py",
+        "vllm/v1/kv_offload/cpu/spec.py",
+        "vllm/v1/kv_offload/tiering/base.py",
+        "vllm/v1/kv_offload/tiering/example/__init__.py",
+        "vllm/v1/kv_offload/tiering/example/manager.py",
+        "vllm/v1/kv_offload/tiering/factory.py",
+        "vllm/v1/kv_offload/tiering/manager.py",
+        "vllm/v1/kv_offload/tiering/spec.py"
+      ]
+    },
+    {
+      "index": 5,
+      "id": "step-5",
+      "commits": [
+        {
+          "sha": "287471b99442b44c5a16c4d70b0f3e178dd52732",
+          "subject": "[Model Refactoring] Migrate DeepSeek V4 to vllm/models/ [1/N]  (#43004)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "239b5ff30cf46f9196149c888a20be2096fdff03",
+      "end_commit": "287471b99442b44c5a16c4d70b0f3e178dd52732",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 4543,
+      "total_changed_lines": 4545,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/models/test_deepseek_v4_mega_moe.py",
+        "vllm/model_executor/layers/quantization/__init__.py",
+        "vllm/model_executor/models/deepseek_v4.py",
+        "vllm/model_executor/models/deepseek_v4_mtp.py",
+        "vllm/model_executor/models/registry.py",
+        "vllm/models/__init__.py",
+        "vllm/models/deepseek_v4/__init__.py",
+        "vllm/models/deepseek_v4/amd/__init__.py",
+        "vllm/models/deepseek_v4/amd/deepseek_v4.py",
+        "vllm/models/deepseek_v4/amd/deepseek_v4_mtp.py",
+        "vllm/models/deepseek_v4/nvidia/__init__.py",
+        "vllm/models/deepseek_v4/nvidia/deepseek_v4.py",
+        "vllm/models/deepseek_v4/nvidia/deepseek_v4_mtp.py",
+        "vllm/models/deepseek_v4/quant_config.py"
+      ]
+    },
+    {
+      "index": 6,
+      "id": "step-6",
+      "commits": [
+        {
+          "sha": "afd7b1dce94fed484351fafd5bf5ea6601ac621e",
+          "subject": "[Bugfix] Use platform-agnostic device in example_connector load (#42926)"
+        },
+        {
+          "sha": "8f16c4a5c0feb01f106e5981f22ae8808a94a28b",
+          "subject": "[BugFix][CPU][Spec Decode] Fix Eagle implementation on CPU backend (#42468)"
+        },
+        {
+          "sha": "36dcaf25d8e091ea0f47b9ce7dcfca05de56f16d",
+          "subject": "[XPU] add gptq(int4) support (#37844)"
+        },
+        {
+          "sha": "da03e549b34685c4e63a091e973d907aee48a68c",
+          "subject": "[UX] Add a persistent cache for FlashInfer autotuning (#42537)"
+        },
+        {
+          "sha": "fba010dd74e2f94e4f7223b164ec9097d1b8a6af",
+          "subject": "[Bugfix][MRV2] Fix KVCache tensor explicit `kernel_block_size` dim (#42766)"
+        }
+      ],
+      "commit_count": 5,
+      "start_commit": "287471b99442b44c5a16c4d70b0f3e178dd52732",
+      "end_commit": "fba010dd74e2f94e4f7223b164ec9097d1b8a6af",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 266,
+      "total_changed_lines": 338,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/intel_jobs/test-intel.yaml",
+        "docs/usage/security.md",
+        "tests/model_executor/test_flashinfer_autotune_cache.py",
+        "tests/test_config.py",
+        "vllm/config/vllm.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/example_connector.py",
+        "vllm/envs.py",
+        "vllm/model_executor/kernels/linear/mixed_precision/MPLinearKernel.py",
+        "vllm/model_executor/kernels/linear/mixed_precision/xpu.py",
+        "vllm/model_executor/layers/quantization/utils/marlin_utils.py",
+        "vllm/model_executor/warmup/kernel_warmup.py",
+        "vllm/v1/sample/ops/topk_topp_sampler.py",
+        "vllm/v1/worker/cpu_model_runner.py",
+        "vllm/v1/worker/gpu/attn_utils.py",
+        "vllm/v1/worker/gpu/block_table.py",
+        "vllm/v1/worker/gpu/model_runner.py",
+        "vllm/v1/worker/gpu/spec_decode/eagle/speculator.py",
+        "vllm/v1/worker/gpu_model_runner.py"
+      ]
+    },
+    {
+      "index": 7,
+      "id": "step-7",
+      "commits": [
+        {
+          "sha": "87b08c5f6460cf487e47872c5fbc2595c97e74ef",
+          "subject": "[Model Refactoring] Move DeepSeek V4 layers to `models/deepseek_v4/` [2/N] (#43039)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "fba010dd74e2f94e4f7223b164ec9097d1b8a6af",
+      "end_commit": "87b08c5f6460cf487e47872c5fbc2595c97e74ef",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 3258,
+      "total_changed_lines": 3261,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".github/CODEOWNERS",
+        "vllm/model_executor/layers/deepseek_compressor.py",
+        "vllm/model_executor/layers/deepseek_v4_attention.py",
+        "vllm/models/deepseek_v4/attention.py",
+        "vllm/models/deepseek_v4/compressor.py",
+        "vllm/models/deepseek_v4/nvidia/deepseek_v4.py",
+        "vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse_dsv4.py"
+      ]
+    },
+    {
+      "index": 8,
+      "id": "step-8",
+      "commits": [
+        {
+          "sha": "3ca8db2ef88ec5a6686e62ee3ac899afae85c7af",
+          "subject": "add cutedsl dsv4 indexer fp8 kernel (#42899)"
+        },
+        {
+          "sha": "fab07e4d0f7f266643c6ac0dc944f9f433ef2140",
+          "subject": "[Bugfix][KV Connector] Fix SimpleCPUOffloadScheduler TOCTOU between Phase A and Phase B (#42289)"
+        },
+        {
+          "sha": "6e889b582b6a0b11f22b3764be174266faa9ff5e",
+          "subject": "[ci] Route 28 gpu_1_queue tests to h200_35gb queue (#43030)"
+        },
+        {
+          "sha": "27f4ba94811ef14bd45bcdc0c0b8e288a7cc6bc6",
+          "subject": "fix: use keyword arguments for shard_id and expert_id in weight_loade\u2026 (#42671)"
+        },
+        {
+          "sha": "9fd8487d2f56468aeec8154123641eb7c2eeacdf",
+          "subject": "[Docs] Add SVG images for pooling models. (#42626)"
+        },
+        {
+          "sha": "f1e3f0e6d685082bdb313c20914099ac5ede5f14",
+          "subject": "[XPU] Use custom op collective behavior  (#41354)"
+        },
+        {
+          "sha": "4a4fdabe28f3e2c8f9d05bcc80c4bf6d656b1ead",
+          "subject": "[Misc] Aligning tokwise pooler heads for consistency (#43041)"
+        },
+        {
+          "sha": "257af77bc2b612d5ebd0aecea777139036543af3",
+          "subject": "[Docs] Reorganize online serving docs. (#41907)"
+        }
+      ],
+      "commit_count": 8,
+      "start_commit": "87b08c5f6460cf487e47872c5fbc2595c97e74ef",
+      "end_commit": "257af77bc2b612d5ebd0aecea777139036543af3",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 551,
+      "total_changed_lines": 5642,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test_areas/engine.yaml",
+        ".buildkite/test_areas/entrypoints.yaml",
+        ".buildkite/test_areas/lm_eval.yaml",
+        ".buildkite/test_areas/lora.yaml",
+        ".buildkite/test_areas/misc.yaml",
+        ".buildkite/test_areas/model_executor.yaml",
+        ".buildkite/test_areas/model_runner_v2.yaml",
+        ".buildkite/test_areas/models_basic.yaml",
+        ".buildkite/test_areas/models_language.yaml",
+        ".buildkite/test_areas/models_multimodal.yaml",
+        ".buildkite/test_areas/pytorch.yaml",
+        ".buildkite/test_areas/samplers.yaml",
+        "docs/.nav.yml",
+        "docs/assets/models/pooling_models/cheat_sheet.svg",
+        "docs/assets/models/pooling_models/pooling_types.svg",
+        "docs/assets/models/pooling_models/score_types.svg",
+        "docs/configuration/README.md",
+        "docs/configuration/engine_args.md",
+        "docs/design/arch_overview.md",
+        "docs/features/structured_outputs.md",
+        "docs/getting_started/installation/gpu.apple.inc.md",
+        "docs/getting_started/quickstart.md",
+        "docs/models/generative_models.md",
+        "docs/models/pooling_models/README.md",
+        "docs/models/pooling_models/embed.md",
+        "docs/models/pooling_models/reward.md",
+        "docs/models/pooling_models/scoring.md",
+        "docs/models/pooling_models/specific_models.md",
+        "docs/models/pooling_models/token_classify.md",
+        "docs/models/pooling_models/token_embed.md",
+        "docs/models/supported_models.md",
+        "docs/serving/online_serving/README.md",
+        "docs/serving/online_serving/generative_scoring.md",
+        "docs/serving/online_serving/openai_compatible_server.md",
+        "docs/serving/online_serving/renderer.md",
+        "docs/serving/online_serving/speech_to_text.md",
+        "docs/serving/openai_compatible_server.md",
+        "mkdocs.yaml",
+        "tests/kernels/test_fused_indexer_q_rope_quant.py",
+        "tests/v1/simple_kv_offload/test_scheduler.py",
+        "vllm/model_executor/layers/pooler/seqwise/poolers.py",
+        "vllm/model_executor/layers/pooler/tokwise/__init__.py",
+        "vllm/model_executor/layers/pooler/tokwise/heads.py",
+        "vllm/model_executor/layers/pooler/tokwise/poolers.py",
+        "vllm/platforms/xpu.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/cutedsl_utils.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/fused_indexer_q.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/fused_indexer_q_cutedsl.py",
+        "vllm/v1/simple_kv_offload/manager.py"
+      ]
+    },
+    {
+      "index": 9,
+      "id": "step-9",
+      "commits": [
+        {
+          "sha": "301d986473a0ffc1df563422e01eac4a1efd59e0",
+          "subject": "[Frontend] Consolidate beam search by BeamSearchMixin. (#42946)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "257af77bc2b612d5ebd0aecea777139036543af3",
+      "end_commit": "301d986473a0ffc1df563422e01eac4a1efd59e0",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 1155,
+      "total_changed_lines": 1158,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test-amd.yaml",
+        ".buildkite/test_areas/samplers.yaml",
+        "vllm/beam_search.py",
+        "vllm/entrypoints/generate/__init__.py",
+        "vllm/entrypoints/generate/beam_search/__init__.py",
+        "vllm/entrypoints/generate/beam_search/offline.py",
+        "vllm/entrypoints/generate/beam_search/online.py",
+        "vllm/entrypoints/generate/beam_search/utils.py",
+        "vllm/entrypoints/llm.py",
+        "vllm/entrypoints/openai/engine/serving.py"
+      ]
+    },
+    {
+      "index": 10,
+      "id": "step-10",
+      "commits": [
+        {
+          "sha": "b14be81c1f63b70668d26d65a377b6383fbca936",
+          "subject": "[Model Refactoring] Move deepseek_v4_ops to models/deepseek_v4 [3/N] (#43073)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "301d986473a0ffc1df563422e01eac4a1efd59e0",
+      "end_commit": "b14be81c1f63b70668d26d65a377b6383fbca936",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 6380,
+      "total_changed_lines": 6397,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".github/CODEOWNERS",
+        "tests/kernels/core/test_fused_q_kv_rmsnorm.py",
+        "tests/kernels/test_compressor_kv_cache.py",
+        "tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py",
+        "tests/kernels/test_fused_indexer_q_rope_quant.py",
+        "tests/kernels/test_fused_inv_rope_fp8_quant.py",
+        "vllm/models/deepseek_v4/attention.py",
+        "vllm/models/deepseek_v4/common/__init__.py",
+        "vllm/models/deepseek_v4/common/ops/__init__.py",
+        "vllm/models/deepseek_v4/common/ops/cache_utils.py",
+        "vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py",
+        "vllm/models/deepseek_v4/common/ops/fused_indexer_q.py",
+        "vllm/models/deepseek_v4/common/ops/fused_inv_rope_fp8_quant.py",
+        "vllm/models/deepseek_v4/common/ops/fused_qk_rmsnorm.py",
+        "vllm/models/deepseek_v4/compressor.py",
+        "vllm/models/deepseek_v4/nvidia/ops/__init__.py",
+        "vllm/models/deepseek_v4/nvidia/ops/cutedsl_utils.py",
+        "vllm/models/deepseek_v4/nvidia/ops/dequant_gather_k_cutedsl.py",
+        "vllm/models/deepseek_v4/nvidia/ops/fused_indexer_q_cutedsl.py",
+        "vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse_dsv4.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/__init__.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/cutedsl_utils.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/dequant_gather_k_cutedsl.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/fused_compress_quant_cache.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/fused_indexer_q.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/fused_indexer_q_cutedsl.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/fused_inv_rope_fp8_quant.py",
+        "vllm/v1/attention/ops/deepseek_v4_ops/fused_qk_rmsnorm.py"
+      ]
+    },
+    {
+      "index": 11,
+      "id": "step-11",
+      "commits": [
+        {
+          "sha": "f34623bf3cac5b33451a761e802c9531e83d1c68",
+          "subject": "[bug] AsyncScheduler drops first post-resume token after pause_generation + clear_cache (#42117)"
+        },
+        {
+          "sha": "056bc2e16646599a96ac94e761c953e680e6fba9",
+          "subject": "[KVConnector][DSV4] HMA support for Mooncake store connector (#42828)"
+        }
+      ],
+      "commit_count": 2,
+      "start_commit": "b14be81c1f63b70668d26d65a377b6383fbca936",
+      "end_commit": "056bc2e16646599a96ac94e761c953e680e6fba9",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 908,
+      "total_changed_lines": 2309,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "examples/rl/rlhf_async_new_apis.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_connector.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_coordinator.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_hma_e2e.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_scheduler.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_worker.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/coordinator.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/data.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+        "vllm/v1/core/sched/async_scheduler.py",
+        "vllm/v1/core/sched/scheduler.py",
+        "vllm/v1/request.py"
+      ]
+    },
+    {
+      "index": 12,
+      "id": "step-12",
+      "commits": [
+        {
+          "sha": "07beaed8422d2df34a20e8ebd22b7924d563a566",
+          "subject": "[Model Refactoring] Rename deepseek_v4.py to model.py [4/N] (#43077)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "056bc2e16646599a96ac94e761c953e680e6fba9",
+      "end_commit": "07beaed8422d2df34a20e8ebd22b7924d563a566",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 4276,
+      "total_changed_lines": 4278,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/models/test_deepseek_v4_mega_moe.py",
+        "vllm/models/deepseek_v4/__init__.py",
+        "vllm/models/deepseek_v4/amd/deepseek_v4.py",
+        "vllm/models/deepseek_v4/amd/deepseek_v4_mtp.py",
+        "vllm/models/deepseek_v4/amd/model.py",
+        "vllm/models/deepseek_v4/amd/mtp.py",
+        "vllm/models/deepseek_v4/nvidia/deepseek_v4.py",
+        "vllm/models/deepseek_v4/nvidia/deepseek_v4_mtp.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/models/deepseek_v4/nvidia/mtp.py"
+      ]
+    },
+    {
+      "index": 13,
+      "id": "step-13",
+      "commits": [
+        {
+          "sha": "ef54a4d604ef3725bd52aa2893f71d671bf5329a",
+          "subject": "[Misc][MM] Remove redundant code in CLIPAttention (#43046)"
+        },
+        {
+          "sha": "129019f3342f1b7346ed8f4c1ac9fdefd8fe6ef8",
+          "subject": "[CI] Add MTP + PD disagg test for Qwen3.5 (#42677)"
+        },
+        {
+          "sha": "a78b842d0e85d287176031334f4721cd96b6e47d",
+          "subject": "[Bugfix] Fix top logprobs token placeholders in `/inference/v1/generate` (#42887)"
+        },
+        {
+          "sha": "b82e908b4c65a1f162e2d35a8106f09d95d8aa02",
+          "subject": "[Perf][4/n] Eliminate various GPU<->CPU syncs (#42347)"
+        },
+        {
+          "sha": "d740e2c02919cfba5a86a40d1c12439d03f5ac07",
+          "subject": "[XPU] update xpu graph usage (#43043)"
+        },
+        {
+          "sha": "1c6158083a6fc3aff408660d2defd7602f78f556",
+          "subject": "[Model] Openvla support (#42654)"
+        }
+      ],
+      "commit_count": 6,
+      "start_commit": "07beaed8422d2df34a20e8ebd22b7924d563a566",
+      "end_commit": "1c6158083a6fc3aff408660d2defd7602f78f556",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 977,
+      "total_changed_lines": 1402,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test_areas/disaggregated.yaml",
+        "docs/models/supported_models.md",
+        "tests/entrypoints/serve/disagg/test_tokens_logprobs.py",
+        "tests/models/multimodal/processing/test_common.py",
+        "tests/models/multimodal/processing/test_openvla.py",
+        "tests/models/registry.py",
+        "tests/v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh",
+        "tests/v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh",
+        "tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py",
+        "tests/v1/logits_processors/test_correctness.py",
+        "vllm/distributed/device_communicators/xpu_communicator.py",
+        "vllm/distributed/parallel_state.py",
+        "vllm/entrypoints/serve/disagg/serving.py",
+        "vllm/lora/ops/triton_ops/utils.py",
+        "vllm/lora/punica_wrapper/utils.py",
+        "vllm/model_executor/models/bert.py",
+        "vllm/model_executor/models/clip.py",
+        "vllm/model_executor/models/gemma3_mm.py",
+        "vllm/model_executor/models/glm4_1v.py",
+        "vllm/model_executor/models/granite_speech.py",
+        "vllm/model_executor/models/idefics3.py",
+        "vllm/model_executor/models/internvl.py",
+        "vllm/model_executor/models/llava_next.py",
+        "vllm/model_executor/models/llava_onevision.py",
+        "vllm/model_executor/models/openvla.py",
+        "vllm/model_executor/models/phi4mm_audio.py",
+        "vllm/model_executor/models/qwen2_5_omni_thinker.py",
+        "vllm/model_executor/models/qwen2_5_vl.py",
+        "vllm/model_executor/models/qwen2_audio.py",
+        "vllm/model_executor/models/qwen2_vl.py",
+        "vllm/model_executor/models/qwen3_omni_moe_thinker.py",
+        "vllm/model_executor/models/qwen3_vl.py",
+        "vllm/model_executor/models/registry.py",
+        "vllm/model_executor/models/transformers/multimodal.py",
+        "vllm/model_executor/models/utils.py",
+        "vllm/multimodal/evs.py",
+        "vllm/platforms/xpu.py",
+        "vllm/transformers_utils/config.py",
+        "vllm/transformers_utils/configs/__init__.py",
+        "vllm/transformers_utils/configs/openvla.py",
+        "vllm/transformers_utils/processors/__init__.py",
+        "vllm/transformers_utils/processors/openvla.py",
+        "vllm/v1/attention/backends/flash_attn.py",
+        "vllm/v1/sample/thinking_budget_state.py",
+        "vllm/v1/worker/gpu_model_runner.py"
+      ]
+    },
+    {
+      "index": 14,
+      "id": "step-14",
+      "commits": [
+        {
+          "sha": "42b4f1fdf7269de8aa83755a805555fe78add28b",
+          "subject": "[Refactor] Extract extract_types_from_schema utility from Minimax M2 tool parser (#43025)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "1c6158083a6fc3aff408660d2defd7602f78f556",
+      "end_commit": "42b4f1fdf7269de8aa83755a805555fe78add28b",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 161,
+      "total_changed_lines": 229,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/tool_parsers/test_utils.py",
+        "vllm/tool_parsers/minimax_m2_tool_parser.py",
+        "vllm/tool_parsers/utils.py"
+      ]
+    },
+    {
+      "index": 15,
+      "id": "step-15",
+      "commits": [
+        {
+          "sha": "8200fbe1ac73f00a46b1cdd6c4c93bdaf2c33022",
+          "subject": "[Misc] add humming to dependencies (#42540)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "42b4f1fdf7269de8aa83755a805555fe78add28b",
+      "end_commit": "8200fbe1ac73f00a46b1cdd6c4c93bdaf2c33022",
+      "categories": [
+        "ignored",
+        "requirements",
+        "vllm"
+      ],
+      "vllm_changed_lines": 23,
+      "total_changed_lines": 30,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "requirements/cuda.txt",
+        "setup.py",
+        "vllm/model_executor/layers/quantization/humming.py"
+      ]
+    },
+    {
+      "index": 16,
+      "id": "step-16",
+      "commits": [
+        {
+          "sha": "d247a931cc25e7253feccbd6260d48216ff5c081",
+          "subject": "[feat] Add FP8 per-tensor Q scale support to Triton attention backend (#42080)"
+        },
+        {
+          "sha": "aed2eb355a9d9136c8e17690b932983b55fb343f",
+          "subject": "[Docs] Fix MooncakeStoreConnector role in disaggregated example (#42994)"
+        },
+        {
+          "sha": "f54721bcc3e072d71b0e09c0b0bd6d692eb06161",
+          "subject": "[Bugfix][MoE] FlashInfer one-sided: workspace union across heterogeneous layers (#42976)"
+        },
+        {
+          "sha": "9aaf83ef502fc37bc647f6e474314d48ba36cd1c",
+          "subject": "[CI failure] Temporarily disable using persistent cache for flashinfer autotune (#43119)"
+        },
+        {
+          "sha": "a65093c1a39a8ddd8455365128ecbe259350e22c",
+          "subject": "[ci] Move language models tests (hybrid) back to L4 (#43129)"
+        },
+        {
+          "sha": "12421962955ac28b6f80a0307f554fad939174dd",
+          "subject": "[Model] Support post-norm architecture for EAGLE-3 supeculators (#42764)"
+        },
+        {
+          "sha": "117afeea4665367a3066c1df58d4082d07fcc946",
+          "subject": "Fix error in Dynamic NTK scaling (#41277)"
+        },
+        {
+          "sha": "be16785998087f80ffac08b980603241e5da16ab",
+          "subject": "[CPU][DOC] Fix installation commands for Arm CPUs (#43115)"
+        },
+        {
+          "sha": "73dd2f33b7a5a8a237fe7296039cec246e4c68bd",
+          "subject": "[bug] fix WeightTransferConfig.backend to allow for all strings (#43121)"
+        },
+        {
+          "sha": "39bba710bed5b6018718af3e0fd7984f6082118e",
+          "subject": "[MRV2][BugFix] Fix default-stream CG capture in P/W LoRA case (#43160)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "8200fbe1ac73f00a46b1cdd6c4c93bdaf2c33022",
+      "end_commit": "39bba710bed5b6018718af3e0fd7984f6082118e",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 356,
+      "total_changed_lines": 722,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test_areas/models_language.yaml",
+        "docs/features/mooncake_store_connector_usage.md",
+        "docs/getting_started/installation/cpu.arm.inc.md",
+        "tests/distributed/test_mnnvl_alltoall.py",
+        "tests/distributed/test_weight_transfer.py",
+        "tests/kernels/attention/test_triton_unified_attention.py",
+        "tests/models/language/pooling/test_nomic_max_model_len.py",
+        "vllm/config/weight_transfer.py",
+        "vllm/distributed/device_communicators/all2all.py",
+        "vllm/model_executor/layers/rotary_embedding/__init__.py",
+        "vllm/model_executor/layers/rotary_embedding/dynamic_ntk_scaling_rope.py",
+        "vllm/model_executor/models/config.py",
+        "vllm/model_executor/models/deepseek_eagle3.py",
+        "vllm/model_executor/models/llama_eagle3.py",
+        "vllm/model_executor/warmup/kernel_warmup.py",
+        "vllm/v1/attention/backends/triton_attn.py",
+        "vllm/v1/attention/ops/triton_unified_attention.py",
+        "vllm/v1/worker/gpu/cudagraph_utils.py",
+        "vllm/v1/worker/gpu_model_runner.py"
+      ]
+    },
+    {
+      "index": 17,
+      "id": "step-17",
+      "commits": [
+        {
+          "sha": "5774aaed0cbeaa74ca7a75d372c1e8bd4aa11cdb",
+          "subject": "[Cohere] Enable Cohere MoE (#43143)"
+        },
+        {
+          "sha": "c628a93a64fb4929c3c11d8e2c7244c4826b4f76",
+          "subject": "[Perf][Bugfix] Update dflash aux layer indexing (#40727)"
+        },
+        {
+          "sha": "fadf5d332c6e9bb6e552c1ca529511bce0f79802",
+          "subject": "add enqueue all option to throughput benchmark (#42975)"
+        },
+        {
+          "sha": "2ae910ed88121d7c3acdcb9bab14cd968257b6e6",
+          "subject": "[Perf] Avoid forward scan for async output placeholders (#42938)"
+        }
+      ],
+      "commit_count": 4,
+      "start_commit": "39bba710bed5b6018718af3e0fd7984f6082118e",
+      "end_commit": "2ae910ed88121d7c3acdcb9bab14cd968257b6e6",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 194,
+      "total_changed_lines": 250,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/models/supported_models.md",
+        "tests/entrypoints/llm/test_mm_processor_kwargs.py",
+        "tests/models/registry.py",
+        "tests/v1/e2e/spec_decode/test_spec_decode.py",
+        "vllm/benchmarks/throughput.py",
+        "vllm/entrypoints/llm.py",
+        "vllm/transformers_utils/configs/speculators/algos.py",
+        "vllm/v1/worker/gpu_input_batch.py",
+        "vllm/v1/worker/gpu_model_runner.py"
+      ]
+    },
+    {
+      "index": 18,
+      "id": "step-18",
+      "commits": [
+        {
+          "sha": "cd0ff26e7acf2c691a33d4c44276db6980bab24b",
+          "subject": "[CI] Add DSV4-Flash to gsm8k moe-refactor/config-b200.txt (#42111)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "2ae910ed88121d7c3acdcb9bab14cd968257b6e6",
+      "end_commit": "cd0ff26e7acf2c691a33d4c44276db6980bab24b",
+      "categories": [
+        "ignored",
+        "requirements"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 13,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "requirements/common.txt",
+        "requirements/test/cuda.txt",
+        "requirements/test/rocm.txt",
+        "requirements/test/xpu.txt",
+        "tests/evals/gsm8k/configs/moe-refactor/DeepSeek-V4-Flash-deepgemm-mega-moe.yaml",
+        "tests/evals/gsm8k/configs/moe-refactor/config-b200.txt"
+      ]
+    },
+    {
+      "index": 19,
+      "id": "step-19",
+      "commits": [
+        {
+          "sha": "4f940896a32c9e2a0eba7f50d521bf5f6b4de458",
+          "subject": "[KV Offload] Pass `OffloadingSpec` instead of `VllmConfig` to secondary tiers (#43076)"
+        },
+        {
+          "sha": "85959567c3e71a9965616ebebe1853ca48d8d20f",
+          "subject": "[ci] Revert model executor test back to L4 (#43188)"
+        },
+        {
+          "sha": "7e4bc2cecb3a8aede2d10c86a3a1a4bd98e26100",
+          "subject": "[Docs][PD][NIXL] Lease extension mechanism for blocks on P (#43099)"
+        },
+        {
+          "sha": "40651c020772b80f9ca80272aebe749fe01cd38a",
+          "subject": "[Docs][PD][NIXL] Bidirectional kv-cache transfer (#43097)"
+        }
+      ],
+      "commit_count": 4,
+      "start_commit": "cd0ff26e7acf2c691a33d4c44276db6980bab24b",
+      "end_commit": "40651c020772b80f9ca80272aebe749fe01cd38a",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 22,
+      "total_changed_lines": 331,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test_areas/model_executor.yaml",
+        "docs/design/nixl_kv_cache_lease.md",
+        "docs/features/nixl_connector_usage.md",
+        "tests/v1/kv_offload/test_tiering_offloading.py",
+        "vllm/v1/kv_offload/tiering/base.py",
+        "vllm/v1/kv_offload/tiering/example/manager.py",
+        "vllm/v1/kv_offload/tiering/factory.py",
+        "vllm/v1/kv_offload/tiering/spec.py"
+      ]
+    },
+    {
+      "index": 20,
+      "id": "step-20",
+      "commits": [
+        {
+          "sha": "07aeaf9d4df870a76d5a0dc19d6a7e74b4be5d3b",
+          "subject": "[6/n] Migrate activation kernels, gptq, gguf, non cutlass w8a8 to libtorch stable ABI (continued) (#42663)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "40651c020772b80f9ca80272aebe749fe01cd38a",
+      "end_commit": "07aeaf9d4df870a76d5a0dc19d6a7e74b4be5d3b",
+      "categories": [
+        "ignored",
+        "requirements",
+        "vllm"
+      ],
+      "vllm_changed_lines": 5,
+      "total_changed_lines": 11915,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "CMakeLists.txt",
+        "csrc/activation_kernels.cu",
+        "csrc/attention/dtype_fp8.cuh",
+        "csrc/cuda_vec_utils.cuh",
+        "csrc/cutlass_extensions/torch_utils.hpp",
+        "csrc/libtorch_stable/activation_kernels.cu",
+        "csrc/libtorch_stable/ops.h",
+        "csrc/libtorch_stable/quantization/gguf/gguf_kernel.cu",
+        "csrc/libtorch_stable/quantization/gguf/moe.cuh",
+        "csrc/libtorch_stable/quantization/gguf/moe_vec.cuh",
+        "csrc/libtorch_stable/quantization/gptq/compat.cuh",
+        "csrc/libtorch_stable/quantization/gptq/matrix_view.cuh",
+        "csrc/libtorch_stable/quantization/gptq/q_gemm.cu",
+        "csrc/libtorch_stable/quantization/gptq/qdq_2.cuh",
+        "csrc/libtorch_stable/quantization/gptq/qdq_3.cuh",
+        "csrc/libtorch_stable/quantization/gptq/qdq_4.cuh",
+        "csrc/libtorch_stable/quantization/gptq/qdq_8.cuh",
+        "csrc/libtorch_stable/quantization/gptq/qdq_util.cuh",
+        "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu",
+        "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu",
+        "csrc/libtorch_stable/torch_bindings.cpp",
+        "csrc/libtorch_stable/torch_utils.h",
+        "csrc/ops.h",
+        "csrc/quantization/gguf/gguf_kernel.cu",
+        "csrc/quantization/gguf/moe.cuh",
+        "csrc/quantization/gguf/moe_vec.cuh",
+        "csrc/quantization/gptq/compat.cuh",
+        "csrc/quantization/gptq/matrix_view.cuh",
+        "csrc/quantization/gptq/q_gemm.cu",
+        "csrc/quantization/gptq/qdq_2.cuh",
+        "csrc/quantization/gptq/qdq_3.cuh",
+        "csrc/quantization/gptq/qdq_4.cuh",
+        "csrc/quantization/gptq/qdq_8.cuh",
+        "csrc/quantization/gptq/qdq_util.cuh",
+        "csrc/quantization/utils.cuh",
+        "csrc/quantization/w8a8/fp8/common.cu",
+        "csrc/quantization/w8a8/fp8/common.cuh",
+        "csrc/quantization/w8a8/int8/scaled_quant.cu",
+        "csrc/torch_bindings.cpp",
+        "csrc/torch_utils.h",
+        "setup.py",
+        "vllm/platforms/rocm.py"
+      ]
+    },
+    {
+      "index": 21,
+      "id": "step-21",
+      "commits": [
+        {
+          "sha": "9b343dd4f54a9870f3ba1e41f5a5b3f4a1e25340",
+          "subject": "Enable mermaid diagrams in the docs (#43192)"
+        },
+        {
+          "sha": "1cb224430bea0d037b57e24cf91001f47b69ddf3",
+          "subject": "[GDN] Enable FI Blackwell GDN prefill kernel (#40717)"
+        },
+        {
+          "sha": "6f21558da1ec7362d2b4f3d012bce2b612a74459",
+          "subject": "[XPU][CI] Add 2 server model test files in Intel GPU CI (#42499)"
+        },
+        {
+          "sha": "cb600d1cdbb079ab9432348f128e71c4e2e0a373",
+          "subject": "[Frontend] Forward X-data-parallel-rank header on /inference/v1/generate (#42330)"
+        },
+        {
+          "sha": "87e31455b056c6ce59bf5dcb3c622155431851db",
+          "subject": "[Doc] Sync CLI guide with actual help modes and launch subcommand (#40326)"
+        },
+        {
+          "sha": "19cf334207ed81d3ed75a473acd1a95c785d9ed3",
+          "subject": "[Feature] Support manually enabling the cumem allocator (#33648)"
+        },
+        {
+          "sha": "0a508743d42a26786c1432bb7f2e93f8111b6383",
+          "subject": "[Spec Decode] Support non-MTP speculation for NemotronH (#43130)"
+        },
+        {
+          "sha": "df84fb07a6e57969941841c6363d1efbac1ba1e8",
+          "subject": "Remove additional dead code as a follow-up to #42889 (#43144)"
+        },
+        {
+          "sha": "ded871201a424dd0d28a00aaf74c5786457a18ee",
+          "subject": "[Bug][Structured Outputs] Fix bug that leads to unconstrained generations with structural tags (#42452)"
+        },
+        {
+          "sha": "644b2a28e7eb3b11191f157416cfedebd2da995b",
+          "subject": "[Bugfix] Use enable_sm120_family for per-tensor FP8 CUTLASS kernels on SM12.1 (#41215)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "07aeaf9d4df870a76d5a0dc19d6a7e74b4be5d3b",
+      "end_commit": "644b2a28e7eb3b11191f157416cfedebd2da995b",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 298,
+      "total_changed_lines": 428,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/intel_jobs/test-intel.yaml",
+        "docs/cli/.nav.yml",
+        "docs/cli/README.md",
+        "docs/cli/launch/render.md",
+        "docs/features/nixl_connector_usage.md",
+        "docs/mkdocs/hooks/generate_argparse.py",
+        "mkdocs.yaml",
+        "tests/quantization/test_compressed_tensors.py",
+        "tests/v1/kv_connector/unit/test_config.py",
+        "tests/v1/structured_output/test_reasoning_structured_output.py",
+        "vllm/config/model.py",
+        "vllm/config/vllm.py",
+        "vllm/engine/arg_utils.py",
+        "vllm/entrypoints/serve/disagg/serving.py",
+        "vllm/model_executor/layers/mamba/gdn_linear_attn.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py",
+        "vllm/model_executor/models/nemotron_h.py",
+        "vllm/platforms/cuda.py",
+        "vllm/v1/structured_output/__init__.py",
+        "vllm/v1/worker/gpu_worker.py"
+      ]
+    },
+    {
+      "index": 22,
+      "id": "step-22",
+      "commits": [
+        {
+          "sha": "a10d69116cb25c8137eeb3f320add71d4e04fda9",
+          "subject": "[Bugfix] Use shared coerce_to_schema_type in DeepSeekV32 tool parser (#43019)"
+        },
+        {
+          "sha": "9c78c99995b70726f9ea929ff2e535d6303383d6",
+          "subject": "[MISC] Fix symm_mem cap-equal gate; log AR backend selection (#42993)"
+        },
+        {
+          "sha": "2d6b3489b9a325988ad52507236409747d2098a7",
+          "subject": "[R3] Add routed experts to openai entrypoint  (#38939)"
+        },
+        {
+          "sha": "f2d5e3d3aeac4cb1f6d285e4a567a502ae507777",
+          "subject": "[CI] Lower granite-4.0-h-tiny gsm8k threshold for Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) (#43186)"
+        },
+        {
+          "sha": "363fc84407f8c966c1cee6786e45e9e6ab289684",
+          "subject": "Integrate flashinfer b12x MoE and FP4 GEMM kernels for SM120/121 (#40082)"
+        },
+        {
+          "sha": "53ff50fcd3d2012a406e5053026ea6a46c88b2b6",
+          "subject": "[Perf] Optimize `CutlassFP8ScaledMMLinearKernel` when padding needed by pre-weight processing, 13.5% TTFT improvement (#42651)"
+        },
+        {
+          "sha": "2a43b407c5093b1255a172139da6a5151f410b7a",
+          "subject": "[Bugfix][CI] Add missing import of pad_nvfp4_activation_for_cutlass in flashinfer (#43237)"
+        },
+        {
+          "sha": "452baa860b1169787cc8540a1772c4d96f682c40",
+          "subject": "Add dllehr-amd to CODEOWNERS and committers list (#42772)"
+        },
+        {
+          "sha": "5774aad9c5b67c5bb67bb7d306a9652a035ed0aa",
+          "subject": "[Perf][gpt-oss] Downgrade triton_kernels to v3.5.1 (#43135)"
+        },
+        {
+          "sha": "6dc0a71843878ef45e29d4732147290b797b70fd",
+          "subject": "[Misc] downgrade nvidia-cutlass-dsl to 4.5.0 (#43230)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "644b2a28e7eb3b11191f157416cfedebd2da995b",
+      "end_commit": "6dc0a71843878ef45e29d4732147290b797b70fd",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 716,
+      "total_changed_lines": 1660,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".github/CODEOWNERS",
+        "cmake/external_projects/triton_kernels.cmake",
+        "docs/governance/committers.md",
+        "requirements/cuda.txt",
+        "tests/entrypoints/openai/test_return_routed_experts.py",
+        "tests/entrypoints/serve/disagg/test_return_routed_experts.py",
+        "tests/kernels/moe/test_flashinfer_b12x_moe.py",
+        "tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py",
+        "tests/kernels/quantization/test_mxfp4_triton_ep.py",
+        "tests/tool_parsers/test_deepseekv32_tool_parser.py",
+        "tests/v1/kv_connector/nixl_integration/test_accuracy.py",
+        "vllm/config/kernel.py",
+        "vllm/distributed/device_communicators/cuda_communicator.py",
+        "vllm/distributed/device_communicators/symm_mem.py",
+        "vllm/entrypoints/openai/chat_completion/protocol.py",
+        "vllm/entrypoints/openai/chat_completion/serving.py",
+        "vllm/entrypoints/openai/completion/protocol.py",
+        "vllm/entrypoints/openai/completion/serving.py",
+        "vllm/envs.py",
+        "vllm/model_executor/kernels/linear/__init__.py",
+        "vllm/model_executor/kernels/linear/nvfp4/flashinfer.py",
+        "vllm/model_executor/kernels/linear/scaled_mm/cutlass.py",
+        "vllm/model_executor/layers/fused_moe/experts/flashinfer_b12x_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/gpt_oss_triton_kernels_moe.py",
+        "vllm/model_executor/layers/fused_moe/oracle/nvfp4.py",
+        "vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py",
+        "vllm/tool_parsers/deepseekv32_tool_parser.py",
+        "vllm/utils/flashinfer.py"
+      ]
+    },
+    {
+      "index": 23,
+      "id": "step-23",
+      "commits": [
+        {
+          "sha": "bde560ed6e1dc889debf68410ccbcb00b749513b",
+          "subject": "[ROCm] Add QuickReduce min-size override and codec threshold (#41675)"
+        },
+        {
+          "sha": "63ea11709bd9e9b14669e3973dff92d2dcea3cb1",
+          "subject": "[CI] Add composed-schema regression tests for DeepSeek V3.2/V4 parsers (#43255)"
+        },
+        {
+          "sha": "9640970de20b15ade9eb3859825637f64e81ed8c",
+          "subject": "[Model Runner V2] Fix lora `Triton Error [CUDA]: device-side assert triggered` (#43139)"
+        },
+        {
+          "sha": "5d041cc1fe5181daabf39943efc7b678380d57bd",
+          "subject": "update GPU json file based on h200 recipes (#43262)"
+        },
+        {
+          "sha": "ee05e8137ec48b8e7375228a1142b4c5f2e3360c",
+          "subject": "[Minor]  Bigger overlap for FI AR (#43103)"
+        },
+        {
+          "sha": "e45df8c3f77572d03f638feded5b5efbccdbcc05",
+          "subject": "[Bugfix] Fix Qwen3.5 GatedDeltaNet in_proj_ba Marlin failure at TP>=2 (#36329)"
+        },
+        {
+          "sha": "2b75a73b8e23f5df6de92d01a191e059424487e3",
+          "subject": "[Perf][Gemma4] Batch vision encoder calls for image and video processing (#43169)"
+        },
+        {
+          "sha": "7e5070934ee5f28103c5b95cb776904a12fc36f5",
+          "subject": "[CI] Fix \"test_vit_cudagraph_[image|video][step3_vl]\" failure (#43082)"
+        },
+        {
+          "sha": "346cf163a11b55e069aa3143ae2878967393ddc2",
+          "subject": "[Frontend] Normalize reasoning_content to reasoning for client compatibility (#42664)"
+        },
+        {
+          "sha": "6441cf4a44856f4eb4dce7d19a51fd69e1b423cf",
+          "subject": "[Refactor] Use shared coerce_to_schema_type in Seed-OSS tool parser (#43140)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "6dc0a71843878ef45e29d4732147290b797b70fd",
+      "end_commit": "6441cf4a44856f4eb4dce7d19a51fd69e1b423cf",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 566,
+      "total_changed_lines": 1188,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/performance-benchmarks/tests/serving-tests.json",
+        "tests/distributed/test_quick_all_reduce.py",
+        "tests/models/multimodal/generation/test_vit_cudagraph.py",
+        "tests/tool_parsers/test_deepseekv32_tool_parser.py",
+        "tests/tool_parsers/test_deepseekv4_tool_parser.py",
+        "tests/tool_use/test_chat_completion_request_validations.py",
+        "vllm/compilation/passes/fusion/allreduce_rms_fusion.py",
+        "vllm/distributed/device_communicators/flashinfer_all_reduce.py",
+        "vllm/distributed/device_communicators/quick_all_reduce.py",
+        "vllm/entrypoints/openai/chat_completion/protocol.py",
+        "vllm/envs.py",
+        "vllm/model_executor/layers/mamba/gdn_linear_attn.py",
+        "vllm/model_executor/models/gemma4_mm.py",
+        "vllm/tool_parsers/seed_oss_tool_parser.py",
+        "vllm/v1/worker/gpu/model_runner.py"
+      ]
+    },
+    {
+      "index": 24,
+      "id": "step-24",
+      "commits": [
+        {
+          "sha": "d97ba29fdcf2538359fac5c644c0f07e59bc1988",
+          "subject": "[ToolParser][Bugfix] Re-land: Fix anyOf/oneOf/$ref type resolution in Qwen3CoderToolParser (#37831) (#38973)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "6441cf4a44856f4eb4dce7d19a51fd69e1b423cf",
+      "end_commit": "d97ba29fdcf2538359fac5c644c0f07e59bc1988",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 117,
+      "total_changed_lines": 301,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/tool_parsers/test_qwen3coder_tool_parser.py",
+        "vllm/tool_parsers/qwen3coder_tool_parser.py"
+      ]
+    },
+    {
+      "index": 25,
+      "id": "step-25",
+      "commits": [
+        {
+          "sha": "f2ace1d57d28df8d4c5e973dd62d87f47d628cb3",
+          "subject": "[Frontend][RFC] Rust front-end integration (#40848)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "d97ba29fdcf2538359fac5c644c0f07e59bc1988",
+      "end_commit": "f2ace1d57d28df8d4c5e973dd62d87f47d628cb3",
+      "categories": [
+        "ignored",
+        "requirements",
+        "vllm"
+      ],
+      "vllm_changed_lines": 331,
+      "total_changed_lines": 984,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/image_build/image_build.sh",
+        ".buildkite/image_build/image_build_cpu.sh",
+        ".buildkite/image_build/image_build_cpu_arm64.sh",
+        ".buildkite/image_build/image_build_hpu.sh",
+        ".buildkite/image_build/image_build_xpu.sh",
+        ".buildkite/test_areas/rust_frontend.yaml",
+        ".dockerignore",
+        ".gitignore",
+        ".gitmodules",
+        "build_rust.sh",
+        "docker/Dockerfile",
+        "docker/Dockerfile.cpu",
+        "docker/Dockerfile.nightly_torch",
+        "docker/Dockerfile.rocm",
+        "docker/Dockerfile.xpu",
+        "docs/contributing/README.md",
+        "docs/contributing/ci/nightly_builds.md",
+        "docs/getting_started/installation/gpu.cuda.inc.md",
+        "pyproject.toml",
+        "requirements/build/cpu.txt",
+        "requirements/build/cuda.txt",
+        "requirements/rocm.txt",
+        "rust",
+        "rust-toolchain.toml",
+        "setup.py",
+        "tests/entrypoints/openai/completion/test_shutdown.py",
+        "tests/test_envs.py",
+        "vllm/entrypoints/cli/launch.py",
+        "vllm/entrypoints/cli/serve.py",
+        "vllm/entrypoints/openai/api_server.py",
+        "vllm/entrypoints/utils.py",
+        "vllm/envs.py",
+        "vllm/v1/engine/__init__.py",
+        "vllm/v1/engine/core.py",
+        "vllm/v1/utils.py"
+      ]
+    },
+    {
+      "index": 26,
+      "id": "step-26",
+      "commits": [
+        {
+          "sha": "a6682d1d259cca69a9ae737ea5608fbbe7520031",
+          "subject": "[Bugfix] Warn when renderer_num_workers has no effect on offline LLM (#42905)"
+        },
+        {
+          "sha": "905b97adfaf7b08f3cc95b328579e5336ed6d3b6",
+          "subject": "[Benchmark] Add num-warmup to vllm bench throughput (#43245)"
+        },
+        {
+          "sha": "050611a3dd19271a3c729788ff69b3470ccfb238",
+          "subject": "[Bugfix] Fix glm4_moe_tool_parser._is_string_type for /v1/responses FunctionTool format (#39601)"
+        },
+        {
+          "sha": "a950e9447e38727fc956afdc242bc6e3796ccb77",
+          "subject": "[CI] De-flake test_models for bigscience/bloom-560m (#43197)"
+        },
+        {
+          "sha": "0a54df28471be07b3d668ea21c5e411569d3baea",
+          "subject": "[XPU] add setuptools-rust for xpu dependency (#43287)"
+        },
+        {
+          "sha": "b719b1635b4899e2372905def0badf96d4dd242a",
+          "subject": "Update KDA chunk prefill decay to use exp2 semantics (#43195)"
+        },
+        {
+          "sha": "edafea35550fab0b185b885711ec048dfd2e1a4d",
+          "subject": "Fix FlashInfer TRTLLM NvFP4 monolithic MoE routing (#43223)"
+        },
+        {
+          "sha": "ebbfb34e3e058bd539db9e5015d0c18b7ce5a5e0",
+          "subject": "[Test] Replace zephyr-7b-beta (7B) with SmolLM2-135M in tokenization test (#43085)"
+        },
+        {
+          "sha": "68e07d59161a8d268b773c181fab17994a7c5d0a",
+          "subject": "[Bug] Fix ci issue `assert output_size is not None` AssertionError (#43261)"
+        },
+        {
+          "sha": "caf69823d61119ac3f4b066f20a910b62078e41c",
+          "subject": "[CI] Pin protoc binary in rust-build stages (#43292)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "f2ace1d57d28df8d4c5e973dd62d87f47d628cb3",
+      "end_commit": "caf69823d61119ac3f4b066f20a910b62078e41c",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 461,
+      "total_changed_lines": 671,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docker/Dockerfile",
+        "docker/Dockerfile.cpu",
+        "docker/Dockerfile.nightly_torch",
+        "docker/Dockerfile.rocm",
+        "docker/Dockerfile.xpu",
+        "requirements/xpu.txt",
+        "tests/entrypoints/serve/tokenize/test_tokenization.py",
+        "tests/kernels/quantization/test_cutlass_scaled_mm.py",
+        "tests/quantization/test_fp8.py",
+        "tests/tool_parsers/test_glm4_moe_tool_parser.py",
+        "tools/install_protoc.sh",
+        "vllm/benchmarks/throughput.py",
+        "vllm/config/model.py",
+        "vllm/entrypoints/llm.py",
+        "vllm/model_executor/kernels/linear/scaled_mm/cutlass.py",
+        "vllm/model_executor/layers/fla/ops/chunk_delta_h.py",
+        "vllm/model_executor/layers/fla/ops/kda.py",
+        "vllm/model_executor/layers/fla/ops/op.py",
+        "vllm/model_executor/layers/fused_moe/config.py",
+        "vllm/model_executor/layers/quantization/fp8.py",
+        "vllm/model_executor/layers/quantization/online/fp8.py",
+        "vllm/tool_parsers/glm4_moe_tool_parser.py",
+        "vllm/transformers_utils/config.py"
+      ]
+    },
+    {
+      "index": 27,
+      "id": "step-27",
+      "commits": [
+        {
+          "sha": "5ecd8e9c708821916323d25d5f7beddb7f41d22b",
+          "subject": "[XPU][CI]Fix Docker image pull-to-run race in Intel GPU CI (#43266)"
+        },
+        {
+          "sha": "c68c55d43e504745dbfc2d46b552e80acb74d4b9",
+          "subject": "[CPU][RISC-V] Add VLEN=256 support to RVV attention kernels (#42943)"
+        },
+        {
+          "sha": "b730c4635288d75da4788bc28d8d26b5e5c3726c",
+          "subject": "[Perf] [Hybrid] Fused Triton kernel for GPU-side Mamba state postprocessing (#40172)"
+        },
+        {
+          "sha": "9b9d5dbaab852a1c615fe83a7f92881d353503db",
+          "subject": "[CI] Fix CPU tests failing on `tl.exp2` import (#43311)"
+        },
+        {
+          "sha": "1c78f76c29a642379ad0ec953a77af9bc44376b6",
+          "subject": "[Bugfix] Add early validation to reject incompatible runner types for embedding models (#43079)"
+        }
+      ],
+      "commit_count": 5,
+      "start_commit": "caf69823d61119ac3f4b066f20a910b62078e41c",
+      "end_commit": "1c78f76c29a642379ad0ec953a77af9bc44376b6",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 861,
+      "total_changed_lines": 3212,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/scripts/hardware_ci/run-intel-test.sh",
+        "csrc/cpu/cpu_attn_rvv.hpp",
+        "csrc/cpu/cpu_types_riscv_defs.hpp",
+        "csrc/cpu/generate_cpu_attn_dispatch.py",
+        "tests/v1/e2e/general/test_mamba_prefix_cache.py",
+        "tests/v1/worker/test_mamba_utils.py",
+        "vllm/config/model.py",
+        "vllm/triton_utils/importing.py",
+        "vllm/v1/attention/backends/cpu_attn.py",
+        "vllm/v1/worker/gpu_model_runner.py",
+        "vllm/v1/worker/mamba_utils.py"
+      ]
+    },
+    {
+      "index": 28,
+      "id": "step-28",
+      "commits": [
+        {
+          "sha": "9b54e50e2c1c61ea3b7def032fbafc56dd3179c1",
+          "subject": "[Deprecation] Mark env vars covered by --moe-backend / --linear-backend (#43148)"
+        },
+        {
+          "sha": "b29cbf06525254693f29d98686e038eaf225be8c",
+          "subject": "[Perf] `zeros` -> `empty` to remove additional fill (#42988)"
+        },
+        {
+          "sha": "17b69828a013acb7af0cd1d16d24ecc8d7582094",
+          "subject": "[Core] Add native ModelExpress load format (#43105)"
+        }
+      ],
+      "commit_count": 3,
+      "start_commit": "1c78f76c29a642379ad0ec953a77af9bc44376b6",
+      "end_commit": "17b69828a013acb7af0cd1d16d24ecc8d7582094",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 256,
+      "total_changed_lines": 389,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/model_executor/model_loader/test_modelexpress_loader.py",
+        "vllm/_custom_ops.py",
+        "vllm/config/load.py",
+        "vllm/config/vllm.py",
+        "vllm/envs.py",
+        "vllm/model_executor/kernels/linear/__init__.py",
+        "vllm/model_executor/layers/mamba/gdn_linear_attn.py",
+        "vllm/model_executor/layers/quantization/utils/fp8_utils.py",
+        "vllm/model_executor/model_loader/__init__.py",
+        "vllm/model_executor/model_loader/modelexpress_loader.py",
+        "vllm/v1/attention/backends/turboquant_attn.py"
+      ]
+    },
+    {
+      "index": 29,
+      "id": "step-29",
+      "commits": [
+        {
+          "sha": "0b59fc45dd475f96f6f46f2c3e699d7bc13b3b04",
+          "subject": "Disable build isolation to bypass CUDA related deps for vllm-tpu (#43038)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "17b69828a013acb7af0cd1d16d24ecc8d7582094",
+      "end_commit": "0b59fc45dd475f96f6f46f2c3e699d7bc13b3b04",
+      "categories": [
+        "ignored",
+        "requirements"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 12,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "requirements/build/tpu.txt",
+        "tools/vllm-tpu/build.sh"
+      ]
+    },
+    {
+      "index": 30,
+      "id": "step-30",
+      "commits": [
+        {
+          "sha": "0f66623b0d739dc94afddb67863c37d6f5816579",
+          "subject": "[Frontend] Rework fastokens integration (#43168)"
+        },
+        {
+          "sha": "e26e1f09280b6c54e1bc1d1fbc0118f7e309cb10",
+          "subject": "[Feature] Add `--cpu-distributed-timeout-seconds` CLI Option for CPU Process Group Timeout (#42968)"
+        },
+        {
+          "sha": "565b745ec5d28dafd14585f1b695b159ba336a04",
+          "subject": "[BugFix] Use correct logprobs for `logprob_token_ids` (#43125)"
+        },
+        {
+          "sha": "39d5fa96a7c687f9ed7e14a5a52064965356cede",
+          "subject": "[Bugfix] Zero stale is_prefilling in padded CUDA graph rows for Mamba (#41873)"
+        }
+      ],
+      "commit_count": 4,
+      "start_commit": "0b59fc45dd475f96f6f46f2c3e699d7bc13b3b04",
+      "end_commit": "39d5fa96a7c687f9ed7e14a5a52064965356cede",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 176,
+      "total_changed_lines": 272,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/configuration/optimization.md",
+        "docs/design/huggingface_integration.md",
+        "tests/v1/attention/test_attention_splitting.py",
+        "vllm/config/model.py",
+        "vllm/config/parallel.py",
+        "vllm/distributed/parallel_state.py",
+        "vllm/distributed/utils.py",
+        "vllm/engine/arg_utils.py",
+        "vllm/envs.py",
+        "vllm/renderers/registry.py",
+        "vllm/tokenizers/fastokens.py",
+        "vllm/tokenizers/registry.py",
+        "vllm/v1/sample/sampler.py",
+        "vllm/v1/worker/gpu_model_runner.py"
+      ]
+    },
+    {
+      "index": 31,
+      "id": "step-31",
+      "commits": [
+        {
+          "sha": "39910f2b25aacc09f5e7f166cdf0030b19f8b9e8",
+          "subject": "[Rust Frontend] Move code from `vllm-frontend-rs` (#43283)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "39d5fa96a7c687f9ed7e14a5a52064965356cede",
+      "end_commit": "39910f2b25aacc09f5e7f166cdf0030b19f8b9e8",
+      "categories": [
+        "ignored",
+        "requirements"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 72659,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/image_build/image_build.sh",
+        ".buildkite/image_build/image_build_cpu.sh",
+        ".buildkite/image_build/image_build_cpu_arm64.sh",
+        ".buildkite/scripts/run-rust-frontend-cargo-ci.sh",
+        ".buildkite/test_areas/rust_frontend.yaml",
+        ".buildkite/test_areas/rust_frontend_cargo.yaml",
+        ".gitmodules",
+        ".pre-commit-config.yaml",
+        "build_rust.sh",
+        "docker/Dockerfile",
+        "docker/Dockerfile.cpu",
+        "docker/Dockerfile.nightly_torch",
+        "docker/Dockerfile.rocm",
+        "docker/Dockerfile.xpu",
+        "pyproject.toml",
+        "requirements/xpu.txt",
+        "rust",
+        "rust/.gitattributes",
+        "rust/.gitignore",
+        "rust/AGENTS.md",
+        "rust/CLAUDE.md",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/README.md",
+        "rust/proto/vllm_grpc.proto",
+        "rust/rustfmt.toml",
+        "rust/rustfmt.unstable.toml",
+        "rust/src/chat/Cargo.toml",
+        "rust/src/chat/examples/README.md",
+        "rust/src/chat/examples/external_engine_chat_qwen.rs",
+        "rust/src/chat/src/backend/hf.rs",
+        "rust/src/chat/src/backend/mod.rs",
+        "rust/src/chat/src/error.rs",
+        "rust/src/chat/src/event.rs",
+        "rust/src/chat/src/lib.rs",
+        "rust/src/chat/src/multimodal.rs",
+        "rust/src/chat/src/multimodal/tensor.rs",
+        "rust/src/chat/src/output/default/mod.rs",
+        "rust/src/chat/src/output/default/reasoning.rs",
+        "rust/src/chat/src/output/default/tool.rs",
+        "rust/src/chat/src/output/harmony/mod.rs",
+        "rust/src/chat/src/output/harmony/tests.rs",
+        "rust/src/chat/src/output/mod.rs",
+        "rust/src/chat/src/output/structured.rs",
+        "rust/src/chat/src/parser/mod.rs",
+        "rust/src/chat/src/parser/reasoning/mod.rs",
+        "rust/src/chat/src/parser/reasoning/tests.rs",
+        "rust/src/chat/src/parser/tool/mod.rs",
+        "rust/src/chat/src/parser/tool/tests.rs",
+        "rust/src/chat/src/renderer/deepseek_v32/encoding.rs",
+        "rust/src/chat/src/renderer/deepseek_v32/fixtures/test_input.json",
+        "rust/src/chat/src/renderer/deepseek_v32/fixtures/test_input_search_w_date.json",
+        "rust/src/chat/src/renderer/deepseek_v32/fixtures/test_input_search_wo_date.json",
+        "rust/src/chat/src/renderer/deepseek_v32/fixtures/test_output_search_w_date.txt",
+        "rust/src/chat/src/renderer/deepseek_v32/fixtures/test_output_search_wo_date.txt",
+        "rust/src/chat/src/renderer/deepseek_v32/fixtures/test_output_vllm_parity.txt",
+        "rust/src/chat/src/renderer/deepseek_v32/mod.rs",
+        "rust/src/chat/src/renderer/deepseek_v32/tests.rs",
+        "rust/src/chat/src/renderer/deepseek_v4/encoding.rs",
+        "rust/src/chat/src/renderer/deepseek_v4/fixtures/test_input_1.json",
+        "rust/src/chat/src/renderer/deepseek_v4/fixtures/test_input_2.json",
+        "rust/src/chat/src/renderer/deepseek_v4/fixtures/test_output_1.txt",
+        "rust/src/chat/src/renderer/deepseek_v4/fixtures/test_output_2.txt",
+        "rust/src/chat/src/renderer/deepseek_v4/mod.rs",
+        "rust/src/chat/src/renderer/deepseek_v4/tests.rs",
+        "rust/src/chat/src/renderer/hf/error.rs",
+        "rust/src/chat/src/renderer/hf/format.rs",
+        "rust/src/chat/src/renderer/hf/mod.rs",
+        "rust/src/chat/src/renderer/hf/template.rs",
+        "rust/src/chat/src/renderer/hf/tojson.rs",
+        "rust/src/chat/src/renderer/mod.rs",
+        "rust/src/chat/src/renderer/selection.rs",
+        "rust/src/chat/src/request.rs",
+        "rust/src/chat/src/stream.rs",
+        "rust/src/chat/tests/chat.rs",
+        "rust/src/chat/tests/templates/qwen3.jinja",
+        "rust/src/chat/tests/templates/qwen35.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/README.md",
+        "rust/src/chat/tests/templates/vllm_examples/template_alpaca.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/template_baichuan.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/template_chatglm.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/template_chatglm2.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/template_chatml.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/template_falcon.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/template_falcon_180b.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/template_inkbot.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/template_teleflm.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_deepseekr1.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_deepseekv3.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_deepseekv31.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_functiongemma.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_gemma3_pythonic.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_gemma4.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_glm4.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_granite.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_granite_20b_fc.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_hermes.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_hunyuan_a13b.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_internlm2_tool.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_llama3.1_json.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_llama3.2_json.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_llama3.2_pythonic.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_llama4_json.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_llama4_pythonic.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_minimax_m1.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_mistral.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_mistral3.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_mistral_parallel.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_phi4_mini.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_qwen3coder.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_toolace.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_xlam_llama.jinja",
+        "rust/src/chat/tests/templates/vllm_examples/tool_chat_template_xlam_qwen.jinja",
+        "rust/src/cmd/Cargo.toml",
+        "rust/src/cmd/examples/README.md",
+        "rust/src/cmd/src/cli.rs",
+        "rust/src/cmd/src/cli/tests.rs",
+        "rust/src/cmd/src/cli/unsupported.rs",
+        "rust/src/cmd/src/logging.rs",
+        "rust/src/cmd/src/main.rs",
+        "rust/src/engine-core-client/Cargo.toml",
+        "rust/src/engine-core-client/examples/README.md",
+        "rust/src/engine-core-client/examples/external_engine_logprobs.rs",
+        "rust/src/engine-core-client/examples/external_engine_utility_call.rs",
+        "rust/src/engine-core-client/src/client.rs",
+        "rust/src/engine-core-client/src/client/imp.rs",
+        "rust/src/engine-core-client/src/client/state.rs",
+        "rust/src/engine-core-client/src/client/stream.rs",
+        "rust/src/engine-core-client/src/coordinator/bootstrap.rs",
+        "rust/src/engine-core-client/src/coordinator/external.rs",
+        "rust/src/engine-core-client/src/coordinator/handle.rs",
+        "rust/src/engine-core-client/src/coordinator/inproc.rs",
+        "rust/src/engine-core-client/src/coordinator/mod.rs",
+        "rust/src/engine-core-client/src/error.rs",
+        "rust/src/engine-core-client/src/lib.rs",
+        "rust/src/engine-core-client/src/metrics.rs",
+        "rust/src/engine-core-client/src/protocol/classified_outputs.rs",
+        "rust/src/engine-core-client/src/protocol/dtype.rs",
+        "rust/src/engine-core-client/src/protocol/handshake.rs",
+        "rust/src/engine-core-client/src/protocol/logprobs.rs",
+        "rust/src/engine-core-client/src/protocol/logprobs/array.rs",
+        "rust/src/engine-core-client/src/protocol/logprobs/tests.rs",
+        "rust/src/engine-core-client/src/protocol/logprobs/wire.rs",
+        "rust/src/engine-core-client/src/protocol/mod.rs",
+        "rust/src/engine-core-client/src/protocol/multimodal.rs",
+        "rust/src/engine-core-client/src/protocol/stats.rs",
+        "rust/src/engine-core-client/src/protocol/tensor.rs",
+        "rust/src/engine-core-client/src/test_utils.rs",
+        "rust/src/engine-core-client/src/tests/client.rs",
+        "rust/src/engine-core-client/src/tests/mod.rs",
+        "rust/src/engine-core-client/src/tests/python_compat.py",
+        "rust/src/engine-core-client/src/transport.rs",
+        "rust/src/llm/Cargo.toml",
+        "rust/src/llm/examples/README.md",
+        "rust/src/llm/examples/external_engine_smoke.rs",
+        "rust/src/llm/src/error.rs",
+        "rust/src/llm/src/lib.rs",
+        "rust/src/llm/src/log_stats.rs",
+        "rust/src/llm/src/output.rs",
+        "rust/src/llm/src/request.rs",
+        "rust/src/llm/src/request_metrics.rs",
+        "rust/src/llm/tests/generate.rs",
+        "rust/src/managed-engine/Cargo.toml",
+        "rust/src/managed-engine/src/cli.rs",
+        "rust/src/managed-engine/src/lib.rs",
+        "rust/src/managed-engine/src/process.rs",
+        "rust/src/metrics/Cargo.toml",
+        "rust/src/metrics/src/api_server.rs",
+        "rust/src/metrics/src/lib.rs",
+        "rust/src/metrics/src/request.rs",
+        "rust/src/metrics/src/scheduler.rs",
+        "rust/src/reasoning-parser/Cargo.toml",
+        "rust/src/reasoning-parser/src/cohere_cmd.rs",
+        "rust/src/reasoning-parser/src/deepseek_r1.rs",
+        "rust/src/reasoning-parser/src/delimited.rs",
+        "rust/src/reasoning-parser/src/gemma4.rs",
+        "rust/src/reasoning-parser/src/kimi.rs",
+        "rust/src/reasoning-parser/src/lib.rs",
+        "rust/src/reasoning-parser/src/qwen3.rs",
+        "rust/src/reasoning-parser/src/tests.rs",
+        "rust/src/server/Cargo.toml",
+        "rust/src/server/build.rs",
+        "rust/src/server/examples/README.md",
+        "rust/src/server/examples/external_engine_openai_qwen.rs",
+        "rust/src/server/src/config.rs",
+        "rust/src/server/src/error.rs",
+        "rust/src/server/src/grpc/convert.rs",
+        "rust/src/server/src/grpc/mod.rs",
+        "rust/src/server/src/grpc/tests.rs",
+        "rust/src/server/src/lib.rs",
+        "rust/src/server/src/listener.rs",
+        "rust/src/server/src/middleware/load.rs",
+        "rust/src/server/src/middleware/metrics.rs",
+        "rust/src/server/src/middleware/mod.rs",
+        "rust/src/server/src/routes.rs",
+        "rust/src/server/src/routes/cache.rs",
+        "rust/src/server/src/routes/collective_rpc.rs",
+        "rust/src/server/src/routes/health.rs",
+        "rust/src/server/src/routes/http_client_tests.rs",
+        "rust/src/server/src/routes/inference/generate.rs",
+        "rust/src/server/src/routes/inference/generate/convert.rs",
+        "rust/src/server/src/routes/inference/generate/types.rs",
+        "rust/src/server/src/routes/inference/generate/validate.rs",
+        "rust/src/server/src/routes/inference/mod.rs",
+        "rust/src/server/src/routes/load.rs",
+        "rust/src/server/src/routes/metrics.rs",
+        "rust/src/server/src/routes/openai/chat_completions.rs",
+        "rust/src/server/src/routes/openai/chat_completions/convert.rs",
+        "rust/src/server/src/routes/openai/chat_completions/types.rs",
+        "rust/src/server/src/routes/openai/chat_completions/validate.rs",
+        "rust/src/server/src/routes/openai/completions.rs",
+        "rust/src/server/src/routes/openai/completions/convert.rs",
+        "rust/src/server/src/routes/openai/completions/types.rs",
+        "rust/src/server/src/routes/openai/completions/validate.rs",
+        "rust/src/server/src/routes/openai/mod.rs",
+        "rust/src/server/src/routes/openai/models.rs",
+        "rust/src/server/src/routes/openai/utils/logprobs.rs",
+        "rust/src/server/src/routes/openai/utils/mod.rs",
+        "rust/src/server/src/routes/openai/utils/structured_outputs.rs",
+        "rust/src/server/src/routes/openai/utils/types.rs",
+        "rust/src/server/src/routes/openai/utils/validated_json.rs",
+        "rust/src/server/src/routes/sleep.rs",
+        "rust/src/server/src/routes/tests.rs",
+        "rust/src/server/src/state.rs",
+        "rust/src/server/src/utils.rs",
+        "rust/src/text/Cargo.toml",
+        "rust/src/text/src/backend/hf/config.rs",
+        "rust/src/text/src/backend/hf/mod.rs",
+        "rust/src/text/src/backend/hf/model_files.rs",
+        "rust/src/text/src/backend/mod.rs",
+        "rust/src/text/src/error.rs",
+        "rust/src/text/src/lib.rs",
+        "rust/src/text/src/lower.rs",
+        "rust/src/text/src/output/decoded.rs",
+        "rust/src/text/src/output/logprobs.rs",
+        "rust/src/text/src/output/mod.rs",
+        "rust/src/text/src/request.rs",
+        "rust/src/tokenizer/Cargo.toml",
+        "rust/src/tokenizer/benches/hf.rs",
+        "rust/src/tokenizer/benches/tiktoken.rs",
+        "rust/src/tokenizer/src/byte_level_decode.rs",
+        "rust/src/tokenizer/src/error.rs",
+        "rust/src/tokenizer/src/hf.rs",
+        "rust/src/tokenizer/src/incremental.rs",
+        "rust/src/tokenizer/src/lib.rs",
+        "rust/src/tokenizer/src/tekken.rs",
+        "rust/src/tokenizer/src/tiktoken.rs",
+        "rust/src/tool-parser/Cargo.toml",
+        "rust/src/tool-parser/benches/deepseek_v3.rs",
+        "rust/src/tool-parser/benches/deepseek_v31.rs",
+        "rust/src/tool-parser/benches/deepseek_v32.rs",
+        "rust/src/tool-parser/benches/gemma4.rs",
+        "rust/src/tool-parser/benches/glm45_moe.rs",
+        "rust/src/tool-parser/benches/kimi_k2.rs",
+        "rust/src/tool-parser/benches/llama3_json.rs",
+        "rust/src/tool-parser/benches/minimax_m2.rs",
+        "rust/src/tool-parser/benches/qwen3_coder.rs",
+        "rust/src/tool-parser/benches/qwen3_xml.rs",
+        "rust/src/tool-parser/benches/utils/mod.rs",
+        "rust/src/tool-parser/src/deepseek_dsml/deepseek_v32.rs",
+        "rust/src/tool-parser/src/deepseek_dsml/deepseek_v4.rs",
+        "rust/src/tool-parser/src/deepseek_dsml/mod.rs",
+        "rust/src/tool-parser/src/deepseek_json/deepseek_v3.rs",
+        "rust/src/tool-parser/src/deepseek_json/deepseek_v31.rs",
+        "rust/src/tool-parser/src/deepseek_json/mod.rs",
+        "rust/src/tool-parser/src/error.rs",
+        "rust/src/tool-parser/src/gemma4.rs",
+        "rust/src/tool-parser/src/glm_xml/glm45_moe.rs",
+        "rust/src/tool-parser/src/glm_xml/glm47_moe.rs",
+        "rust/src/tool-parser/src/glm_xml/mod.rs",
+        "rust/src/tool-parser/src/json/hermes.rs",
+        "rust/src/tool-parser/src/json/llama.rs",
+        "rust/src/tool-parser/src/json/mistral.rs",
+        "rust/src/tool-parser/src/json/mod.rs",
+        "rust/src/tool-parser/src/json/qwen.rs",
+        "rust/src/tool-parser/src/kimi_k2.rs",
+        "rust/src/tool-parser/src/lib.rs",
+        "rust/src/tool-parser/src/minimax_m2.rs",
+        "rust/src/tool-parser/src/parameters.rs",
+        "rust/src/tool-parser/src/qwen_coder.rs",
+        "rust/src/tool-parser/src/test_utils.rs",
+        "rust/src/tool-parser/src/tests.rs",
+        "rust/src/tool-parser/src/utils.rs",
+        "tools/pre_commit/rust-check.sh"
+      ]
+    },
+    {
+      "index": 32,
+      "id": "step-32",
+      "commits": [
+        {
+          "sha": "ba369b7eb5a3c6593b55f2005655d6586997fa07",
+          "subject": "[CI] Fix dockerfile dependency graph failure for pre-commit (#43378)"
+        },
+        {
+          "sha": "2998a047aad7d48bf0399f19b36f1a4d749c59c2",
+          "subject": "[Bugfix] Fix DSV4 Base model swiglu limit issue in FP8 path  (#42855)"
+        },
+        {
+          "sha": "86ccef7d4400a54441057773d8ffb1f61a20af94",
+          "subject": "[ROCm] Add XGMI backend for MoRI Connector (#41753)"
+        },
+        {
+          "sha": "35d0141a0b68a188777e277e372f211098419f58",
+          "subject": "[ROCm][CI] add warmup to mem_util test before measurement (#43236)"
+        },
+        {
+          "sha": "60af5c16ee64ea3c1c573d67d0773a713c87a22e",
+          "subject": "[Frontend] Add truncation side to OpenAI endpoints (#43260)"
+        },
+        {
+          "sha": "0ddd7dd6564f5e403a15bd7c973c7d358ec82454",
+          "subject": "[Frontend] DP Supervisor (#40841)"
+        },
+        {
+          "sha": "18a27cc9a3641cc1dd3eae5113b75c7ccc029b5f",
+          "subject": "[Bugfix] Make CuMemAllocator free callback stream-aware (#43020)"
+        }
+      ],
+      "commit_count": 7,
+      "start_commit": "39910f2b25aacc09f5e7f166cdf0030b19f8b9e8",
+      "end_commit": "18a27cc9a3641cc1dd3eae5113b75c7ccc029b5f",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 709,
+      "total_changed_lines": 1439,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/assets/contributing/dockerfile-stages-dependency.png",
+        "tests/entrypoints/openai/chat_completion/test_serving_chat.py",
+        "tests/entrypoints/openai/completion/test_completion.py",
+        "tests/entrypoints/openai/test_dp_supervisor.py",
+        "tests/utils_/test_mem_utils.py",
+        "vllm/device_allocator/cumem.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_common.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_engine.py",
+        "vllm/engine/arg_utils.py",
+        "vllm/entrypoints/cli/serve.py",
+        "vllm/entrypoints/openai/api_server.py",
+        "vllm/entrypoints/openai/chat_completion/protocol.py",
+        "vllm/entrypoints/openai/cli_args.py",
+        "vllm/entrypoints/openai/completion/protocol.py",
+        "vllm/entrypoints/openai/dp_supervisor.py",
+        "vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/fused_batched_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/triton_moe.py",
+        "vllm/renderers/params.py",
+        "vllm/utils/system_utils.py"
+      ]
+    },
+    {
+      "index": 33,
+      "id": "step-33",
+      "commits": [
+        {
+          "sha": "8c8b1825eb26c1ffae776baaab16f2eebf92b7d3",
+          "subject": "[XPU] Enable multiple key kernels for sparse attention (#37888)"
+        },
+        {
+          "sha": "1fe3303983e1829fae25edfb0b93e8cbcfad96e6",
+          "subject": "[CI] De-flake renderers/test_hf.py::test_resolve_content_format_fallbacks[Qwen/Qwen-VL-string] (#43064)"
+        },
+        {
+          "sha": "e746a2eebf09b1f99beb6b3c60a5ba9d2f8c4875",
+          "subject": "[Model] Use `AutoWeightsLoader` for Voyage (#42972)"
+        },
+        {
+          "sha": "fa1ff88b3145d1897558408a9001c030c39383b9",
+          "subject": "[Model] Fix MiniCPM-V 4.6 vit_merger qkv weight loading (#43213)"
+        },
+        {
+          "sha": "5ea76fa89aa2e307f0d9a2e7fc19d13aed65a82f",
+          "subject": "[CI] Fix test_lora_with_spec_decode on V2 model runner (#43314)"
+        },
+        {
+          "sha": "025d4f5cd2617bb767663f9e7d62354039887757",
+          "subject": "[CI] Fix \"test_awq_load[gemma4-moe-*]\" failure (#43296)"
+        },
+        {
+          "sha": "6bb8753db1076f498c240fffdd88b1ab983b7f40",
+          "subject": "Correcting the mock classes for MM GC tests (#43321)"
+        }
+      ],
+      "commit_count": 7,
+      "start_commit": "18a27cc9a3641cc1dd3eae5113b75c7ccc029b5f",
+      "end_commit": "6bb8753db1076f498c240fffdd88b1ab983b7f40",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 753,
+      "total_changed_lines": 965,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/models/multimodal/conftest.py",
+        "tests/models/multimodal/processing/test_common.py",
+        "tests/models/multimodal/processing/test_gemma4.py",
+        "tests/renderers/conftest.py",
+        "tests/tokenizers_/conftest.py",
+        "tests/utils.py",
+        "tests/v1/cudagraph/test_encoder_cudagraph.py",
+        "tests/v1/e2e/spec_decode/test_lora_with_spec_decode.py",
+        "vllm/_custom_ops.py",
+        "vllm/_xpu_ops.py",
+        "vllm/model_executor/layers/sparse_attn_indexer.py",
+        "vllm/model_executor/models/gemma4_mm.py",
+        "vllm/model_executor/models/minicpmv4_6.py",
+        "vllm/model_executor/models/voyage.py",
+        "vllm/v1/worker/gpu/model_runner.py"
+      ]
+    },
+    {
+      "index": 34,
+      "id": "step-34",
+      "commits": [
+        {
+          "sha": "694d9a81bbb07977e7a72a597acb44f6a848f774",
+          "subject": "[BugFix] Fix setuptools-rust dep in requirements files (#43377)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "6bb8753db1076f498c240fffdd88b1ab983b7f40",
+      "end_commit": "694d9a81bbb07977e7a72a597acb44f6a848f774",
+      "categories": [
+        "ignored",
+        "requirements"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 3,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "requirements/build/rocm.txt",
+        "requirements/build/tpu.txt",
+        "requirements/xpu.txt"
+      ]
+    },
+    {
+      "index": 35,
+      "id": "step-35",
+      "commits": [
+        {
+          "sha": "a7616977176e12ddb14c0daab00cd2a2161ba37c",
+          "subject": "Fix the docker build failure in tpu-inference (#43360)"
+        },
+        {
+          "sha": "2380bfc2104267914eea36015e2a347b9318c6c0",
+          "subject": "[Docs] Note image preprocessing difference between qwen_vl_utils and vllm. (#43393)"
+        }
+      ],
+      "commit_count": 2,
+      "start_commit": "694d9a81bbb07977e7a72a597acb44f6a848f774",
+      "end_commit": "2380bfc2104267914eea36015e2a347b9318c6c0",
+      "categories": [
+        "ignored"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 17,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/models/pooling_models/embed.md",
+        "docs/models/pooling_models/scoring.md",
+        "docs/models/supported_models.md",
+        "requirements/tpu.txt"
+      ]
+    },
+    {
+      "index": 36,
+      "id": "step-36",
+      "commits": [
+        {
+          "sha": "65b7a812a2dabd212d78c7b5b8a320b4efb9750d",
+          "subject": "[CPU] Experimentally enable Triton and MRV2 (#43225)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "2380bfc2104267914eea36015e2a347b9318c6c0",
+      "end_commit": "65b7a812a2dabd212d78c7b5b8a320b4efb9750d",
+      "categories": [
+        "ignored",
+        "requirements",
+        "vllm"
+      ],
+      "vllm_changed_lines": 152,
+      "total_changed_lines": 182,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/hardware_tests/cpu.yaml",
+        "docker/Dockerfile.cpu",
+        "setup.py",
+        "vllm/platforms/cpu.py",
+        "vllm/triton_utils/importing.py",
+        "vllm/utils/platform_utils.py",
+        "vllm/v1/worker/cpu/__init__.py",
+        "vllm/v1/worker/cpu/buffer_utils.py",
+        "vllm/v1/worker/cpu/model_runner.py",
+        "vllm/v1/worker/cpu/shm.py",
+        "vllm/v1/worker/cpu_worker.py"
+      ]
+    },
+    {
+      "index": 37,
+      "id": "step-37",
+      "commits": [
+        {
+          "sha": "7e1b45a09252a5b513cd83116aa7a2f310220c34",
+          "subject": "[Attention] Mamba attention module refactor (#41126)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "65b7a812a2dabd212d78c7b5b8a320b4efb9750d",
+      "end_commit": "7e1b45a09252a5b513cd83116aa7a2f310220c34",
+      "categories": [
+        "vllm"
+      ],
+      "vllm_changed_lines": 5505,
+      "total_changed_lines": 5505,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "vllm/config/compilation.py",
+        "vllm/model_executor/layers/kda.py",
+        "vllm/model_executor/layers/mamba/gdn/__init__.py",
+        "vllm/model_executor/layers/mamba/gdn/base.py",
+        "vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py",
+        "vllm/model_executor/layers/mamba/gdn/olmo_gdn_linear_attn.py",
+        "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
+        "vllm/model_executor/layers/mamba/gdn_linear_attn.py",
+        "vllm/model_executor/models/kimi_linear.py",
+        "vllm/model_executor/models/olmo_hybrid.py",
+        "vllm/model_executor/models/qwen3_5.py",
+        "vllm/model_executor/models/qwen3_next.py"
+      ]
+    },
+    {
+      "index": 38,
+      "id": "step-38",
+      "commits": [
+        {
+          "sha": "d3d1cf6972607c53327b5ce1748e56a95fc41c37",
+          "subject": "[XPU]feat: add XPU fallback for MoE topk routing and MXFP4 backend (#42951)"
+        },
+        {
+          "sha": "b3c7ffcab82c2439726f8cb213800f6f38c023d3",
+          "subject": "[Misc] Replace assert with proper exceptions for security and validation in pooling (#43286)"
+        },
+        {
+          "sha": "4658bf882b881287fc85797a23037aa91740b7a7",
+          "subject": "[Bugfix] Clear P0 mm sender cache on sleep/pause to fix mm_hash desync (#43001)"
+        },
+        {
+          "sha": "79ff0ffa98dc8dd14a8651bce36ce6265ff4d35d",
+          "subject": "[BugFix] wire make_empty_intermediate_tensors on AyaVision and Voxtral (#43118)"
+        },
+        {
+          "sha": "15f7cd33dc8bd4d2270b70ba49d511827d2413ff",
+          "subject": "[LoRA] Reduce memory of 2D weights when EP is set (#42737)"
+        },
+        {
+          "sha": "d3a563501bcc6134a348f8458b1a797c94336f1f",
+          "subject": "[EPLB] Change default EPLB communicator (#43110)"
+        },
+        {
+          "sha": "a377631d21cc97db678727455d33c4257435f417",
+          "subject": "[CI] Fix AMD docker build tests (#43329)"
+        },
+        {
+          "sha": "fb21d8b4f9027f4642637c7bb0acc08c29dce387",
+          "subject": "Add NVFP4 MOE support for Deepseek V4. (#42209)"
+        },
+        {
+          "sha": "f0feb15e7fc521544d23c2d23de0e327a509876b",
+          "subject": "[Multimodal] Simplify ViT CUDA graph interfaces (#41234)"
+        },
+        {
+          "sha": "91f5b92438a568c89e8b9d6c2c55de5a552291f6",
+          "subject": "[Rust Frontend] [Refactor] Extract a newtype for utility call ID (#43405)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "7e1b45a09252a5b513cd83116aa7a2f310220c34",
+      "end_commit": "91f5b92438a568c89e8b9d6c2c55de5a552291f6",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 701,
+      "total_changed_lines": 1673,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test_areas/kernels.yaml",
+        "CMakeLists.txt",
+        "cmake/utils.cmake",
+        "rust/src/engine-core-client/src/client.rs",
+        "rust/src/engine-core-client/src/client/imp.rs",
+        "rust/src/engine-core-client/src/client/state.rs",
+        "rust/src/engine-core-client/src/error.rs",
+        "rust/src/engine-core-client/src/protocol/classified_outputs.rs",
+        "rust/src/engine-core-client/src/protocol/mod.rs",
+        "rust/src/engine-core-client/src/protocol/utility.rs",
+        "rust/src/engine-core-client/src/tests/client.rs",
+        "rust/src/server/src/routes/tests.rs",
+        "tests/kernels/moe/test_trtllm_nvfp4_moe.py",
+        "tests/lora/test_moe_lora_ep_load.py",
+        "tests/model_executor/layers/test_pooler_activations.py",
+        "tests/models/multimodal/generation/test_vit_cudagraph.py",
+        "tests/multimodal/test_cache.py",
+        "tests/v1/cudagraph/test_encoder_cudagraph.py",
+        "vllm/config/parallel.py",
+        "vllm/distributed/nixl_utils.py",
+        "vllm/lora/lora_model.py",
+        "vllm/lora/model_manager.py",
+        "vllm/lora/worker_manager.py",
+        "vllm/model_executor/layers/fused_moe/config.py",
+        "vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py",
+        "vllm/model_executor/layers/fused_moe/layer.py",
+        "vllm/model_executor/layers/fused_moe/oracle/mxfp4.py",
+        "vllm/model_executor/layers/fused_moe/oracle/nvfp4.py",
+        "vllm/model_executor/layers/fused_moe/router/fused_topk_bias_router.py",
+        "vllm/model_executor/layers/pooler/activations.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py",
+        "vllm/model_executor/layers/quantization/modelopt.py",
+        "vllm/model_executor/models/aya_vision.py",
+        "vllm/model_executor/models/interfaces.py",
+        "vllm/model_executor/models/qwen2_5_vl.py",
+        "vllm/model_executor/models/qwen2_vl.py",
+        "vllm/model_executor/models/qwen3_vl.py",
+        "vllm/model_executor/models/step3_vl.py",
+        "vllm/model_executor/models/voxtral.py",
+        "vllm/models/deepseek_v4/quant_config.py",
+        "vllm/pooling_params.py",
+        "vllm/v1/engine/async_llm.py",
+        "vllm/v1/engine/llm_engine.py",
+        "vllm/v1/pool/metadata.py",
+        "vllm/v1/worker/encoder_cudagraph.py",
+        "vllm/v1/worker/encoder_cudagraph_defs.py"
+      ]
+    },
+    {
+      "index": 39,
+      "id": "step-39",
+      "commits": [
+        {
+          "sha": "c7624bea5ebba1c688eb4c216bd4ede7a94f2a82",
+          "subject": "[Bugfix] Source num_qo_heads from Attention layers in Flashinfer/Triton metadata builders (#42650)"
+        },
+        {
+          "sha": "b21f3d56d4a2ab5504b56504e87e0475c6d84eb2",
+          "subject": "[KV Connector] MooncakeStore: don't co-queue save with load to avoid double delayed-free (#43371)"
+        }
+      ],
+      "commit_count": 2,
+      "start_commit": "91f5b92438a568c89e8b9d6c2c55de5a552291f6",
+      "end_commit": "b21f3d56d4a2ab5504b56504e87e0475c6d84eb2",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 52,
+      "total_changed_lines": 287,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/v1/kv_connector/unit/test_mooncake_store_scheduler.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/data.py",
+        "vllm/v1/attention/backends/flashinfer.py",
+        "vllm/v1/attention/backends/triton_attn.py",
+        "vllm/v1/attention/backends/utils.py"
+      ]
+    },
+    {
+      "index": 40,
+      "id": "step-40",
+      "commits": [
+        {
+          "sha": "843715739b7b555c61dd6190cafb5ab7a44c41f1",
+          "subject": "[Refactor] Extract DeepSeek V4 sparse MLA impl into model folder (#43149)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "b21f3d56d4a2ab5504b56504e87e0475c6d84eb2",
+      "end_commit": "843715739b7b555c61dd6190cafb5ab7a44c41f1",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 4022,
+      "total_changed_lines": 4033,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/design/attention_backends.md",
+        "tests/kernels/attention/test_rocm_triton_attn_dsv4.py",
+        "tests/kernels/test_fused_inv_rope_fp8_quant.py",
+        "vllm/models/deepseek_v4/amd/rocm.py",
+        "vllm/models/deepseek_v4/attention.py",
+        "vllm/models/deepseek_v4/nvidia/flashmla.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/models/deepseek_v4/nvidia/ops/attention.py",
+        "vllm/v1/attention/backends/mla/flashmla_sparse.py",
+        "vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse_dsv4.py",
+        "vllm/v1/attention/backends/mla/sparse_swa.py"
+      ]
+    },
+    {
+      "index": 41,
+      "id": "step-41",
+      "commits": [
+        {
+          "sha": "2b94d1c0caf69d4108d720986f4e792960b02cf7",
+          "subject": "[Frontend] Simplify AuthenticationMiddleware path extraction (#43426)"
+        },
+        {
+          "sha": "977703aa94fa946e19a70de4c105625600255b66",
+          "subject": "[RFC][EPLB][#32028] Remove dead torch.accelerator.synchronize() from sync path (#40733)"
+        },
+        {
+          "sha": "23f7b11bf4b715ee6084ea368c929789184a8555",
+          "subject": "[Bugfix] Detect wrong libcute_dsl_runtime.so variant in FlashInfer GDN (#43427)"
+        },
+        {
+          "sha": "4e597b749144d4b3f0716994b95486ab734b185f",
+          "subject": "[Bugfix] Clear error message for FP8 torchao quantization on unsupported GPUs (#36854)"
+        },
+        {
+          "sha": "08cb46789d31e07f515243d646ca7f5df2d8d3e7",
+          "subject": "mhc_post - remove sts & add vectorized copies (#43437)"
+        },
+        {
+          "sha": "e203006a8b05b6380f7deb261c28f384711674c1",
+          "subject": "[Quantization][ModelOpt] W4A16 NVFP4 fused MoE + mixed-precision dispatch (#42566)"
+        },
+        {
+          "sha": "47d4407d7cbb2a70fd02d73f34407caeee6ae565",
+          "subject": "[Model Runner V2] Support sharing kv cache layers (#35045)"
+        },
+        {
+          "sha": "f743254143f25e7f3519b2cd5f3f766692b6e397",
+          "subject": "DSv4 fused Q-norm kernel grid refactor (#42353)"
+        },
+        {
+          "sha": "4e2eba28beec9972445c338e8ad2080b3cab3246",
+          "subject": "[Perf] Optimize hidden state extraction logic (#37374)"
+        },
+        {
+          "sha": "8de5cabeb70df7a9ba835c423b66c2ec51dbeefc",
+          "subject": "[XPU]fix: add XPU platform guards to DeepSeek-V4 ops (#42950)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "843715739b7b555c61dd6190cafb5ab7a44c41f1",
+      "end_commit": "8de5cabeb70df7a9ba835c423b66c2ec51dbeefc",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 592,
+      "total_changed_lines": 1826,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "benchmarks/benchmark_hidden_state_extraction.py",
+        "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu",
+        "docs/features/speculative_decoding/README.md",
+        "docs/features/speculative_decoding/extract_hidden_states.md",
+        "examples/features/speculative_decoding/extract_hidden_states_offline.py",
+        "tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py",
+        "tests/quantization/test_modelopt.py",
+        "tests/v1/kv_connector/extract_hidden_states_integration/test_extraction.py",
+        "tests/v1/spec_decode/test_extract_hidden_states.py",
+        "vllm/_tilelang_ops.py",
+        "vllm/config/vllm.py",
+        "vllm/distributed/eplb/rebalance_execute.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py",
+        "vllm/entrypoints/openai/server_utils.py",
+        "vllm/model_executor/layers/activation.py",
+        "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
+        "vllm/model_executor/layers/quantization/modelopt.py",
+        "vllm/model_executor/layers/quantization/torchao.py",
+        "vllm/models/deepseek_v4/common/ops/fused_inv_rope_fp8_quant.py",
+        "vllm/models/deepseek_v4/compressor.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/v1/attention/backends/mla/sparse_swa.py",
+        "vllm/v1/attention/ops/rocm_aiter_mla_sparse.py",
+        "vllm/v1/spec_decode/extract_hidden_states.py",
+        "vllm/v1/worker/gpu/attn_utils.py",
+        "vllm/v1/worker/gpu/model_runner.py",
+        "vllm/v1/worker/utils.py"
+      ]
+    },
+    {
+      "index": 42,
+      "id": "step-42",
+      "commits": [
+        {
+          "sha": "6d30655b136bec37e7e7c7d045f1bcedc8cf3e2b",
+          "subject": "elastic_ep: stage/commit MoE quant method on reconfigure (#40881)"
+        },
+        {
+          "sha": "552bbe6f4e6da23def2adf9fbc39c3ad0250f1e1",
+          "subject": "[Attention] Add head_dim=512 support for FlashInfer trtllm attention backend (#38822)"
+        },
+        {
+          "sha": "3cb83c95922f34d0a3dc5d7795ab7b4c6ef6e54b",
+          "subject": "Add `model` to `WeightTransferEngine.__init__` (#42922)"
+        },
+        {
+          "sha": "367cb81966f98f6ba73e5e3f529573d017c446d0",
+          "subject": "[DSV4] More multi-stream enablement for c4a (#42925)"
+        },
+        {
+          "sha": "6a4723a2e0d808ce33bfe378f761e585a7685d58",
+          "subject": "[ROCm][CI] Stabilize runner teardown between sampler tests (#43023)"
+        },
+        {
+          "sha": "76ea1d5d2fa3d7daef2b7503e831cdeb8a4fe0ea",
+          "subject": "[ROCm][CI] Stabilize Granite tool-use and test URL construction (#43017)"
+        },
+        {
+          "sha": "84e351555aac8f80e4bf03fc77d4f5e89cb36de5",
+          "subject": "[Bugfix] Auto-raise max_num_batched_tokens for prefix-LM multimodal models (#43051)"
+        },
+        {
+          "sha": "d28bdf9344aec8c393f8f1184243a6b159dbba27",
+          "subject": "[ROCm][CI] Fix ROCm LoRA Transformers fallback with full CUDA graphs (#41577)"
+        },
+        {
+          "sha": "a5bbd81e2e872eba255da9b9f8b86063c0d0cef0",
+          "subject": "[XPU]feat: enable FP8 block-scaled quantization on XPU (#42952)"
+        },
+        {
+          "sha": "54d153637b5e8ecd3c75f8d4427f4c7309de0e2c",
+          "subject": "[XPU] reudce host overhead of XPU MOE (#42915)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "8de5cabeb70df7a9ba835c423b66c2ec51dbeefc",
+      "end_commit": "54d153637b5e8ecd3c75f8d4427f4c7309de0e2c",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 759,
+      "total_changed_lines": 986,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/design/attention_backends.md",
+        "examples/tool_chat_template_granite.jinja",
+        "tests/conftest.py",
+        "tests/distributed/test_weight_transfer.py",
+        "tests/kernels/ir/test_layernorm.py",
+        "tests/tool_use/test_parallel_tool_calls.py",
+        "tests/tool_use/test_tool_calls.py",
+        "tests/tool_use/utils.py",
+        "tests/utils.py",
+        "tests/v1/engine/test_engine_args.py",
+        "vllm/distributed/device_communicators/all2all.py",
+        "vllm/distributed/elastic_ep/elastic_execute.py",
+        "vllm/distributed/weight_transfer/__init__.py",
+        "vllm/distributed/weight_transfer/base.py",
+        "vllm/distributed/weight_transfer/factory.py",
+        "vllm/distributed/weight_transfer/ipc_engine.py",
+        "vllm/distributed/weight_transfer/nccl_engine.py",
+        "vllm/engine/arg_utils.py",
+        "vllm/kernels/vllm_c.py",
+        "vllm/model_executor/kernels/linear/__init__.py",
+        "vllm/model_executor/kernels/linear/scaled_mm/triton.py",
+        "vllm/model_executor/layers/fused_moe/all2all_utils.py",
+        "vllm/model_executor/layers/fused_moe/eep_reconfigure.py",
+        "vllm/model_executor/layers/fused_moe/experts/xpu_moe.py",
+        "vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py",
+        "vllm/model_executor/layers/fused_moe/modular_kernel.py",
+        "vllm/model_executor/layers/fused_moe/prepare_finalize/nixl_ep.py",
+        "vllm/model_executor/layers/quantization/input_quant_fp8.py",
+        "vllm/model_executor/layers/quantization/utils/fp8_utils.py",
+        "vllm/model_executor/layers/utils.py",
+        "vllm/model_executor/models/transformers/base.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/models/deepseek_v4/nvidia/ops/attention.py",
+        "vllm/v1/attention/backends/flashinfer.py",
+        "vllm/v1/engine/core.py",
+        "vllm/v1/worker/gpu_worker.py"
+      ]
+    },
+    {
+      "index": 43,
+      "id": "step-43",
+      "commits": [
+        {
+          "sha": "a7be0f342dd376bf8234eb1b7397be7a79be8f42",
+          "subject": "[7/n] Migrate pos_encoding and norm kernels to libtorch stable ABI (continued) (#43209)"
+        },
+        {
+          "sha": "3a1c0621512f6a58f14a19abfc106f7c11863681",
+          "subject": "[Misc] Added missing return type annotations to improve mypy and IDE tooling (#43383)"
+        },
+        {
+          "sha": "d19db10974587335ec3a37e0a424abb57430574e",
+          "subject": "[Bugfix] Fix native Triton top-k/top-p kernel assumes contiguous logi\u2026 (#42739)"
+        },
+        {
+          "sha": "09a219c075276f17a18088233a593479fada9345",
+          "subject": "[ModelOpt] Support Qwen3.5/3.6 VLM quantized prefix mapping (#42546)"
+        },
+        {
+          "sha": "82536acc54fc8d828b0d8add9d093aee0da1370e",
+          "subject": "Keep scheduler alive for delayed KV connector frees (#43433)"
+        },
+        {
+          "sha": "3f3e8626813fca2d070a054fdf29faf77b7feb19",
+          "subject": "fix(eagle3): read norm_before_fc from eagle_config for NVIDIA checkpoint (#42143)"
+        },
+        {
+          "sha": "5bb8d2767a2829b56e58c68fa8f380e9e4e2bd3e",
+          "subject": "[Kernel] Batch invariant NVFP4 linear using cutlass (#39912)"
+        },
+        {
+          "sha": "2a7d5b73247e3aac908d8884c41af5f5e08750cd",
+          "subject": "[ROCm][CI] Remove benchmarks test group and shard long test groups (#41669)"
+        },
+        {
+          "sha": "d8b385b7eac4724425f75bfe7a7ae3f477dd8d5d",
+          "subject": "[Bugfix][Frontend] Fix input_audio parsing when uuid is present  (#43414)"
+        },
+        {
+          "sha": "a0be71ee47d3e0bed797ca08dff2ec863b2e28d6",
+          "subject": "[MM] Enable FlashInfer metadata support for Qwen2.5-VL vision attention (#42787)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "54d153637b5e8ecd3c75f8d4427f4c7309de0e2c",
+      "end_commit": "a0be71ee47d3e0bed797ca08dff2ec863b2e28d6",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 243,
+      "total_changed_lines": 6138,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test-amd.yaml",
+        ".buildkite/test_areas/misc.yaml",
+        "CMakeLists.txt",
+        "csrc/fused_qknorm_rope_kernel.cu",
+        "csrc/layernorm_kernels.cu",
+        "csrc/layernorm_quant_kernels.cu",
+        "csrc/libtorch_stable/dispatch_utils.h",
+        "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu",
+        "csrc/libtorch_stable/layernorm_kernels.cu",
+        "csrc/libtorch_stable/layernorm_quant_kernels.cu",
+        "csrc/libtorch_stable/ops.h",
+        "csrc/libtorch_stable/pos_encoding_kernels.cu",
+        "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu",
+        "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu",
+        "csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu",
+        "csrc/libtorch_stable/quantization/fused_kernels/layernorm_utils.cuh",
+        "csrc/libtorch_stable/quantization/fused_kernels/quant_conversions.cuh",
+        "csrc/libtorch_stable/torch_bindings.cpp",
+        "csrc/ops.h",
+        "csrc/pos_encoding_kernels.cu",
+        "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu",
+        "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu",
+        "csrc/quantization/fused_kernels/layernorm_utils.cuh",
+        "csrc/quantization/fused_kernels/quant_conversions.cuh",
+        "csrc/torch_bindings.cpp",
+        "csrc/type_convert.cuh",
+        "tests/v1/core/test_scheduler.py",
+        "tests/v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py",
+        "tests/v1/kv_connector/unit/test_multi_connector.py",
+        "tests/v1/sample/test_topk_topp_sampler.py",
+        "vllm/entrypoints/chat_utils.py",
+        "vllm/model_executor/kernels/linear/__init__.py",
+        "vllm/model_executor/layers/pooler/activations.py",
+        "vllm/model_executor/layers/pooler/seqwise/methods.py",
+        "vllm/model_executor/layers/pooler/special.py",
+        "vllm/model_executor/layers/quantization/modelopt.py",
+        "vllm/model_executor/models/llama_eagle3.py",
+        "vllm/model_executor/models/qwen2_5_vl.py",
+        "vllm/v1/core/sched/scheduler.py",
+        "vllm/v1/engine/core.py",
+        "vllm/v1/pool/metadata.py",
+        "vllm/v1/sample/ops/topk_topp_triton.py"
+      ]
+    },
+    {
+      "index": 44,
+      "id": "step-44",
+      "commits": [
+        {
+          "sha": "7c2ff1f819a60927649648e2b22c4adf0f3dcf95",
+          "subject": "[Docs] Fix stale version number in token_embed.md (#43488)"
+        },
+        {
+          "sha": "8737e4a85771e67c298f4f79dd655b06ef43b36f",
+          "subject": "[Docs] Fix stale version number in token_classify.md (#43489)"
+        },
+        {
+          "sha": "4438b6e7dc480dd59e5edabfcc939c15321a129a",
+          "subject": "[MoE] Migrate W4A8 CT to oracle kernel setup (#42680)"
+        }
+      ],
+      "commit_count": 3,
+      "start_commit": "a0be71ee47d3e0bed797ca08dff2ec863b2e28d6",
+      "end_commit": "4438b6e7dc480dd59e5edabfcc939c15321a129a",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 658,
+      "total_changed_lines": 662,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/models/pooling_models/token_classify.md",
+        "docs/models/pooling_models/token_embed.md",
+        "vllm/model_executor/layers/fused_moe/__init__.py",
+        "vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py",
+        "vllm/model_executor/layers/fused_moe/oracle/w4a8.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a8_fp8.py"
+      ]
+    },
+    {
+      "index": 45,
+      "id": "step-45",
+      "commits": [
+        {
+          "sha": "819c610f9bd0f473573c4a9826b229aebad8b301",
+          "subject": "[Mooncake] Add metrics for MooncakeStoreConnector operations (#43392)"
+        },
+        {
+          "sha": "46f95b2ec2cb2115e02cadfa2bb03c6956a78927",
+          "subject": "[ROCm][Critical] Fix the GDN import bug (#43486)"
+        }
+      ],
+      "commit_count": 2,
+      "start_commit": "4438b6e7dc480dd59e5edabfcc939c15321a129a",
+      "end_commit": "46f95b2ec2cb2115e02cadfa2bb03c6956a78927",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 370,
+      "total_changed_lines": 520,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/compile/passes/test_fusion.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_connector.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_worker.py",
+        "vllm/compilation/passes/fusion/rocm_aiter_fusion.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/metrics.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py"
+      ]
+    },
+    {
+      "index": 46,
+      "id": "step-46",
+      "commits": [
+        {
+          "sha": "10d264a2b917e3e8b26cdf155d47f37df6d3faa0",
+          "subject": "Revert \"[Misc] add humming to dependencies\" (#43492)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "46f95b2ec2cb2115e02cadfa2bb03c6956a78927",
+      "end_commit": "10d264a2b917e3e8b26cdf155d47f37df6d3faa0",
+      "categories": [
+        "ignored",
+        "requirements",
+        "vllm"
+      ],
+      "vllm_changed_lines": 23,
+      "total_changed_lines": 30,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "requirements/cuda.txt",
+        "setup.py",
+        "vllm/model_executor/layers/quantization/humming.py"
+      ]
+    },
+    {
+      "index": 47,
+      "id": "step-47",
+      "commits": [
+        {
+          "sha": "b32fe416ea1a036cda7373fc701b12b75bf86ac9",
+          "subject": "[Bugfix] Fix reasoning dropped on streaming boundary deltas (#42691)"
+        },
+        {
+          "sha": "33d7cbe02ca100d3f0314cd22f4342d5cd23ba15",
+          "subject": "[Model Runner v2] Force v1 runner for tests (#43233)"
+        },
+        {
+          "sha": "0902d8e62fd905f7b02b6ca0b64900d105fb77e9",
+          "subject": "[KV Connector] Keep MooncakeStore full hits block-aligned (#43494)"
+        },
+        {
+          "sha": "357fddf6147780404cb07b5a7d58b8434c9e828d",
+          "subject": "[kv_offload]: Add DSv4 support (#43142)"
+        },
+        {
+          "sha": "594059085593313d3922ee2f8822467763753091",
+          "subject": "[ROCm][CI] Stabilize 400 error return code for invalid schema inputs (#43016)"
+        }
+      ],
+      "commit_count": 5,
+      "start_commit": "10d264a2b917e3e8b26cdf155d47f37df6d3faa0",
+      "end_commit": "594059085593313d3922ee2f8822467763753091",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 244,
+      "total_changed_lines": 593,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/features/mooncake_store_connector_usage.md",
+        "tests/compile/correctness_e2e/test_async_tp.py",
+        "tests/compile/correctness_e2e/test_sequence_parallel.py",
+        "tests/compile/fullgraph/test_basic_correctness.py",
+        "tests/distributed/test_pipeline_parallel.py",
+        "tests/entrypoints/openai/completion/test_shutdown.py",
+        "tests/entrypoints/openai/test_openai_schema.py",
+        "tests/entrypoints/serve/disagg/test_generate_stream.py",
+        "tests/entrypoints/weight_transfer/test_weight_transfer_llm.py",
+        "tests/models/quantization/test_bitsandbytes.py",
+        "tests/parser/test_streaming.py",
+        "tests/utils.py",
+        "tests/v1/kv_connector/unit/offloading_connector/test_scheduler.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_scheduler.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/offloading/worker.py",
+        "vllm/entrypoints/chat_utils.py",
+        "vllm/entrypoints/openai/api_server.py",
+        "vllm/entrypoints/openai/chat_completion/batch_serving.py",
+        "vllm/entrypoints/openai/chat_completion/protocol.py",
+        "vllm/entrypoints/serve/disagg/protocol.py",
+        "vllm/entrypoints/serve/disagg/serving.py",
+        "vllm/parser/abstract_parser.py",
+        "vllm/v1/kv_offload/base.py",
+        "vllm/v1/utils.py"
+      ]
+    },
+    {
+      "index": 48,
+      "id": "step-48",
+      "commits": [
+        {
+          "sha": "1806d1adfc9b598bc6eb94de38a330aaad04c291",
+          "subject": "[ROCm] [DSv4] [Perf] Support DeepSeek v4 MTP (#43385)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "594059085593313d3922ee2f8822467763753091",
+      "end_commit": "1806d1adfc9b598bc6eb94de38a330aaad04c291",
+      "categories": [
+        "vllm"
+      ],
+      "vllm_changed_lines": 2392,
+      "total_changed_lines": 2392,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "vllm/model_executor/layers/fused_moe/experts/gpt_oss_triton_kernels_moe.py",
+        "vllm/models/deepseek_v4/amd/model.py",
+        "vllm/models/deepseek_v4/amd/mtp.py",
+        "vllm/models/deepseek_v4/amd/rocm.py",
+        "vllm/v1/attention/ops/rocm_aiter_mla_sparse.py",
+        "vllm/v1/spec_decode/llm_base_proposer.py"
+      ]
+    },
+    {
+      "index": 49,
+      "id": "step-49",
+      "commits": [
+        {
+          "sha": "d56285c747ec3133163c740adc3c68f3f5feb4e7",
+          "subject": "Tuning script and configs for Triton Mamba SSU kernel (#43083)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "1806d1adfc9b598bc6eb94de38a330aaad04c291",
+      "end_commit": "d56285c747ec3133163c740adc3c68f3f5feb4e7",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 724,
+      "total_changed_lines": 1861,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "benchmarks/kernels/benchmark_selective_state_update.py",
+        "tests/kernels/mamba/__init__.py",
+        "tests/kernels/mamba/test_mamba_ssm.py",
+        "tests/kernels/mamba/test_mamba_ssm_configs.py",
+        "tests/kernels/mamba/utils.py",
+        "vllm/envs.py",
+        "vllm/model_executor/layers/mamba/ops/configs/selective_state_update/headdim=64,dstate=128,device_name=NVIDIA_B200,cache_dtype=float16.json",
+        "vllm/model_executor/layers/mamba/ops/configs/selective_state_update/headdim=64,dstate=128,device_name=NVIDIA_B200,cache_dtype=float32.json",
+        "vllm/model_executor/layers/mamba/ops/configs/selective_state_update/headdim=64,dstate=128,device_name=NVIDIA_GB200,cache_dtype=float16.json",
+        "vllm/model_executor/layers/mamba/ops/configs/selective_state_update/headdim=64,dstate=128,device_name=NVIDIA_GB200,cache_dtype=float32.json",
+        "vllm/model_executor/layers/mamba/ops/configs/selective_state_update/headdim=64,dstate=128,device_name=NVIDIA_H100_80GB_HBM3,cache_dtype=float16.json",
+        "vllm/model_executor/layers/mamba/ops/configs/selective_state_update/headdim=64,dstate=128,device_name=NVIDIA_H100_80GB_HBM3,cache_dtype=float32.json",
+        "vllm/model_executor/layers/mamba/ops/mamba_ssm.py"
+      ]
+    },
+    {
+      "index": 50,
+      "id": "step-50",
+      "commits": [
+        {
+          "sha": "d0a100c87af832ad97ade60b8ec7610018a08427",
+          "subject": "File system secondary tier implemented in python (#41735)"
+        },
+        {
+          "sha": "b06813e87207e15b133e903d641e03f237d85b17",
+          "subject": "[Kernel] Add mhc_pre_big_fuse_with_norm_tilelang  (#43474)"
+        },
+        {
+          "sha": "6cbe448eed751824d608faf9078ef84724d621c1",
+          "subject": "fix: MoE model using shared routed experts crashes on AMD GPUs (#42373)"
+        },
+        {
+          "sha": "1b26fa361e7aa459951d08b315533803862f04d2",
+          "subject": "[Docs] Reorganize offline inference docs.  (#43552)"
+        },
+        {
+          "sha": "3df1c7c43e73c6a06f70390136deecfe856c5969",
+          "subject": "[Docker] Non-root support for vllm-openai; add opt-in vllm-openai-nonroot target (#40275)"
+        }
+      ],
+      "commit_count": 5,
+      "start_commit": "d56285c747ec3133163c740adc3c68f3f5feb4e7",
+      "end_commit": "3df1c7c43e73c6a06f70390136deecfe856c5969",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 996,
+      "total_changed_lines": 2126,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/image_build/image_build.yaml",
+        ".pre-commit-config.yaml",
+        "docker/Dockerfile",
+        "docker/entrypoints/test_vllm_nonroot_entrypoint.sh",
+        "docker/entrypoints/vllm-nonroot-entrypoint.sh",
+        "docs/assets/contributing/dockerfile-stages-dependency.png",
+        "docs/deployment/docker.md",
+        "docs/serving/offline_inference.md",
+        "tests/v1/kv_connector/unit/test_offloading_connector.py",
+        "tests/v1/kv_offload/test_file_mapper.py",
+        "tests/v1/kv_offload/test_fs_tier.py",
+        "vllm/_tilelang_ops.py",
+        "vllm/model_executor/kernels/mhc/tilelang.py",
+        "vllm/model_executor/layers/fused_moe/router/aiter_shared_routed_fused_moe_router.py",
+        "vllm/model_executor/layers/mhc.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/models/deepseek_v4/nvidia/mtp.py",
+        "vllm/v1/kv_offload/file_mapper.py",
+        "vllm/v1/kv_offload/tiering/factory.py",
+        "vllm/v1/kv_offload/tiering/fs/__init__.py",
+        "vllm/v1/kv_offload/tiering/fs/io.py",
+        "vllm/v1/kv_offload/tiering/fs/manager.py",
+        "vllm/v1/kv_offload/tiering/fs/thread_pool.py"
+      ]
+    },
+    {
+      "index": 51,
+      "id": "step-51",
+      "commits": [
+        {
+          "sha": "81252d4e2446552f93225b1d48873d45999f045e",
+          "subject": "[Feat][KVConnector] Support DSV4 in SimpleCPUOffloadBackend (#42296)"
+        },
+        {
+          "sha": "0c942c69d6e486d8e0d879066217aaac19e02da9",
+          "subject": "[Doc] Add section on escalating stalled contributions (#43568)"
+        },
+        {
+          "sha": "5c1aec3dc0600cb816a0389e55ef1f1c17893380",
+          "subject": "Reduce memory usage for granite_speech. (#42933)"
+        },
+        {
+          "sha": "873758c13a64742e2a0247e0f2c62cadf027dd2b",
+          "subject": "[KV Connector] Handle Mooncake finish after preemption (#43281)"
+        },
+        {
+          "sha": "716d5294e6db16fe1d8afb09a061694cf4602d7e",
+          "subject": "[Misc] Print accuracy value for PD tests even on success  (#43583)"
+        },
+        {
+          "sha": "d4004455d2357985830af10e432709b42c820455",
+          "subject": "[Kernel] Remove NormGateLinear (#43554)"
+        },
+        {
+          "sha": "71d810bbf44b34f3a019730a6878fbcbf2480499",
+          "subject": "[XPU] Ensure RNG offset alignment with PyTorch requirements in XPU sampler (#43028)"
+        }
+      ],
+      "commit_count": 7,
+      "start_commit": "3df1c7c43e73c6a06f70390136deecfe856c5969",
+      "end_commit": "71d810bbf44b34f3a019730a6878fbcbf2480499",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 337,
+      "total_changed_lines": 1042,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "CMakeLists.txt",
+        "benchmarks/kernels/benchmark_norm_router_gemm.py",
+        "csrc/moe/dsv3_router_gemm_bf16_out.cu",
+        "csrc/moe/dsv3_router_gemm_float_out.cu",
+        "csrc/moe/dsv3_router_gemm_utils.h",
+        "csrc/moe/dsv4_norm_router_gemm.h",
+        "csrc/moe/dsv4_norm_router_gemm_entry.cu",
+        "csrc/moe/dsv4_norm_router_gemm_kernel.cu",
+        "csrc/moe/moe_ops.h",
+        "csrc/moe/torch_bindings.cpp",
+        "docs/contributing/README.md",
+        "tests/v1/kv_connector/nixl_integration/test_accuracy.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_scheduler.py",
+        "tests/v1/simple_kv_offload/test_scheduler.py",
+        "vllm/_custom_ops.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/data.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py",
+        "vllm/model_executor/kernels/mhc/tilelang.py",
+        "vllm/model_executor/layers/fused_moe/router/norm_gate_linear.py",
+        "vllm/model_executor/models/granite_speech.py",
+        "vllm/models/deepseek_v4/amd/model.py",
+        "vllm/models/deepseek_v4/amd/mtp.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/v1/sample/ops/topk_topp_sampler.py",
+        "vllm/v1/simple_kv_offload/manager.py"
+      ]
+    },
+    {
+      "index": 52,
+      "id": "step-52",
+      "commits": [
+        {
+          "sha": "ec5de7fa7d1303051ccd6c7316171b6d70bac4b4",
+          "subject": "[LoRA] Add one shot triton kernel For MoE LoRA (#42290)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "71d810bbf44b34f3a019730a6878fbcbf2480499",
+      "end_commit": "ec5de7fa7d1303051ccd6c7316171b6d70bac4b4",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 1100,
+      "total_changed_lines": 2060,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "benchmarks/kernels/benchmark_fused_moe_lora_one_shot.py",
+        "tests/lora/test_fused_moe_lora_kernel.py",
+        "vllm/envs.py",
+        "vllm/lora/layers/base_linear.py",
+        "vllm/lora/layers/fused_moe.py",
+        "vllm/lora/layers/utils.py",
+        "vllm/lora/ops/triton_ops/fused_moe_lora_op.py",
+        "vllm/lora/punica_wrapper/punica_base.py",
+        "vllm/lora/punica_wrapper/punica_gpu.py",
+        "vllm/lora/punica_wrapper/punica_xpu.py",
+        "vllm/model_executor/layers/fused_moe/experts/lora_context.py",
+        "vllm/model_executor/layers/fused_moe/experts/lora_experts_mixin.py",
+        "vllm/model_executor/layers/fused_moe/experts/triton_moe.py",
+        "vllm/model_executor/layers/fused_moe/runner/moe_runner.py"
+      ]
+    },
+    {
+      "index": 53,
+      "id": "step-53",
+      "commits": [
+        {
+          "sha": "aa2b56ffb0c1d8b29d6468282a49d9b4a9f0dd1c",
+          "subject": "[DeepSeek V4] Move MegaMoE input prep kernel to nvidia/ops (#43632)"
+        },
+        {
+          "sha": "7966fc7233ac5185fed9d638b7e8c8422bd9e118",
+          "subject": "[KV Connector][Bugfix] MooncakeStore: don't double-apply Eagle prune in load_mask (#43516)"
+        },
+        {
+          "sha": "c2a4005c70e8155624e9687de5e83b395f2a2c83",
+          "subject": "[KV Connector] Propagate MooncakeStore load failures (#42788)"
+        },
+        {
+          "sha": "f815c9995491aed8ace3d7f2a6ddd5065269b06a",
+          "subject": "[Bugfix] fix device mismatch in MiniCPM-o-4_5 resampler (#43194)"
+        }
+      ],
+      "commit_count": 4,
+      "start_commit": "ec5de7fa7d1303051ccd6c7316171b6d70bac4b4",
+      "end_commit": "f815c9995491aed8ace3d7f2a6ddd5065269b06a",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 459,
+      "total_changed_lines": 623,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/models/test_deepseek_v4_mega_moe.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_connector.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_coordinator.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_worker.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/coordinator.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+        "vllm/model_executor/models/minicpmv.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/models/deepseek_v4/nvidia/ops/prepare_megamoe.py"
+      ]
+    },
+    {
+      "index": 54,
+      "id": "step-54",
+      "commits": [
+        {
+          "sha": "d5cf7b4a2c04b7f3661907ecb610ccc977058c9f",
+          "subject": "[Frontend] Split the offline inference APIs and utils. (#43553)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "f815c9995491aed8ace3d7f2a6ddd5065269b06a",
+      "end_commit": "d5cf7b4a2c04b7f3661907ecb610ccc977058c9f",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 1351,
+      "total_changed_lines": 1355,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/entrypoints/llm/test_mm_processor_kwargs.py",
+        "vllm/entrypoints/generate/beam_search/offline.py",
+        "vllm/entrypoints/llm.py",
+        "vllm/entrypoints/offline_utils.py",
+        "vllm/entrypoints/pooling/offline.py"
+      ]
+    },
+    {
+      "index": 55,
+      "id": "step-55",
+      "commits": [
+        {
+          "sha": "6f955986e12168fa0e00e0d864c14330b4c72691",
+          "subject": "[Bugfix][Model] Fix GPT2ForSequenceClassification sub-module prefix (#43579)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "d5cf7b4a2c04b7f3661907ecb610ccc977058c9f",
+      "end_commit": "6f955986e12168fa0e00e0d864c14330b4c72691",
+      "categories": [
+        "vllm"
+      ],
+      "vllm_changed_lines": 9,
+      "total_changed_lines": 9,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "vllm/model_executor/models/gpt2.py"
+      ]
+    },
+    {
+      "index": 56,
+      "id": "step-56",
+      "commits": [
+        {
+          "sha": "d56612c6210605aaca1ce8fa09c40bbe30ee3973",
+          "subject": "[GDN] GDN Prefill kernel for SM100 (#43273)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "6f955986e12168fa0e00e0d864c14330b4c72691",
+      "end_commit": "d56612c6210605aaca1ce8fa09c40bbe30ee3973",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 3450,
+      "total_changed_lines": 3649,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/kernels/mamba/test_gdn_prefill_cutedsl.py",
+        "vllm/cute_utils/__init__.py",
+        "vllm/cute_utils/_tcgen05.py",
+        "vllm/cute_utils/cvt.py",
+        "vllm/engine/arg_utils.py",
+        "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
+        "vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/__init__.py",
+        "vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/kernel_h.py",
+        "vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/kernel_kkt_inv_uw.py",
+        "vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/kernel_o.py",
+        "vllm/models/deepseek_v4/nvidia/ops/cutedsl_utils.py",
+        "vllm/models/deepseek_v4/nvidia/ops/dequant_gather_k_cutedsl.py",
+        "vllm/models/deepseek_v4/nvidia/ops/fused_indexer_q_cutedsl.py",
+        "vllm/v1/attention/backends/gdn_attn.py"
+      ]
+    },
+    {
+      "index": 57,
+      "id": "step-57",
+      "commits": [
+        {
+          "sha": "771e1e48b153df0e5e4334061deb1cb2ebde8fab",
+          "subject": "[CPU] Enable non-divisible GQA for decode workitems in mixed batches (#43032)"
+        },
+        {
+          "sha": "e6adbd783422135db8c144d909f04fe483f3c013",
+          "subject": "Upgrade tpu-inference to v0.20.0 (#43394)"
+        }
+      ],
+      "commit_count": 2,
+      "start_commit": "d56612c6210605aaca1ce8fa09c40bbe30ee3973",
+      "end_commit": "e6adbd783422135db8c144d909f04fe483f3c013",
+      "categories": [
+        "ignored"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 131,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "csrc/cpu/cpu_attn_impl.hpp",
+        "requirements/tpu.txt"
+      ]
+    },
+    {
+      "index": 58,
+      "id": "step-58",
+      "commits": [
+        {
+          "sha": "a37e47100ca1f941671a4418dbdfd7a5afca4811",
+          "subject": "Add CuTe DSL sparse compressor support (#43584)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "e6adbd783422135db8c144d909f04fe483f3c013",
+      "end_commit": "a37e47100ca1f941671a4418dbdfd7a5afca4811",
+      "categories": [
+        "vllm"
+      ],
+      "vllm_changed_lines": 1458,
+      "total_changed_lines": 1458,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py",
+        "vllm/models/deepseek_v4/common/ops/sparse_attn_compress_cutedsl.py",
+        "vllm/models/deepseek_v4/compressor.py"
+      ]
+    },
+    {
+      "index": 59,
+      "id": "step-59",
+      "commits": [
+        {
+          "sha": "b3269454b1eff2ce651b8ff3d0858c40ff81bc6a",
+          "subject": "[chores][log] change registry log from `warning` to `debug` (#43045)"
+        },
+        {
+          "sha": "97e4022c6ccb7b2cf1a1fc0a13a17a2a06d74f0d",
+          "subject": "[Bugfix] Apply fc_norm in Eagle3DeepseekV2 combine_hidden_states (#43482)"
+        },
+        {
+          "sha": "755043cf3cd68e6cd93bfcfde2152f28c9fb42bd",
+          "subject": "[KV Transfer] Enable HMA by default for connectors that support it (#41847)"
+        },
+        {
+          "sha": "681d7dd38b596df4439301f8f47e60177792ebf3",
+          "subject": "[Misc][Refactor][ROCm] Convert MoRI-related envvars to extra config args (#43303)"
+        },
+        {
+          "sha": "5d09f471f4ec44edfb0aa8917a985bda7c897195",
+          "subject": "[Misc] Support interleaved custom image benchmark datasets (#43636)"
+        },
+        {
+          "sha": "739af5c7e1603b6c9a4d376b52dc7f4b19e1403d",
+          "subject": "[Reasoning] [Bugfix] Reject invalid thinking_token_budget values (#43402)"
+        },
+        {
+          "sha": "ebd0692f80e6d0ce3f70144e0e271c3fc8f3ab40",
+          "subject": "[Model] Use AutoWeightsLoader for InternLM2 (#38278)"
+        },
+        {
+          "sha": "861b97765d6cd2587ba74e7787a89d9b8aa1c9d4",
+          "subject": "[XPU] Fix fused MoE LoRA kernel crash on XPU by using platform-agnos num_compute_units (#43646)"
+        }
+      ],
+      "commit_count": 8,
+      "start_commit": "a37e47100ca1f941671a4418dbdfd7a5afca4811",
+      "end_commit": "861b97765d6cd2587ba74e7787a89d9b8aa1c9d4",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 566,
+      "total_changed_lines": 1073,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/benchmarking/cli.md",
+        "tests/benchmarks/test_custom_image_dataset.py",
+        "tests/entrypoints/openai/chat_completion/test_thinking_token_budget_validation.py",
+        "tests/quantization/test_register_quantization_config.py",
+        "tests/v1/kv_connector/unit/test_hma_auto_config.py",
+        "tests/v1/kv_connector/unit/test_moriio_connector.py",
+        "tests/v1/kv_connector/unit/test_multi_connector.py",
+        "tests/v1/kv_connector/unit/test_nixl_connector_hma.py",
+        "tests/v1/kv_connector/unit/test_offloading_connector.py",
+        "tests/v1/logits_processors/test_correctness.py",
+        "vllm/benchmarks/datasets/datasets.py",
+        "vllm/benchmarks/lib/endpoint_request_func.py",
+        "vllm/config/vllm.py",
+        "vllm/distributed/kv_transfer/kv_connector/factory.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_common.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_engine.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py",
+        "vllm/entrypoints/openai/chat_completion/protocol.py",
+        "vllm/entrypoints/openai/completion/protocol.py",
+        "vllm/envs.py",
+        "vllm/lora/ops/triton_ops/fused_moe_lora_op.py",
+        "vllm/model_executor/layers/quantization/__init__.py",
+        "vllm/model_executor/models/deepseek_eagle3.py",
+        "vllm/model_executor/models/internlm2.py",
+        "vllm/model_executor/models/registry.py",
+        "vllm/sampling_params.py"
+      ]
+    },
+    {
+      "index": 60,
+      "id": "step-60",
+      "commits": [
+        {
+          "sha": "a970fb5a1a5800c552c74cf3278d6ee7c1c3fca1",
+          "subject": "Fix CuPy runtime deps and restore humming (#43530)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "861b97765d6cd2587ba74e7787a89d9b8aa1c9d4",
+      "end_commit": "a970fb5a1a5800c552c74cf3278d6ee7c1c3fca1",
+      "categories": [
+        "ignored",
+        "requirements",
+        "vllm"
+      ],
+      "vllm_changed_lines": 23,
+      "total_changed_lines": 39,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docker/Dockerfile",
+        "requirements/cuda.txt",
+        "requirements/kv_connectors.txt",
+        "setup.py",
+        "vllm/model_executor/layers/quantization/humming.py"
+      ]
+    },
+    {
+      "index": 61,
+      "id": "step-61",
+      "commits": [
+        {
+          "sha": "d565357a9013c20dbbec839a9d8376905b9beed1",
+          "subject": "[Docs][ROCm] MoRI-IO Connector Usage Guide (#43603)"
+        },
+        {
+          "sha": "445ded18c1184a5a44d0f41010d614adbd107ca7",
+          "subject": "[ROCm][CI] Extend ROCm quick reduce coverage (#40990)"
+        }
+      ],
+      "commit_count": 2,
+      "start_commit": "a970fb5a1a5800c552c74cf3278d6ee7c1c3fca1",
+      "end_commit": "445ded18c1184a5a44d0f41010d614adbd107ca7",
+      "categories": [
+        "ignored"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 1187,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test-amd.yaml",
+        "docs/features/disagg_prefill.md",
+        "docs/features/moriio_connector_usage.md",
+        "tests/distributed/test_quick_all_reduce.py",
+        "tests/distributed/test_rocm_quick_reduce.py",
+        "tests/utils.py"
+      ]
+    },
+    {
+      "index": 62,
+      "id": "step-62",
+      "commits": [
+        {
+          "sha": "6ab6ffb428be5ed3c5d6c3cc029c5afe7ff59eee",
+          "subject": "[Feat][DSV4] Fuse q pad into deepseek v4 fused kernel (#43162)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "445ded18c1184a5a44d0f41010d614adbd107ca7",
+      "end_commit": "6ab6ffb428be5ed3c5d6c3cc029c5afe7ff59eee",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 1871,
+      "total_changed_lines": 2264,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test_areas/kernels.yaml",
+        "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu",
+        "csrc/ops.h",
+        "csrc/torch_bindings.cpp",
+        "tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py",
+        "tests/kernels/test_fused_inv_rope_fp8_quant.py",
+        "vllm/models/deepseek_v4/amd/model.py",
+        "vllm/models/deepseek_v4/amd/rocm.py",
+        "vllm/models/deepseek_v4/attention.py",
+        "vllm/models/deepseek_v4/nvidia/flashmla.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/models/deepseek_v4/nvidia/ops/attention.py"
+      ]
+    },
+    {
+      "index": 63,
+      "id": "step-63",
+      "commits": [
+        {
+          "sha": "b226ddacfda921b8eef7b75794c33d49ae51186a",
+          "subject": "[MoE Refactor] Migrate ModelOptMxFp8FusedMoE to oracle (#42768)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "6ab6ffb428be5ed3c5d6c3cc029c5afe7ff59eee",
+      "end_commit": "b226ddacfda921b8eef7b75794c33d49ae51186a",
+      "categories": [
+        "vllm"
+      ],
+      "vllm_changed_lines": 244,
+      "total_changed_lines": 244,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "vllm/model_executor/layers/fused_moe/config.py",
+        "vllm/model_executor/layers/fused_moe/oracle/fp8.py",
+        "vllm/model_executor/layers/fused_moe/oracle/int8.py",
+        "vllm/model_executor/layers/quantization/modelopt.py",
+        "vllm/model_executor/layers/quantization/online/fp8.py",
+        "vllm/model_executor/layers/quantization/online/int8.py",
+        "vllm/model_executor/layers/quantization/online/moe_base.py",
+        "vllm/model_executor/layers/quantization/online/mxfp8.py"
+      ]
+    },
+    {
+      "index": 64,
+      "id": "step-64",
+      "commits": [
+        {
+          "sha": "f51bbc694d9704daeefc0549229858b657bce20c",
+          "subject": "[MoE Refactor] W4a8 int8 oracle (#42789)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "b226ddacfda921b8eef7b75794c33d49ae51186a",
+      "end_commit": "f51bbc694d9704daeefc0549229858b657bce20c",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 842,
+      "total_changed_lines": 1138,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/kernels/moe/test_cpu_int4_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/cpu_int4_moe.py",
+        "vllm/model_executor/layers/fused_moe/oracle/w4a8_int8.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a8_int8.py",
+        "vllm/model_executor/layers/quantization/utils/quant_utils.py"
+      ]
+    },
+    {
+      "index": 65,
+      "id": "step-65",
+      "commits": [
+        {
+          "sha": "c8414a82712bd775b7243b19a264d9623c3bb369",
+          "subject": "[ROCm] Remove MegaMoE integration in deepseek v4 (#43629)"
+        },
+        {
+          "sha": "6f5b533241929d26f13948e6a48290f6a4f4eefe",
+          "subject": "Add LM head quantization support for ModelOpt (#42124)"
+        },
+        {
+          "sha": "3aea37d28e44f0b8389e2cfa9876c3faa62543f4",
+          "subject": "[Doc] Add line limit to AGENTS.md (#43635)"
+        },
+        {
+          "sha": "193ce8812eb4b43fc48039757072c71ac2eb0a28",
+          "subject": "[DSv4] Drop _get_compressed_kv_buffer in DeepseekCompressor (#43690)"
+        },
+        {
+          "sha": "49b488277922b47bcac320ae8d4b7288bf70dc3c",
+          "subject": "[CI] Soft-fail AMD entrypoints mirror tests (#43709)"
+        }
+      ],
+      "commit_count": 5,
+      "start_commit": "f51bbc694d9704daeefc0549229858b657bce20c",
+      "end_commit": "49b488277922b47bcac320ae8d4b7288bf70dc3c",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 712,
+      "total_changed_lines": 925,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test_areas/entrypoints.yaml",
+        "AGENTS.md",
+        "tests/model_executor/test_nemotron_h_quantization.py",
+        "tests/model_executor/test_qwen3_5_quantization.py",
+        "tests/quantization/test_modelopt.py",
+        "vllm/model_executor/layers/quantization/modelopt.py",
+        "vllm/model_executor/layers/vocab_parallel_embedding.py",
+        "vllm/model_executor/models/nemotron_h.py",
+        "vllm/model_executor/models/qwen3_5.py",
+        "vllm/model_executor/models/qwen3_5_mtp.py",
+        "vllm/models/deepseek_v4/amd/model.py",
+        "vllm/models/deepseek_v4/amd/mtp.py",
+        "vllm/models/deepseek_v4/compressor.py"
+      ]
+    },
+    {
+      "index": 66,
+      "id": "step-66",
+      "commits": [
+        {
+          "sha": "6e503868caa46f3afa87e8d3365495464fd75fb3",
+          "subject": "[Kernel] Porting  fuse_minimax_qk_norm  to manual fusion (#43410)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "49b488277922b47bcac320ae8d4b7288bf70dc3c",
+      "end_commit": "6e503868caa46f3afa87e8d3365495464fd75fb3",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 1318,
+      "total_changed_lines": 1356,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/design/fusions.md",
+        "tests/kernels/core/test_minimax_reduce_rms.py",
+        "vllm/compilation/passes/fusion/minimax_qk_norm_fusion.py",
+        "vllm/compilation/passes/pass_manager.py",
+        "vllm/config/compilation.py",
+        "vllm/config/vllm.py",
+        "vllm/model_executor/layers/mamba/lamport_workspace.py",
+        "vllm/model_executor/layers/mamba/linear_attn.py",
+        "vllm/model_executor/layers/minimax_rms_norm/__init__.py",
+        "vllm/model_executor/layers/minimax_rms_norm/lamport_workspace.py",
+        "vllm/model_executor/layers/minimax_rms_norm/rms_norm_tp.py",
+        "vllm/model_executor/models/bailing_moe_linear.py",
+        "vllm/model_executor/models/minimax_m2.py"
+      ]
+    },
+    {
+      "index": 67,
+      "id": "step-67",
+      "commits": [
+        {
+          "sha": "d98cbf472b65b124b140c4e582ea38416e5c5cae",
+          "subject": "[KV Connector] MooncakeStore: drop dead discard_partial_chunks parameter (#43627)"
+        },
+        {
+          "sha": "812e7e73648573142808fdeea0ffc30adb247ba3",
+          "subject": "[Bugfix][V1] Fix TOCTOU race causing intermittent `EADDRINUSE` on multi-API-server DP startup (#42585)"
+        },
+        {
+          "sha": "e19b9b1045f6b8c2b5a647cc3a819bb919a718ac",
+          "subject": "[ci] Add arm64 ci image (#41303)"
+        },
+        {
+          "sha": "dede691c9536e8a79275d2bd0defbccb93f6ef7f",
+          "subject": "[Bugfix] Split attention groups by num_heads_q for spec-decode drafts (#43543)"
+        },
+        {
+          "sha": "0b68f21e7c6ff146f12fd9a9018f5052d4b4722e",
+          "subject": "[Rust Frontend] Add reasoning/tool parser & renderer roundtrip tests (#43582)"
+        },
+        {
+          "sha": "5bdb181df5bddcc9b2173292d3ed9b4770a46716",
+          "subject": "[ROCm][CI] Fix ROCm multimodal Qwen2.5-VL activation compile and Phi4MM ragged image mask handling (#43647)"
+        },
+        {
+          "sha": "d8eebe6d9750534ab309f684f0b04748f4195f8a",
+          "subject": "[Perf] Optimize Fp8BlockScaledMMLinearKernel input_scale tensor using new_empty() (#43677)"
+        },
+        {
+          "sha": "7e33081cee7bd04f9941caebff2901436e2171ee",
+          "subject": "[Attention] Make FlexAttention and FlashAttention use num-blocks first layouts (#42095)"
+        },
+        {
+          "sha": "aa6138169f80863c0f4438403c2f78f64a13907c",
+          "subject": "[MLA][Attention] Add OOT MLA prefill backend registration mechanism (#43325)"
+        },
+        {
+          "sha": "c02c758ea4c5602dce39a5246b96ebd10c406c4b",
+          "subject": "[Deprecation] Deprecate functions as scheduled for v0.21.0 (#43358)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "6e503868caa46f3afa87e8d3365495464fd75fb3",
+      "end_commit": "c02c758ea4c5602dce39a5246b96ebd10c406c4b",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 844,
+      "total_changed_lines": 2242,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/image_build/image_build.yaml",
+        ".buildkite/image_build/image_build_arm64.sh",
+        ".buildkite/test_areas/spec_decode.yaml",
+        "docker/Dockerfile",
+        "docs/contributing/profiling.md",
+        "docs/models/pooling_models/classify.md",
+        "requirements/test/cuda.in",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/src/chat/Cargo.toml",
+        "rust/src/chat/src/event.rs",
+        "rust/src/chat/src/renderer/hf/tojson.rs",
+        "rust/src/chat/tests/roundtrip.rs",
+        "rust/src/text/Cargo.toml",
+        "rust/src/text/src/backend/hf/model_files.rs",
+        "rust/src/text/src/lower.rs",
+        "rust/src/tool-parser/src/minimax_m2.rs",
+        "rust/src/tool-parser/src/parameters.rs",
+        "tests/entrypoints/test_api_server_process_manager.py",
+        "tests/v1/attention/test_attention_backends.py",
+        "tests/v1/attention/test_kv_head_stride_canonicalization.py",
+        "tests/v1/attention/test_mla_prefill_registry.py",
+        "tests/v1/kv_connector/unit/offloading_connector/test_worker.py",
+        "tests/v1/kv_connector/unit/offloading_connector/utils.py",
+        "tests/v1/kv_connector/unit/test_mooncake_connector.py",
+        "tests/v1/kv_connector/unit/test_nixl_connector.py",
+        "tests/v1/worker/test_gpu_model_runner.py",
+        "vllm/config/pooler.py",
+        "vllm/distributed/kv_transfer/kv_connector/utils.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/example_connector.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/mooncake_connector.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/data.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/offloading/worker.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/p2p/p2p_nccl_connector.py",
+        "vllm/entrypoints/cli/serve.py",
+        "vllm/model_executor/kernels/linear/scaled_mm/BlockScaledMMLinearKernel.py",
+        "vllm/model_executor/layers/activation.py",
+        "vllm/model_executor/models/phi4mm.py",
+        "vllm/model_executor/models/qwen2_5_vl.py",
+        "vllm/platforms/cuda.py",
+        "vllm/platforms/rocm.py",
+        "vllm/platforms/xpu.py",
+        "vllm/utils/profiling.py",
+        "vllm/v1/attention/backends/flash_attn.py",
+        "vllm/v1/attention/backends/flex_attention.py",
+        "vllm/v1/attention/backends/mla/prefill/__init__.py",
+        "vllm/v1/attention/backends/mla/prefill/registry.py",
+        "vllm/v1/attention/backends/triton_attn.py",
+        "vllm/v1/engine/async_llm.py",
+        "vllm/v1/engine/coordinator.py",
+        "vllm/v1/engine/core_client.py",
+        "vllm/v1/engine/utils.py",
+        "vllm/v1/utils.py",
+        "vllm/v1/worker/gpu/attn_utils.py",
+        "vllm/v1/worker/gpu_model_runner.py"
+      ]
+    },
+    {
+      "index": 68,
+      "id": "step-68",
+      "commits": [
+        {
+          "sha": "adaa5e455ad89525e8afa69b0633ec9c4b720f7e",
+          "subject": "[DSv4] Refactor compressor & Fix ROCm compatibility (#43710)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "c02c758ea4c5602dce39a5246b96ebd10c406c4b",
+      "end_commit": "adaa5e455ad89525e8afa69b0633ec9c4b720f7e",
+      "categories": [
+        "vllm"
+      ],
+      "vllm_changed_lines": 3077,
+      "total_changed_lines": 3077,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "vllm/models/deepseek_v4/common/ops/__init__.py",
+        "vllm/models/deepseek_v4/common/ops/cache_utils.py",
+        "vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py",
+        "vllm/models/deepseek_v4/common/ops/fused_indexer_q.py",
+        "vllm/models/deepseek_v4/common/ops/save_partial_states.py",
+        "vllm/models/deepseek_v4/common/ops/sparse_attn_compress_cutedsl.py",
+        "vllm/models/deepseek_v4/compressor.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/models/deepseek_v4/nvidia/ops/__init__.py",
+        "vllm/models/deepseek_v4/nvidia/ops/sparse_attn_compress_cutedsl.py"
+      ]
+    },
+    {
+      "index": 69,
+      "id": "step-69",
+      "commits": [
+        {
+          "sha": "0fa3114ae11ff8bfdba3e6fb26ad4c4d093ad25a",
+          "subject": "Fix test_aot_compile for torch 2.12 (#43695)"
+        },
+        {
+          "sha": "1fc2cee50a09a094b9f2bbdfcb0ab0cadb536712",
+          "subject": "[KVConnector][Mooncake] Wire reset_cache cascade end-to-end (#42694)"
+        },
+        {
+          "sha": "7b546902447c695c3a555a81352719710d4f1783",
+          "subject": "[ROCm][Perf] Expose AITER MoE sorting dispatch policy via env var (#39177)"
+        },
+        {
+          "sha": "8c94938cfb92cc00b244ae4a933c5f60dbc1139f",
+          "subject": "[MRV2][BugFix] Fix KV connector handling in spec decode case (#43719)"
+        }
+      ],
+      "commit_count": 4,
+      "start_commit": "adaa5e455ad89525e8afa69b0633ec9c4b720f7e",
+      "end_commit": "8c94938cfb92cc00b244ae4a933c5f60dbc1139f",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 250,
+      "total_changed_lines": 608,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/compile/test_aot_compile.py",
+        "tests/v1/core/test_scheduler.py",
+        "tests/v1/kv_connector/unit/test_mooncake_store_connector.py",
+        "tests/v1/worker/test_gpu_model_runner_v2_eplb.py",
+        "vllm/_aiter_ops.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/protocol.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py",
+        "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+        "vllm/envs.py",
+        "vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py",
+        "vllm/v1/core/sched/scheduler.py",
+        "vllm/v1/engine/core.py",
+        "vllm/v1/worker/gpu/kv_connector.py",
+        "vllm/v1/worker/gpu/model_runner.py"
+      ]
+    },
+    {
+      "index": 70,
+      "id": "step-70",
+      "commits": [
+        {
+          "sha": "683033d4ba60a2861ddcc5df9bb9d2e6ca7c935c",
+          "subject": "[Frontend] Add MiniCPM5 XML tool call parser (#43175)"
+        },
+        {
+          "sha": "de12f5ca0b8bcec55b6fa29174900360ef31cc0e",
+          "subject": "[ROCm][GPT-OSS] Avoid repeated compile-time `cos_sin_cache.to(bf16)` casts in rotary path (#42833)"
+        }
+      ],
+      "commit_count": 2,
+      "start_commit": "8c94938cfb92cc00b244ae4a933c5f60dbc1139f",
+      "end_commit": "de12f5ca0b8bcec55b6fa29174900360ef31cc0e",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 839,
+      "total_changed_lines": 1574,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "tests/tool_parsers/test_minicpm5xml_tool_parser.py",
+        "vllm/model_executor/layers/rotary_embedding/base.py",
+        "vllm/tool_parsers/__init__.py",
+        "vllm/tool_parsers/minicpm5xml_tool_parser.py"
+      ]
+    },
+    {
+      "index": 71,
+      "id": "step-71",
+      "commits": [
+        {
+          "sha": "ad464e16c00ac115c9b9e2ae33521931b2f90966",
+          "subject": "[Doc] Add Ascend NPU tab to the quickstart installation guide (#43550)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "de12f5ca0b8bcec55b6fa29174900360ef31cc0e",
+      "end_commit": "ad464e16c00ac115c9b9e2ae33521931b2f90966",
+      "categories": [
+        "ignored",
+        "requirements"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 11,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/getting_started/quickstart.md",
+        "pyproject.toml"
+      ]
+    },
+    {
+      "index": 72,
+      "id": "step-72",
+      "commits": [
+        {
+          "sha": "396c8fee5071117914104244cc962db805ab0af0",
+          "subject": "[Rust Frontend] Align tool parser fallback behavior between streaming & non-streaming paths (#43662)"
+        },
+        {
+          "sha": "158289e0fce93f633a7856cb49cca1bed107a4bb",
+          "subject": "[Docs] Fix MLA prefill backend default docs (#43697)"
+        },
+        {
+          "sha": "22720624714d3299d2df87e0c2c67639202c4b8a",
+          "subject": "[Kernel] Enable TritonW4A16LinearKernel as CUDA fallback for non-Marlin-aligned W4A16 shapes (#43731)"
+        },
+        {
+          "sha": "52a31ccecca203effd490a5b496dc5f8d9496654",
+          "subject": "[Bugfix] Map reasoning_effort to enable_thinking in chat template kwargs (#43401)"
+        },
+        {
+          "sha": "03d9cc2fe296c58cdb7f9f77218d165a1997abdf",
+          "subject": "[misc] Bump cutedsl version to 4.5.2 (#43745)"
+        },
+        {
+          "sha": "165460941f5e82b8ddb344515163b43e537f9c3f",
+          "subject": "[BugFix] HFValidationError with cloud storage URIs when HF_HUB_OFFLINE=1 (#39155)"
+        },
+        {
+          "sha": "49a3510266469c59ba7cb36b7223765b4aa94c4e",
+          "subject": "[Docs] Fix the duplicate doc icon issue (#43546)"
+        },
+        {
+          "sha": "41688e2dc7f52b4f0c22ebe5470e340bbc7e0d6f",
+          "subject": "Fix early CUDA init (#43791)"
+        },
+        {
+          "sha": "05c50c721e07035dd36169fa8bb2825a7b952555",
+          "subject": "[ROCm] mori: add InterNodeV1LL inter-node kernel selection via VLLM_MORI_INTERNODE_KERNEL (#41751)"
+        }
+      ],
+      "commit_count": 9,
+      "start_commit": "ad464e16c00ac115c9b9e2ae33521931b2f90966",
+      "end_commit": "05c50c721e07035dd36169fa8bb2825a7b952555",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 146,
+      "total_changed_lines": 2454,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "docs/design/attention_backends.md",
+        "docs/features/reasoning_outputs.md",
+        "docs/mkdocs/hooks/url_schemes.py",
+        "requirements/cuda.txt",
+        "rust/Cargo.lock",
+        "rust/src/chat/src/output/default/tool.rs",
+        "rust/src/chat/src/parser/tool/mod.rs",
+        "rust/src/chat/src/parser/tool/tests.rs",
+        "rust/src/tool-parser/Cargo.toml",
+        "rust/src/tool-parser/src/deepseek_dsml/deepseek_v32.rs",
+        "rust/src/tool-parser/src/deepseek_dsml/deepseek_v4.rs",
+        "rust/src/tool-parser/src/deepseek_dsml/mod.rs",
+        "rust/src/tool-parser/src/deepseek_json/deepseek_v3.rs",
+        "rust/src/tool-parser/src/deepseek_json/deepseek_v31.rs",
+        "rust/src/tool-parser/src/deepseek_json/mod.rs",
+        "rust/src/tool-parser/src/gemma4.rs",
+        "rust/src/tool-parser/src/glm_xml/glm45_moe.rs",
+        "rust/src/tool-parser/src/glm_xml/glm47_moe.rs",
+        "rust/src/tool-parser/src/glm_xml/mod.rs",
+        "rust/src/tool-parser/src/json/hermes.rs",
+        "rust/src/tool-parser/src/json/llama.rs",
+        "rust/src/tool-parser/src/json/mistral.rs",
+        "rust/src/tool-parser/src/json/mod.rs",
+        "rust/src/tool-parser/src/json/qwen.rs",
+        "rust/src/tool-parser/src/kimi_k2.rs",
+        "rust/src/tool-parser/src/lib.rs",
+        "rust/src/tool-parser/src/minimax_m2.rs",
+        "rust/src/tool-parser/src/qwen_coder.rs",
+        "rust/src/tool-parser/src/test_utils.rs",
+        "rust/src/tool-parser/src/tests.rs",
+        "tests/engine/test_arg_utils.py",
+        "tests/entrypoints/openai/test_reasoning_enable_thinking.py",
+        "tests/kernels/moe/modular_kernel_tools/common.py",
+        "tests/kernels/moe/modular_kernel_tools/mk_objects.py",
+        "tests/kernels/moe/test_moe_layer.py",
+        "tests/test_config.py",
+        "tools/pre_commit/generate_attention_backend_docs.py",
+        "vllm/config/model.py",
+        "vllm/config/parallel.py",
+        "vllm/distributed/device_communicators/all2all.py",
+        "vllm/distributed/device_communicators/cuda_communicator.py",
+        "vllm/engine/arg_utils.py",
+        "vllm/entrypoints/openai/chat_completion/protocol.py",
+        "vllm/entrypoints/openai/responses/protocol.py",
+        "vllm/model_executor/kernels/linear/__init__.py",
+        "vllm/model_executor/kernels/linear/mixed_precision/triton_w4a16.py",
+        "vllm/model_executor/layers/fused_moe/config.py",
+        "vllm/models/deepseek_v4/common/ops/cache_utils.py",
+        "vllm/models/deepseek_v4/common/ops/fused_indexer_q.py",
+        "vllm/models/deepseek_v4/compressor.py",
+        "vllm/models/deepseek_v4/nvidia/model.py",
+        "vllm/models/deepseek_v4/nvidia/ops/__init__.py"
+      ]
+    },
+    {
+      "index": 73,
+      "id": "step-73",
+      "commits": [
+        {
+          "sha": "284e6f543d462016fc80c055ccbf088832c63129",
+          "subject": "[8/n] Migrate merge_attn_states, mamba, sampler to torch stable ABI (continued) (#43361)"
+        }
+      ],
+      "commit_count": 1,
+      "start_commit": "05c50c721e07035dd36169fa8bb2825a7b952555",
+      "end_commit": "284e6f543d462016fc80c055ccbf088832c63129",
+      "categories": [
+        "ignored",
+        "requirements"
+      ],
+      "vllm_changed_lines": 0,
+      "total_changed_lines": 5221,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        "CMakeLists.txt",
+        "csrc/attention/merge_attn_states.cu",
+        "csrc/libtorch_stable/attention/merge_attn_states.cu",
+        "csrc/libtorch_stable/mamba/selective_scan.h",
+        "csrc/libtorch_stable/mamba/selective_scan_fwd.cu",
+        "csrc/libtorch_stable/mamba/static_switch.h",
+        "csrc/libtorch_stable/ops.h",
+        "csrc/libtorch_stable/sampler.cu",
+        "csrc/libtorch_stable/topk.cu",
+        "csrc/libtorch_stable/torch_bindings.cpp",
+        "csrc/mamba/mamba_ssm/selective_scan.h",
+        "csrc/mamba/mamba_ssm/selective_scan_fwd.cu",
+        "csrc/mamba/mamba_ssm/static_switch.h",
+        "csrc/ops.h",
+        "csrc/persistent_topk.cuh",
+        "csrc/sampler.cu",
+        "csrc/topk.cu",
+        "csrc/torch_bindings.cpp",
+        "pyproject.toml"
+      ]
+    },
+    {
+      "index": 74,
+      "id": "step-74",
+      "commits": [
+        {
+          "sha": "206b72c982db29eb10e475589cbf3fa8d6a37071",
+          "subject": "[Quantization] Fix Humming RoutedExperts import (#43540)"
+        },
+        {
+          "sha": "2616f67faaa735a3e0d9c17968fa91f242d36c56",
+          "subject": "Remove Transformers forward/backward compatibility tests (#43785)"
+        },
+        {
+          "sha": "2c2c966669032e863f94919e9225aa12378c9364",
+          "subject": "Validate against some config fields being set to 0 (#43794)"
+        },
+        {
+          "sha": "7fb9c0197a3173f2a2edcc9d64f6c0e73ef20717",
+          "subject": "[Bugfix][DFlash]allocate the proper number of lookahead slots (#43733)"
+        },
+        {
+          "sha": "5963c194787d30ed4a49c1e2e01010d8dffe1e79",
+          "subject": "Fix Qwen3-VL and Qwen3-omni-thinker accuracy degradation from deepstack inputs under torch.compile (#43617)"
+        },
+        {
+          "sha": "094124af15d9ac85d1162cb318379e109c1a6bff",
+          "subject": "Add @AndreasKaratzas to CODEOWNERS (#43740)"
+        },
+        {
+          "sha": "381edde1b9bf6e4efce1ef2008d68ecdd47f415e",
+          "subject": "[Bugfix][Kernel] TRTLLM NVFP4 MoE chunking (#43599)"
+        },
+        {
+          "sha": "1223732dda9d0616969397dd78697be1d40941b6",
+          "subject": "[ModelRunnerV2][Hybrid model] Support kernel block size in hybrid model (#38831)"
+        },
+        {
+          "sha": "c87f62ccf8f698d4dff3b9d020edfc692443686f",
+          "subject": "[Rust Frontend] Introduce mock engine for benchmark baseline (#43469)"
+        },
+        {
+          "sha": "05eec7120ea76383f099b8ad0f731e7da2abc75d",
+          "subject": "Fix RunAI streamer tensor buffer reuse during weight loading (#43464)"
+        }
+      ],
+      "commit_count": 10,
+      "start_commit": "284e6f543d462016fc80c055ccbf088832c63129",
+      "end_commit": "05eec7120ea76383f099b8ad0f731e7da2abc75d",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 341,
+      "total_changed_lines": 2085,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/test_areas/models_basic.yaml",
+        ".github/CODEOWNERS",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/src/cmd/Cargo.toml",
+        "rust/src/cmd/src/main.rs",
+        "rust/src/engine-core-client/src/client/imp.rs",
+        "rust/src/engine-core-client/src/client/state.rs",
+        "rust/src/engine-core-client/src/lib.rs",
+        "rust/src/engine-core-client/src/mock_engine.rs",
+        "rust/src/engine-core-client/src/protocol/mod.rs",
+        "rust/src/engine-core-client/src/protocol/utility.rs",
+        "rust/src/engine-core-client/src/test_utils.rs",
+        "rust/src/engine-core-client/src/tests/client.rs",
+        "rust/src/mock-engine/Cargo.toml",
+        "rust/src/mock-engine/README.md",
+        "rust/src/mock-engine/src/engine.rs",
+        "rust/src/mock-engine/src/io.rs",
+        "rust/src/mock-engine/src/lib.rs",
+        "rust/src/mock-engine/src/main.rs",
+        "rust/src/mock-engine/src/tests.rs",
+        "tests/model_executor/model_loader/runai_streamer_loader/test_weight_utils.py",
+        "vllm/config/cache.py",
+        "vllm/config/model.py",
+        "vllm/config/vllm.py",
+        "vllm/model_executor/layers/fused_moe/experts/trtllm_bf16_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/trtllm_fp8_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/trtllm_mxfp4_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py",
+        "vllm/model_executor/layers/quantization/utils/humming_utils.py",
+        "vllm/model_executor/model_loader/weight_utils.py",
+        "vllm/model_executor/models/qwen3_omni_moe_thinker.py",
+        "vllm/model_executor/models/qwen3_vl.py",
+        "vllm/v1/core/sched/scheduler.py",
+        "vllm/v1/worker/gpu/attn_utils.py",
+        "vllm/v1/worker/gpu/block_table.py",
+        "vllm/v1/worker/gpu/model_runner.py",
+        "vllm/v1/worker/gpu/spec_decode/eagle/speculator.py"
+      ]
+    },
+    {
+      "index": 75,
+      "id": "step-75",
+      "commits": [
+        {
+          "sha": "2d2c660104ee17178951ac68d668e540d690c39c",
+          "subject": "[MoE] Remove inplace fused experts mechanism (#43727)"
+        },
+        {
+          "sha": "413ac5c0701a86f17f56cd8c242894ed443d14ce",
+          "subject": "[Misc][Rocm] Remove redundant `AiterUnifiedAttentionBackend` block size log (#43664)"
+        },
+        {
+          "sha": "33e94fc3adcb888a8c6d62285f70bc78fb068ec7",
+          "subject": "[ROCm][CI] Stabilize Cargo cache and pre-test image checks (#43815)"
+        }
+      ],
+      "commit_count": 3,
+      "start_commit": "05eec7120ea76383f099b8ad0f731e7da2abc75d",
+      "end_commit": "33e94fc3adcb888a8c6d62285f70bc78fb068ec7",
+      "categories": [
+        "ignored",
+        "vllm"
+      ],
+      "vllm_changed_lines": 225,
+      "total_changed_lines": 326,
+      "line_budget": 1000,
+      "commit_count_budget": 10,
+      "files_changed": [
+        ".buildkite/hardware_tests/amd.yaml",
+        ".buildkite/scripts/hardware_ci/run-amd-test.sh",
+        "docker/Dockerfile.rocm",
+        "tests/kernels/moe/modular_kernel_tools/common.py",
+        "tests/kernels/moe/test_batched_deepgemm.py",
+        "tests/kernels/moe/test_block_fp8.py",
+        "tests/kernels/moe/test_cutlass_moe.py",
+        "tests/kernels/moe/test_deepep_deepgemm_moe.py",
+        "tests/kernels/moe/test_deepep_moe.py",
+        "tests/kernels/moe/test_deepgemm.py",
+        "tests/kernels/moe/test_flashinfer.py",
+        "tests/kernels/moe/test_flashinfer_b12x_moe.py",
+        "tests/kernels/moe/test_flashinfer_moe.py",
+        "tests/kernels/moe/test_modular_oai_triton_moe.py",
+        "tests/kernels/moe/test_moe_layer.py",
+        "tests/kernels/moe/test_nvfp4_moe.py",
+        "tests/kernels/moe/test_trtllm_nvfp4_moe.py",
+        "tests/kernels/moe/utils.py",
+        "vllm/model_executor/layers/fused_moe/config.py",
+        "vllm/model_executor/layers/fused_moe/eep_reconfigure.py",
+        "vllm/model_executor/layers/fused_moe/experts/marlin_moe.py",
+        "vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py",
+        "vllm/model_executor/layers/fused_moe/fused_moe.py",
+        "vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py",
+        "vllm/model_executor/layers/fused_moe/layer.py",
+        "vllm/model_executor/layers/fused_moe/modular_kernel.py",
+        "vllm/model_executor/layers/fused_moe/oracle/fp8.py",
+        "vllm/model_executor/layers/fused_moe/oracle/int8.py",
+        "vllm/model_executor/layers/fused_moe/oracle/int_wna16.py",
+        "vllm/model_executor/layers/fused_moe/oracle/mxfp4.py",
+        "vllm/model_executor/layers/fused_moe/oracle/nvfp4.py",
+        "vllm/model_executor/layers/fused_moe/oracle/unquantized.py",
+        "vllm/model_executor/layers/fused_moe/oracle/w4a8.py",
+        "vllm/model_executor/layers/fused_moe/oracle/w4a8_int8.py",
+        "vllm/model_executor/layers/fused_moe/prepare_finalize/deepep_ht.py",
+        "vllm/model_executor/layers/fused_moe/prepare_finalize/naive_dp_ep.py",
+        "vllm/model_executor/layers/fused_moe/prepare_finalize/no_dp_ep.py",
+        "vllm/model_executor/layers/fused_moe/runner/shared_experts.py",
+        "vllm/model_executor/layers/fused_moe/utils.py",
+        "vllm/model_executor/layers/quantization/bitsandbytes.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16.py",
+        "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_marlin.py",
+        "vllm/model_executor/layers/quantization/moe_wna16.py",
+        "vllm/model_executor/layers/quantization/quark/quark_moe.py",
+        "vllm/model_executor/models/arctic.py",
+        "vllm/model_executor/models/bert_with_rope.py",
+        "vllm/model_executor/models/minicpm.py",
+        "vllm/v1/attention/backends/rocm_aiter_unified_attn.py"
+      ]
+    }
+  ]
+}

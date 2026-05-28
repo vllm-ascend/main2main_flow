@@ -23,7 +23,7 @@ class AdaptResult(BaseModel):
 
 def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
     prompt = _build_prompt(inputs)
-    project_root = Path(__file__).parent.parent.parent.parent.parent
+    adapter_crew_dir = Path(__file__).parent
 
     result = subprocess.run(
         [
@@ -34,7 +34,7 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
         ],
         capture_output=True,
         text=True,
-        cwd=str(project_root),
+        cwd=str(adapter_crew_dir),
     )
 
     if result.returncode != 0:
