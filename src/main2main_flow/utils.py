@@ -1,6 +1,5 @@
-import os
 import subprocess
-import tempfile
+from pathlib import Path
 
 UpgradeCompleted = "UpgradeCompleted"
 StepCompleted = "StepCompleted"
@@ -8,6 +7,9 @@ UpgradeFailed = "UpgradeFailed"
 StepRetryNeeded = "StepRetryNeeded"
 HasCommit = "HasCommit"
 HasNoCommit = "HasNoCommit"
+
+# Project-relative workspace: <project_root>/workspace/
+WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
 
 
 def is_git_url(path: str) -> bool:
@@ -19,17 +21,10 @@ def clone_repo(url: str, target: str) -> None:
     subprocess.run(["git", "clone", url, target], check=True)
 
 
-def resolve_path(raw: str, name: str, temp_dirs: list) -> str:
+def resolve_path(raw: str, name: str) -> str:
     if is_git_url(raw):
-        tmp = tempfile.TemporaryDirectory()
-        temp_dirs.append(tmp)
-        target = os.path.join(tmp.name, name)
+        target = str(WORKSPACE_DIR / "repos" / name)
+        Path(target).mkdir(parents=True, exist_ok=True)
         clone_repo(raw, target)
         return target
     return raw
-
-
-def cleanup_temp_dirs(temp_dirs: list) -> None:
-    for tmp in temp_dirs:
-        tmp.cleanup()
-    temp_dirs.clear()

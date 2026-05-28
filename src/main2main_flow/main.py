@@ -21,7 +21,7 @@ from main2main_flow.scripts.run_tests import run_tests
 from main2main_flow.scripts.update_commit_reference import run_update
 from main2main_flow.utils import (
     UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded,
-    HasCommit, HasNoCommit, resolve_path, cleanup_temp_dirs,
+    HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR,
 )
 
 _REFERENCE_DIR = str(Path(__file__).parent / "reference")
@@ -31,11 +31,7 @@ class Main2MainState(BaseModel):
     vllm_path: str = ""
     vllm_ascend_path: str = ""
     target_commit: str = ""
-    test_log_dir: str = "/vllm-workspace/logs"
-    
-    # Step 1 输出：后续 step 需要读取
-    has_drift: bool = False        # vllm 上游是否有未同步的 commit
-    steps: list = []              # 规划好的 adaptation 步骤列表
+    test_log_dir: str = ""
 
     # Step 2.4: 测试验证
 
@@ -58,24 +54,24 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._temp_dirs: list = []
 
     @start()
     def initialize(self):
-        """Initialize state"""
-        raw_vllm = self.state.vllm_path or os.getenv("VLLM_PATH")
-        raw_ascend = self.state.vllm_ascend_path or os.getenv("VLLM_ASCEND_PATH")
-        if not raw_vllm or not raw_ascend:
-            raise ValueError(
-                "Can't find vllm or vllm-ascend source. Please set "
-                "--vllm-path and --vllm-ascend-path or VLLM_PATH and " \
-                "VLLM_ASCEND_PATH environment variables.")
+        """Initialize state; all paths default to workspace/ under the project root."""
+        raw_vllm = (self.state.vllm_path
+                    or os.getenv("VLLM_PATH")
+                    or str(WORKSPACE_DIR / "repos" / "vllm"))
+        raw_ascend = (self.state.vllm_ascend_path
+                      or os.getenv("VLLM_ASCEND_PATH")
+                      or str(WORKSPACE_DIR / "repos" / "vllm-ascend"))
 
-        self.state.vllm_path = resolve_path(raw_vllm, "vllm", self._temp_dirs)
-        self.state.vllm_ascend_path = resolve_path(raw_ascend, "vllm-ascend", self._temp_dirs)
+        self.state.vllm_path = resolve_path(raw_vllm, "vllm")
+        self.state.vllm_ascend_path = resolve_path(raw_ascend, "vllm-ascend")
         self.state.target_commit = (
             self.state.target_commit or os.getenv("VLLM_TARGET_COMMIT", "")
         )
+        if not self.state.test_log_dir:
+            self.state.test_log_dir = str(WORKSPACE_DIR / "test-logs")
 
     @router(initialize)
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
@@ -110,7 +106,7 @@ class Main2MainFlow(Flow[Main2MainState]):
     def ai_analysis(self):
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
-        step_dir = Path(f"/tmp/main2main/steps/{step_id}")
+        step_dir = WORKSPACE_DIR / "steps" / step_id
         step_dir.mkdir(parents=True, exist_ok=True)
 
         vllm_path = self.state.vllm_path
@@ -237,7 +233,7 @@ class Main2MainFlow(Flow[Main2MainState]):
         )
 
         test_passed = result.get("can_commit", False)
-        summary_log = f"/tmp/main2main/steps/{step_id}/tests/round-{round_n}-summary.json"
+        summary_log = str(WORKSPACE_DIR / "steps" / str(step_id) / "tests" / f"round-{round_n}-summary.json")
         print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
 
         if test_passed:
@@ -259,8 +255,8 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @listen(or_(UpgradeCompleted, UpgradeFailed))
     def generate_final_post(self):
-        ci_results_dir = os.getenv("CI_RESULTS_DIR", "/tmp/main2main/ci_results")
-        steps_dir = os.getenv("STEPS_DIR", "/tmp/main2main/steps")
+        ci_results_dir = os.getenv("CI_RESULTS_DIR", str(WORKSPACE_DIR / "ci_results"))
+        steps_dir = os.getenv("STEPS_DIR", str(WORKSPACE_DIR / "steps"))
         result = (
             SummaryCrew()
             .crew()
@@ -302,10 +298,7 @@ def kickoff():
         inputs["target_commit"] = args.target_commit
 
     flow = Main2MainFlow()
-    try:
-        flow.kickoff(inputs=inputs if inputs else None)
-    finally:
-        cleanup_temp_dirs(flow._temp_dirs)
+    flow.kickoff(inputs=inputs if inputs else None)
 
 
 def plot():

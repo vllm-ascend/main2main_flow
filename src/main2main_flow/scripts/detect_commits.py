@@ -7,17 +7,9 @@ Data sources:
   - compat_tag:    extracted from the same file ("main_vllm_tag")
   - target_commit: HEAD of the local vLLM repository
 
-Output JSON schema:
-  {
-    "base_commit":    "<40-char sha>",
-    "target_commit":  "<40-char sha>",
-    "compat_tag":     "<tag or null>",
-    "has_drift":      <bool>
-  }
-
 Side-effects:
-  - Creates /tmp/main2main/ and /tmp/main2main/steps/ directories.
-  - Writes /tmp/main2main/detect.json.
+  - Creates <workspace>/ and <workspace>/steps/ directories.
+  - Writes <workspace>/detect.json.
 """
 from __future__ import annotations
 
@@ -27,6 +19,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+from main2main_flow.utils import WORKSPACE_DIR
 
 
 def extract_from_conf_py(ascend_path: Path) -> dict[str, str | None]:
@@ -67,8 +61,12 @@ def get_repo_head(repo_path: Path) -> str:
     return result.stdout.strip()
 
 
-def detect(vllm_path: Path, ascend_path: Path, target_commit: str | None = None) -> dict:
-    """Run drift detection and write /tmp/main2main/detect.json.
+def detect(
+    vllm_path: Path,
+    ascend_path: Path,
+    target_commit: str | None = None,
+) -> dict:
+    """Run drift detection and write <workspace>/detect.json.
 
     Returns the detect result dict.
     """
@@ -82,10 +80,9 @@ def detect(vllm_path: Path, ascend_path: Path, target_commit: str | None = None)
         "has_commit": conf["base_commit"] != target,
     }
 
-    workspace = Path("/tmp/main2main")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "steps").mkdir(exist_ok=True)
-    (workspace / "detect.json").write_text(
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    (WORKSPACE_DIR / "steps").mkdir(exist_ok=True)
+    (WORKSPACE_DIR / "detect.json").write_text(
         json.dumps(result, indent=2) + "\n", encoding="utf-8"
     )
 
