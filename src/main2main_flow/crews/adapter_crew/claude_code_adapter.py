@@ -50,28 +50,16 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import BaseModel, Field
 
 _CONFIG_DIR = Path(__file__).parent / "config"
 
 
-# ── config loaders ────────────────────────────────────────────────────────────
-
-def _load_agents() -> dict:
-    return yaml.safe_load((_CONFIG_DIR / "agents.yaml").read_text(encoding="utf-8"))
-
+# ── prompt loader ─────────────────────────────────────────────────────────────
 
 def _orchestrator_prompt(inputs: dict[str, Any]) -> str:
-    agents = _load_agents()
-    template = (_CONFIG_DIR / "orchestrator.md").read_text(encoding="utf-8")
+    template = (_CONFIG_DIR / "prompt.md").read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
-    ctx.update({
-        "analyzer_prompt": agents["patch_analyzer"]["system_prompt"].format_map(ctx),
-        "qa_prompt":       agents["analyzer_qa"]["system_prompt"].format_map(ctx),
-        "adapter_prompt":  agents["code_adapter"]["system_prompt"].format_map(ctx),
-        "reviewer_prompt": agents["code_reviewer"]["system_prompt"].format_map(ctx),
-    })
     return template.format_map(ctx)
 
 
