@@ -35,8 +35,7 @@ class Main2MainState(BaseModel):
     test_log_dir: str = ""
 
     # Step 2.4: 测试验证
-
-    has_commit: bool = False        # vllm 上游是否有未同步的 commit
+    
     steps: list = []              # 规划好的 adaptation 步骤列表
     release_tag: str = ""         # main_vllm_tag from conf.py，用于 vllm_version_is() 校验
 
