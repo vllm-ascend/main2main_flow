@@ -1,12 +1,13 @@
-"""Claude Code CLI adapter replacing CrewAI / OpenCode for the adapter crew.
+"""Claude Code CLI adapter for the adapter crew.
 
-Spawns `claude -p` as a subprocess. The orchestrator uses Claude Code's
-built-in Agent tool to run subagents in sequence with iterative feedback:
+Agent descriptions and task descriptions are loaded from config/agents.yaml
+and config/tasks.yaml — the same source used by CrewAI — so both frameworks
+share a single definition.
+
+Spawns `claude -p --output-format stream-json` as a subprocess.
+The orchestrator uses Claude Code's built-in Agent tool to run 4 subagents:
   patch_analyzer ↔ analyzer_qa  (up to 3 rounds)
   code_adapter   ↔ code_reviewer (up to 3 rounds)
-
-Output streams in real time; subagent boundaries are highlighted.
-Each subagent's output is archived to the step directory.
 """
 from __future__ import annotations
 
@@ -16,22 +17,56 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, Field
 
-# ── subagent system prompts (loaded from .opencode/agents/*.md) ───────────────
+_CONFIG_DIR = Path(__file__).parent / "config"
 
-_AGENTS_DIR = Path(__file__).parent / ".opencode" / "agents"
+# agent key → task key
+_AGENT_TASK_MAP = {
+    "patch_analyzer": "analyze_patch_task",
+    "analyzer_QA":    "analyze_qa_task",
+    "code_adapter":   "adapt_code_task",
+    "code_reviewer":  "review_code_task",
+}
 
 
-def _load_agent_prompt(name: str) -> str:
-    """Return the body of an agent .md file (strips YAML frontmatter)."""
-    path = _AGENTS_DIR / f"{name}.md"
-    text = path.read_text(encoding="utf-8")
-    # strip --- frontmatter ---
-    if text.startswith("---"):
-        end = text.index("---", 3)
-        text = text[end + 3:].lstrip()
-    return text
+# ── config loaders ────────────────────────────────────────────────────────────
+
+def _load_yaml(name: str) -> dict:
+    return yaml.safe_load((_CONFIG_DIR / f"{name}.yaml").read_text(encoding="utf-8"))
+
+
+def _build_agent_prompt(agent_key: str, inputs: dict[str, Any]) -> str:
+    """Combine role/goal/backstory + task description into one agent prompt."""
+    agents = _load_yaml("agents")
+    tasks = _load_yaml("tasks")
+    task_key = _AGENT_TASK_MAP[agent_key]
+
+    a = agents[agent_key]
+    t = tasks[task_key]
+
+    role      = a.get("role", "").strip()
+    goal      = a.get("goal", "").strip()
+    backstory = a.get("backstory", "").strip()
+    desc      = t.get("description", "").strip()
+    expected  = t.get("expected_output", "").strip()
+
+    # substitute known inputs; leave unknown placeholders intact
+    safe = {k: str(v) for k, v in inputs.items()}
+    def fmt(s: str) -> str:
+        try:
+            return s.format_map(safe)
+        except (KeyError, ValueError):
+            return s
+
+    return (
+        f"You are a {fmt(role)}.\n\n"
+        f"GOAL:\n{fmt(goal)}\n\n"
+        f"BACKGROUND:\n{fmt(backstory)}\n\n"
+        f"## Task\n\n{fmt(desc)}\n\n"
+        f"## Expected output\n\n{fmt(expected)}"
+    )
 
 
 # ── result model ──────────────────────────────────────────────────────────────
@@ -45,7 +80,7 @@ class AdaptResult(BaseModel):
 # ── main entry point ──────────────────────────────────────────────────────────
 
 def run_claude_code_adapter(inputs: dict[str, Any]) -> AdaptResult:
-    prompt = _build_prompt(inputs)
+    prompt = _build_orchestrator_prompt(inputs)
 
     proc = subprocess.Popen(
         [
@@ -81,7 +116,6 @@ def _print_event(line: str) -> None:
 
     t = ev.get("type")
 
-    # assistant text / tool use
     if t == "assistant":
         for block in ev.get("message", {}).get("content", []):
             btype = block.get("type")
@@ -89,7 +123,7 @@ def _print_event(line: str) -> None:
                 print(block.get("text", ""), end="", flush=True)
             elif btype == "tool_use":
                 name = block.get("name", "")
-                inp = block.get("input", {})
+                inp  = block.get("input", {})
                 if name == "Agent":
                     agent_type = inp.get("subagent_type", "?")
                     print(f"\n{'━'*60}", flush=True)
@@ -99,69 +133,45 @@ def _print_event(line: str) -> None:
                     brief = json.dumps(inp, ensure_ascii=False)[:200]
                     print(f"\n[{name}] ← {brief}", flush=True)
 
-    # tool results (includes subagent output)
     elif t == "user":
         for block in ev.get("message", {}).get("content", []):
             if block.get("type") != "tool_result":
                 continue
-            # find the matching tool_use name from prior assistant turn
-            # Claude Code embeds it in tool_use_id; we show content directly
             content = block.get("content", "")
             if isinstance(content, list):
                 for c in content:
-                    if c.get("type") == "text":
-                        text = c.get("text", "")
-                        if text:
-                            print(f"\n{'─'*60}", flush=True)
-                            print(f"◀ tool result:", flush=True)
-                            print(text, flush=True)
-                            print(f"{'─'*60}\n", flush=True)
+                    if c.get("type") == "text" and c.get("text"):
+                        print(f"\n{'─'*60}", flush=True)
+                        print(f"◀ tool result:", flush=True)
+                        print(c["text"], flush=True)
+                        print(f"{'─'*60}\n", flush=True)
             elif isinstance(content, str) and content:
                 print(f"\n{'─'*60}", flush=True)
                 print(f"◀ tool result:", flush=True)
                 print(content, flush=True)
                 print(f"{'─'*60}\n", flush=True)
 
-    elif t == "result":
-        if ev.get("is_error"):
-            print(f"\n[error] {ev.get('result', '')}", flush=True)
+    elif t == "result" and ev.get("is_error"):
+        print(f"\n[error] {ev.get('result', '')}", flush=True)
 
 
-# ── prompt builder ────────────────────────────────────────────────────────────
+# ── orchestrator prompt ───────────────────────────────────────────────────────
 
-def _build_prompt(inputs: dict[str, Any]) -> str:
-    mode = inputs.get("mode", "adapt")
-    step_id = inputs.get("step_id", "")
-    step_dir = inputs.get("step_dir", "")
-    patch_path = inputs.get("patch_path", "")
-    changed_files_path = inputs.get("changed_files_path", "")
+def _build_orchestrator_prompt(inputs: dict[str, Any]) -> str:
+    step_id    = inputs.get("step_id", "")
+    step_dir   = inputs.get("step_dir", "")
     ascend_path = inputs.get("ascend_path", "")
-    vllm_path = inputs.get("vllm_path", "")
+    vllm_path  = inputs.get("vllm_path", "")
     release_tag = inputs.get("release_tag", "")
     reference_dir = inputs.get("reference_dir", "")
-    error_logs: list[str] = json.loads(inputs.get("error_logs", "[]"))
+    patch_path = inputs.get("patch_path", "")
+    changed_files_path = inputs.get("changed_files_path", "")
 
-    analyzer_prompt = _load_agent_prompt("patch_analyzer")
-    qa_prompt = _load_agent_prompt("analyzer_qa")
-    adapter_prompt = _load_agent_prompt("code_adapter")
-    reviewer_prompt = _load_agent_prompt("code_reviewer")
-
-    if mode == "fix":
-        error_section = "\n".join(f"  - {p}" for p in error_logs)
-        task_context = f"""\
-MODE: fix
-Error logs:
-{error_section}
-Read {reference_dir}/diagnosis-guide.md and {reference_dir}/error-pattern-examples.md.
-"""
-    else:
-        task_context = f"""\
-MODE: adapt
-Upstream patch:      {patch_path}
-Changed files list:  {changed_files_path}
-Release tag:         {release_tag}
-Read {reference_dir}/adapt-guide.md first. Follow instructions exactly.
-"""
+    # build each agent's full system prompt from YAML
+    analyzer_prompt = _build_agent_prompt("patch_analyzer", inputs)
+    qa_prompt       = _build_agent_prompt("analyzer_QA", inputs)
+    adapter_prompt  = _build_agent_prompt("code_adapter", inputs)
+    reviewer_prompt = _build_agent_prompt("code_reviewer", inputs)
 
     return f"""\
 You are the orchestrator for adapting vllm-ascend to upstream vLLM changes (step {step_id}).
@@ -173,49 +183,25 @@ REPOSITORIES:
 
 ARCHIVE DIRECTORY: {step_dir}
 
-TASK CONTEXT:
-{task_context}
-
 ━━━ YOUR TEAM ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 You have 4 specialist subagents. Spawn each via the Agent tool with
-subagent_type="claude" and the prompt described below.
+subagent_type="claude" and the prompt shown below.
 
 ┌─ patch_analyzer ──────────────────────────────────────────────────────────┐
-│ Role: Senior systems engineer specializing in vLLM plugin/adapter codebases│
-│ Job:  Read the upstream patch and reference guides, determine which        │
-│       vllm-ascend files need to change and exactly what must change.       │
-│ Does NOT modify any files.                                                 │
-│ System prompt:                                                             │
-│ {analyzer_prompt}
+{analyzer_prompt}
 └───────────────────────────────────────────────────────────────────────────┘
 
 ┌─ analyzer_qa ─────────────────────────────────────────────────────────────┐
-│ Role: Senior QA engineer who catches analysis mistakes before coding starts│
-│ Job:  Cross-check patch_analyzer's output against the actual patch and     │
-│       vllm-ascend source. Returns APPROVED or REJECTED with specifics.     │
-│ Does NOT modify any files.                                                 │
-│ System prompt:                                                             │
-│ {qa_prompt}
+{qa_prompt}
 └───────────────────────────────────────────────────────────────────────────┘
 
 ┌─ code_adapter ────────────────────────────────────────────────────────────┐
-│ Role: Expert hardware plugin developer for ML inference frameworks         │
-│ Job:  Apply targeted code changes to vllm-ascend based on the approved     │
-│       analysis. Strict guardrails: only edits vllm-ascend, uses            │
-│       vllm_version_is() for version guards, never git add .                │
-│ System prompt:                                                             │
-│ {adapter_prompt}
+{adapter_prompt}
 └───────────────────────────────────────────────────────────────────────────┘
 
 ┌─ code_reviewer ───────────────────────────────────────────────────────────┐
-│ Role: Principal engineer reviewing hardware adaptation PRs                 │
-│ Job:  Verify every change is correct, complete, and safe. Catches missed   │
-│       call sites, wrong signatures, bad version guards. Returns a final    │
-│       JSON block with modified_files, is_noop, step_summary.              │
-│ Does NOT modify any files.                                                 │
-│ System prompt:                                                             │
-│ {reviewer_prompt}
+{reviewer_prompt}
 └───────────────────────────────────────────────────────────────────────────┘
 
 ━━━ WORKFLOW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -223,17 +209,10 @@ subagent_type="claude" and the prompt described below.
 PHASE 1 — Analysis + QA (up to 3 rounds):
 
   Round loop:
-  a) Spawn patch_analyzer. Pass:
-       - The full TASK CONTEXT above
-       - ascend_path: {ascend_path}
-       - Prior QA rejection feedback (if any)
+  a) Spawn patch_analyzer. Pass prior QA rejection feedback (if any).
      Append output to {step_dir}/analysis.md with "## Round N" header.
 
-  b) Spawn analyzer_qa. Pass:
-       - patch_analyzer's full output
-       - patch_path: {patch_path}
-       - changed_files_path: {changed_files_path}
-       - reference_dir: {reference_dir}
+  b) Spawn analyzer_qa. Pass patch_analyzer's full output.
      Append output to {step_dir}/analysis_qa.md with "## Round N" header.
 
   c) REJECTED → feed rejection back to patch_analyzer, repeat (max 3).
@@ -242,18 +221,10 @@ PHASE 1 — Analysis + QA (up to 3 rounds):
 PHASE 2 — Code Adaptation + Review (up to 3 rounds):
 
   Round loop:
-  a) Spawn code_adapter. Pass:
-       - Approved patch_analyzer output
-       - ascend_path: {ascend_path}, patch_path: {patch_path}
-       - release_tag: {release_tag}, reference_dir: {reference_dir}
-       - Prior reviewer feedback (if any)
+  a) Spawn code_adapter. Pass approved analysis + prior reviewer feedback (if any).
      Append output to {step_dir}/adaptation_log.md with "## Round N" header.
 
-  b) Spawn code_reviewer. Pass:
-       - patch_analyzer's approved plan
-       - code_adapter's full output
-       - ascend_path: {ascend_path}, release_tag: {release_tag}
-       - reference_dir: {reference_dir}
+  b) Spawn code_reviewer. Pass analysis plan + code_adapter output.
      Append output to {step_dir}/review.md with "## Round N" header.
 
   c) Issues found → feed back to code_adapter, repeat (max 3).
@@ -261,7 +232,7 @@ PHASE 2 — Code Adaptation + Review (up to 3 rounds):
 
 ━━━ FINAL OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Return the code_reviewer's final JSON block verbatim as your answer:
+Return the code_reviewer's final JSON block verbatim:
 ```json
 {{
   "modified_files": ["vllm_ascend/foo.py"],
