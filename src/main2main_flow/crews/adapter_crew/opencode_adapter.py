@@ -28,61 +28,25 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
     proc = subprocess.Popen(
         [
             "opencode", "run",
-            "--format", "json",
             "--dangerously-skip-permissions",
             prompt,
         ],
         stdout=subprocess.PIPE,
         stderr=None,   # stderr goes directly to terminal
         text=True,
+        bufsize=1,
         cwd=str(adapter_crew_dir),
     )
 
-    lines: list[str] = []
+    chunks: list[str] = []
     assert proc.stdout is not None
     for line in proc.stdout:
-        lines.append(line)
-        _print_event(line)
+        print(line, end="", flush=True)
+        chunks.append(line)
     proc.wait()
 
-    return _parse_result("".join(lines))
+    return _parse_result("".join(chunks))
 
-
-def _print_event(line: str) -> None:
-    try:
-        ev = json.loads(line)
-    except json.JSONDecodeError:
-        return
-
-    t = ev.get("type")
-
-    if t == "text":
-        text = ev.get("text", "")
-        if text:
-            print(text, end="", flush=True)
-
-    elif t == "tool_use":
-        part = ev.get("part", {})
-        tool = part.get("tool", "")
-        state = part.get("state", {})
-        status = state.get("status", "")
-
-        if status == "running":
-            inp = state.get("input", "")
-            if isinstance(inp, dict):
-                inp = json.dumps(inp, ensure_ascii=False)
-            print(f"\n[tool] {tool} ← {str(inp)[:200]}", flush=True)
-        elif status == "completed":
-            out = state.get("output", "")
-            if isinstance(out, str):
-                out = out[:300]
-            print(f"[tool] {tool} → {out}", flush=True)
-        elif status == "error":
-            err = state.get("output", "")
-            print(f"[tool] {tool} ✗ {str(err)[:300]}", flush=True)
-
-    elif t == "error":
-        print(f"\n[opencode error] {ev.get('message', '')}", flush=True)
 
 
 def _build_prompt(inputs: dict[str, Any]) -> str:
