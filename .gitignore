@@ -5,3 +5,7 @@ lib/
 uv.lock
 .venv
 output
+venv/
+workspace/
+logs.txt
+*.pyc
