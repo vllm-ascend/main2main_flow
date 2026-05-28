@@ -34,11 +34,11 @@ class AdaptResult(BaseModel):
 
 # ── main entry point ──────────────────────────────────────────────────────────
 
-def run_claude_code_adapter(inputs: dict[str, Any]) -> AdaptResult:
+def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
     prompt = _build_prompt(inputs)
     step_dir = inputs.get("step_dir", "")
-    log_path = Path(step_dir) / "claude_code.log" if step_dir else None
-    raw_path = Path(step_dir) / "claude_code_raw.jsonl" if step_dir else None
+    log_path = Path(step_dir) / "opencode.log" if step_dir else None
+    raw_path = Path(step_dir) / "opencode_raw.jsonl" if step_dir else None
 
     print(f"\n{'═'*60}")
     print("TEAM LEAD PROMPT:")
