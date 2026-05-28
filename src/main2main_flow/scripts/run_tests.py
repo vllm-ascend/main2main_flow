@@ -73,6 +73,7 @@ DEFAULT_ASCEND_REPO = "https://github.com/vllm-project/vllm-ascend.git"
 
 
 def _git_run(cmd: list[str], cwd: Path, msg: str) -> None:
+    """Run a git command locally."""
     print(f"  {msg} ... ", end="", flush=True)
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -82,7 +83,7 @@ def _git_run(cmd: list[str], cwd: Path, msg: str) -> None:
     print("OK")
 
 
-def _ensure_repo(path: Path, remote: str) -> bool:
+def _ensure_repo(path: Path, remote_url: str) -> bool:
     """Clone the repo if the directory doesn't exist or is not a git repo.
 
     Returns True if the repo was freshly cloned, False if it already existed.
@@ -98,16 +99,8 @@ def _ensure_repo(path: Path, remote: str) -> bool:
             return False
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  Cloning {remote} -> {path} ... ", end="", flush=True)
-    result = subprocess.run(
-        ["git", "clone", remote, str(path)],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print("FAILED")
-        print(result.stderr.strip(), file=sys.stderr)
-        sys.exit(result.returncode)
-    print("OK")
+    print(f"  Cloning {remote_url} -> {path} ... ", end="", flush=True)
+    _git_run(["git", "clone", remote_url, str(path)], path, "clone")
     return True
 
 
@@ -131,27 +124,22 @@ def _apply_patch(path: Path, patch_path: Path) -> None:
 
 def _build_exec_cmd(
     inner_cmd: str,
-    remote_host: str | None = None,
-    remote_container: str | None = None,
+    remote_host: str,
+    remote_container: str,
 ) -> list[str]:
-    """Wrap *inner_cmd* for execution on the target (local / remote container)."""
-    if remote_host:
-        return ["ssh", "-o", "StrictHostKeyChecking=no", remote_host,
-                f"docker exec {remote_container} sh -c {shlex.quote(inner_cmd)}"]
-    else:
-        return ["sh", "-c", inner_cmd]
+    """Wrap *inner_cmd* for execution inside the remote container."""
+    return ["ssh", "-o", "StrictHostKeyChecking=no", remote_host,
+            f"docker exec {remote_container} sh -c {shlex.quote(inner_cmd)}"]
 
 
 def _pip_install(
     repo_path: Path,
-    remote_host: str | None = None,
-    remote_container: str | None = None,
     extra_env: dict[str, str] | None = None,
     requirements: str | None = None,
     verbose: bool = False,
     skip_editable: bool = False,
 ) -> None:
-    """Run pip install in *repo_path* on the target (local/remote/container)."""
+    """Run pip install in *repo_path* locally."""
     merged_env = dict(_PIP_INSTALL_BASE_ENV)
     if extra_env:
         merged_env.update(extra_env)
@@ -169,27 +157,12 @@ def _pip_install(
         full_cmd = f"cd {shlex.quote(str(repo_path))} && {cmd}"
         label = f"pip install ({repo_path.name}) [{i+1}/{len(cmds)}]"
         print(f"  {label} ... ", end="", flush=True)
-        exec_cmd = _build_exec_cmd(full_cmd, remote_host, remote_container)
-        result = subprocess.run(exec_cmd, capture_output=True, text=True)
+        result = subprocess.run(["sh", "-c", full_cmd], capture_output=True, text=True)
         if result.returncode != 0:
             print("FAILED")
             print(result.stderr.strip(), file=sys.stderr)
             sys.exit(result.returncode)
         print("OK")
-
-
-def _setup_mirrors(
-    remote_host: str | None = None,
-    remote_container: str | None = None,
-) -> None:
-    """Configure git proxy and pip mirrors on the target."""
-    cmds = [
-        "git config --global url.https://ghfast.top/https://github.com/.insteadOf https://github.com/",
-        "pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple",
-    ]
-    for cmd in cmds:
-        exec_cmd = _build_exec_cmd(cmd, remote_host, remote_container)
-        subprocess.run(exec_cmd, capture_output=True, text=True)
 
 
 _PIP_INSTALL_BASE_ENV = {
@@ -205,18 +178,15 @@ def setup_env(
     patch_path: Path | None = None,
     vllm_remote: str = DEFAULT_VLLM_REPO,
     ascend_remote: str = DEFAULT_ASCEND_REPO,
-    remote_host: str | None = None,
-    remote_container: str | None = None,
 ) -> None:
-    """Prepare the environment: clone, checkout, install, apply patch, install."""
-    _setup_mirrors(remote_host, remote_container)
+    """Prepare the environment locally: clone, checkout, install, apply patch, install."""
+    _setup_mirrors()
 
     print("=== Setup vLLM ===")
     _ensure_repo(vllm_path, vllm_remote)
     _checkout(vllm_path, vllm_commit)
     print("=== Install vLLM ===")
-    _pip_install(vllm_path, remote_host, remote_container,
-                 extra_env={"VLLM_TARGET_DEVICE": "empty"})
+    _pip_install(vllm_path, extra_env={"VLLM_TARGET_DEVICE": "empty"})
 
     print("=== Setup vllm-ascend ===")
     ascend_fresh = _ensure_repo(ascend_path, ascend_remote)
@@ -227,14 +197,108 @@ def setup_env(
         _apply_patch(ascend_path, patch_path)
 
     print("=== Install vllm-ascend ===")
-    _pip_install(ascend_path, remote_host, remote_container,
-                 requirements="requirements-dev.txt", verbose=True,
+    _pip_install(ascend_path, requirements="requirements-dev.txt", verbose=True,
                  skip_editable=not ascend_fresh)
 
     print("\nSetup complete.")
     print(f"  vLLM:        {vllm_path} @ {vllm_commit[:8]}")
     print(f"  vllm-ascend: {ascend_path} @ {ascend_commit[:8]}"
           + (f" + {patch_path.name}" if patch_path else ""))
+
+
+def _setup_mirrors() -> None:
+    """Configure pip mirrors locally."""
+    subprocess.run(
+        ["sh", "-c", "pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"],
+        capture_output=True, text=True,
+    )
+
+
+# ---- Shell helpers for remote execution ----
+
+def _sh_ensure_repo(path_q: str, remote_q: str, name: str) -> str:
+    """Generate shell snippet: clone or fetch repo *name*, return 'fresh' or 'cached'."""
+    return f'''
+# --- {name}: ensure repo ---
+if [ -d {path_q} ] && [ -d {path_q}/.git ]; then
+    echo "  {path_q} already exists, fetching ..."
+    cd {path_q} && git fetch --tags || exit 1
+    _{name}_fresh=0
+elif [ -d {path_q} ]; then
+    echo "  {path_q} exists but is not a git repo, removing ..."
+    rm -rf {path_q}
+    echo "  Cloning {remote_q} -> {path_q} ..."
+    mkdir -p $(dirname {path_q}) && git clone {remote_q} {path_q} || exit 1
+    _{name}_fresh=1
+else
+    echo "  Cloning {remote_q} -> {path_q} ..."
+    mkdir -p $(dirname {path_q}) && git clone {remote_q} {path_q} || exit 1
+    _{name}_fresh=1
+fi
+'''
+
+
+def _build_setup_script(
+    vllm_path: Path,
+    vllm_commit: str,
+    ascend_path: Path,
+    ascend_commit: str,
+    patch_path: Path | None = None,
+    vllm_remote: str = DEFAULT_VLLM_REPO,
+    ascend_remote: str = DEFAULT_ASCEND_REPO,
+) -> str:
+    """Build a shell script that performs the full setup on a remote target."""
+    vp = shlex.quote(str(vllm_path))
+    ap = shlex.quote(str(ascend_path))
+    vr = shlex.quote(vllm_remote)
+    ar = shlex.quote(ascend_remote)
+    vc = shlex.quote(vllm_commit[:8])
+    ac = shlex.quote(ascend_commit[:8])
+
+    pip_extra = shlex.quote(_PIP_INSTALL_BASE_ENV["PIP_EXTRA_INDEX_URL"])
+
+    patch_block = ""
+    if patch_path:
+        pp = shlex.quote(str(patch_path))
+        patch_block = f'''
+# --- ascend: apply patch ---
+echo "  Applying patch {patch_path.name} ..."
+cd {ap} && git am {pp} || exit 1
+'''
+
+    return f'''#!/bin/sh
+set -e
+echo "=== Setup mirrors ==="
+pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+echo "=== Setup vLLM ==="
+{_sh_ensure_repo(vp, vr, "vllm")}
+echo "  checkout {vllm_commit[:8]} ..."
+cd {vp} && git checkout {vc} || exit 1
+
+echo "=== Install vLLM ==="
+cd {vp} && VLLM_TARGET_DEVICE=empty PIP_EXTRA_INDEX_URL={pip_extra} pip install -e . || exit 1
+
+echo "=== Setup vllm-ascend ==="
+{_sh_ensure_repo(ap, ar, "ascend")}
+echo "  checkout {ascend_commit[:8]} ..."
+cd {ap} && git checkout {ac} || exit 1
+{patch_block}
+echo "=== Install vllm-ascend ==="
+cd {ap} && PIP_EXTRA_INDEX_URL={pip_extra} pip install -r requirements-dev.txt || exit 1
+if [ $_ascend_fresh -eq 1 ]; then
+    echo "  (fresh clone, running editable install)"
+    cd {ap} && PIP_EXTRA_INDEX_URL={pip_extra} pip install -v -e . || exit 1
+else
+    echo "  (existing repo, skipping editable install)"
+fi
+
+echo ""
+echo "Setup complete."
+echo "  vLLM:        {vllm_path} @ {vllm_commit[:8]}"
+echo "  vllm-ascend: {ascend_path} @ {ascend_commit[:8]}''' + (
+    f' + {patch_path.name}' if patch_path else ''
+) + '"\n'
 
 # ---------------------------------------------------------------------------
 # Suite -> card requirement
@@ -457,7 +521,7 @@ def run_tests(
     suites: list[str] | None = None,
     total_cards: int = 1,
     remote: str | None = None,
-    log_dir: str | Path = "/vllm-workspace/logs",
+    log_dir: str | Path = "/tmp/main2main",
     remote_log_dir: str | Path | None = None,
     round_number: int = 1,
     dry_run: bool = False,
@@ -496,19 +560,37 @@ def run_tests(
         remote_host, remote_container = _resolve_remote(remote)
 
     # ---- Step 2: Setup environment (git + pip install) ----
-    setup_env(
-        vllm_path=vllm_path,
-        vllm_commit=vllm_commit,
-        ascend_path=ascend_path,
-        ascend_commit=ascend_commit,
-        patch_path=patch_path,
-        remote_host=remote_host,
-        remote_container=remote_container,
-    )
+    if remote_host:
+        print("=== Running setup on remote container ===")
+        script = _build_setup_script(
+            vllm_path=vllm_path,
+            vllm_commit=vllm_commit,
+            ascend_path=ascend_path,
+            ascend_commit=ascend_commit,
+            patch_path=patch_path,
+        )
+        exec_cmd = _build_exec_cmd(script, remote_host, remote_container)
+        result = subprocess.run(exec_cmd, capture_output=True, text=True)
+        print(result.stdout)
+        if result.returncode != 0:
+            print("Remote setup FAILED")
+            print(result.stderr.strip(), file=sys.stderr)
+            sys.exit(result.returncode)
+    else:
+        setup_env(
+            vllm_path=vllm_path,
+            vllm_commit=vllm_commit,
+            ascend_path=ascend_path,
+            ascend_commit=ascend_commit,
+            patch_path=patch_path,
+        )
 
     # ---- Step 3: Verify run_suite.py exists ----
     run_suite = ascend_path / ".github" / "workflows" / "scripts" / "run_suite.py"
-    ci_log_summary = ascend_path / ".github" / "workflows" / "scripts" / "ci_log_summary.py"
+    # ci_log_summary always runs locally — use the local checkout, not the
+    # remote ascend_path which may not exist on this machine.
+    _repo_root = Path(__file__).resolve().parents[3]
+    ci_log_summary = _repo_root / ".github" / "workflows" / "scripts" / "ci_log_summary.py"
 
     if not remote_host and not run_suite.exists():
         print(f"Error: run_suite.py not found: {run_suite}", file=sys.stderr)
@@ -585,7 +667,7 @@ def run_tests(
                         if k.startswith("VLLM_"):
                             remote_env.append(f"{k}={shlex.quote(env[k])}")
                     inner_cmd = (
-                        f"docker exec {remote_container} "
+                        f"docker exec -w {shlex.quote(str(ascend_path))} {remote_container} "
                         f"env {' '.join(remote_env)} "
                         f"python3 {shlex.quote(str(remote_run_suite))} "
                         f"--suite {shlex.quote(suite_name)} --continue-on-error"
@@ -600,7 +682,10 @@ def run_tests(
                 def _run_and_summarize(cmd, lp, sp, sn, dvs, asc, cls, sid, rn, env_copy):
                     if not remote_host:
                         env_copy["ASCEND_RT_VISIBLE_DEVICES"] = dvs
-                    exit_code = _run_to_log(cmd, asc, lp, env_copy)
+                    # In remote mode, ascend_path is on the remote; use a local
+                    # CWD so subprocess can start (SSH doesn't need it anyway).
+                    cwd = Path("/tmp") if remote_host else asc
+                    exit_code = _run_to_log(cmd, cwd, lp, env_copy)
                     if mock:
                         return {
                             "suite": sn,
@@ -754,8 +839,8 @@ def main() -> None:
     parser.add_argument("--suite", action="append",
                         help="run_suite.py suite name. Can be specified multiple times. "
                              "Defaults to e2e-singlecard-light.")
-    parser.add_argument("--log-dir", type=Path, default=Path("/vllm-workspace/logs"),
-                        help="Directory for test logs")
+    parser.add_argument("--log-dir", type=Path, default=Path("/tmp/main2main"),
+                        help="Directory for test logs (local path)")
     parser.add_argument("--total-cards", type=int, default=1,
                         help="Total NPU cards available on the target machine "
                              "(default: 1)")
