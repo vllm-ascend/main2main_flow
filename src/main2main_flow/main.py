@@ -37,6 +37,7 @@ class Main2MainState(BaseModel):
     steps: list = []
     release_tag: str = ""
 
+    total_steps: int = 0
     current_step: int = 0
 
     cur_vllm_commit: str = ""
@@ -79,6 +80,7 @@ class Main2MainFlow(Flow[Main2MainState]):
         vllm_path = Path(self.state.vllm_path)
         vllm_ascend_path = Path(self.state.vllm_ascend_path)
 
+        # generate detect.json in workspace
         result, has_commit = detect(vllm_path, vllm_ascend_path,
                         target_commit=self.state.target_commit or None)
         self.state.release_tag = result.get("compat_tag") or ""
@@ -86,34 +88,54 @@ class Main2MainFlow(Flow[Main2MainState]):
               f"target={result['target_commit'][:8]}")
 
         if not has_commit:
-            print("[analyze] 已同步，无需适配。")
             return HasNoCommit
 
+        # generate steps.json in workspace
         plan = run_plan(vllm_path, result["base_commit"], result["target_commit"])
         self.state.steps = plan["steps"]
-        print(f"[analyze] 规划了 {len(self.state.steps)} 个步骤，"
+        self.state.total_steps = len(plan["steps"])
+
+        if self.state.total_steps == 0:
+            return HasNoCommit
+
+        print(f"[analyze] 规划了 {self.state.total_steps} 个步骤，"
               f"共 {plan['total_commits']} 个 commit。")
         print("===========================================")
         print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
+
+        # generate every step folder in workspace
+        for index in range(self.state.total_steps):
+            step = self.state.steps[index]
+            step_dir = WORKSPACE_DIR / "steps" / step["id"]
+            step_dir.mkdir(parents=True, exist_ok=True)
+            patch_path = step_dir / "upstream.patch"
+            with open(patch_path, "w") as f:
+                subprocess.run(
+                    ["git", "-C", vllm_path, "diff",
+                     f"{step['start_commit']}..{step['end_commit']}"],
+                    stdout=f, check=True,
+                )
+            changed_files_path = step_dir / "changed-files.txt"
+            with open(changed_files_path, "w") as f:
+                subprocess.run(
+                    ["git", "-C", vllm_path, "diff", "--name-only",
+                     f"{step['start_commit']}..{step['end_commit']}"],
+                    stdout=f, check=True,
+                )
         return HasCommit
 
     @listen(HasNoCommit)
     def has_no_commit(self):
-        print("[done] 仓库已同步，无需适配，流程结束。")
+        print(f"[done] 仓库已同步，无需适配，流程结束。")
 
     @listen(or_(HasCommit, StepCompleted, StepRetryNeeded))
     def ai_analysis(self):
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
         step_dir = WORKSPACE_DIR / "steps" / step_id
-        step_dir.mkdir(parents=True, exist_ok=True)
 
         vllm_path = self.state.vllm_path
         ascend_path = self.state.vllm_ascend_path
-
-        patch_path = step_dir / "upstream.patch"
-        changed_files_path = step_dir / "changed-files.txt"
-
         # 如果 step 目录下已有 tests/ 说明 e2e 跑过了，直接进入 fix 模式
         has_test_results = (step_dir / "tests").exists()
 
@@ -125,21 +147,7 @@ class Main2MainFlow(Flow[Main2MainState]):
             )
             print(f"[ai_analysis] {step_id}: vllm checked out to {step['end_commit'][:8]}")
 
-            # 2. 生成本轮 upstream patch
-            with open(patch_path, "w") as f:
-                subprocess.run(
-                    ["git", "-C", vllm_path, "diff",
-                     f"{step['start_commit']}..{step['end_commit']}"],
-                    stdout=f, check=True,
-                )
-            with open(changed_files_path, "w") as f:
-                subprocess.run(
-                    ["git", "-C", vllm_path, "diff", "--name-only",
-                     f"{step['start_commit']}..{step['end_commit']}"],
-                    stdout=f, check=True,
-                )
-
-            # 3. 更新所有 tracked 文件里的 vllm commit 引用
+            # 2. 更新所有 tracked 文件里的 vllm commit 引用
             try:
                 ref_result = run_update(
                     ascend_path=Path(ascend_path),
@@ -157,9 +165,10 @@ class Main2MainFlow(Flow[Main2MainState]):
         # 4. AI 适配 + pre_ci 校验循环
         # error_logs 统一为日志文件路径列表，来源不区分（pre_ci 或 e2e CI）
         error_logs: list[str] = list(self.state.test_errors)
-        adapt_result = None
-
+        patch_path = step_dir / "upstream.patch"
+        changed_files_path = step_dir / "changed-files.txt"
         adapt_result: AdaptResult | None = None
+
         for attempt in range(1, 4):
             mode = "fix" if error_logs else "adapt"
             print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, mode={mode}")
@@ -224,7 +233,7 @@ class Main2MainFlow(Flow[Main2MainState]):
             print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             self.state.retry_count = 0
             self.state.current_step += 1
-            if self.state.current_step >= len(self.state.steps):
+            if self.state.current_step >= self.state.total_steps:
                 return UpgradeCompleted
             return StepCompleted
 
@@ -246,7 +255,7 @@ class Main2MainFlow(Flow[Main2MainState]):
         if test_passed:
             self.state.retry_count = 0
             self.state.current_step += 1
-            if self.state.current_step >= len(self.state.steps):
+            if self.state.current_step >= self.state.total_steps:
                 return UpgradeCompleted
             else:
                 return StepCompleted
