@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from crewai.flow import Flow, listen, start, router, or_, and_
+from crewai.flow import Flow, listen, start, router
 
 from main2main_flow.crews.adapter_crew.opencode_adapter import AdaptResult, run_opencode_adapter
 from main2main_flow.crews.summary_crew.summary_crew import SummaryCrew
@@ -20,7 +20,7 @@ from main2main_flow.scripts.push_to_github import push_and_create_pr
 from main2main_flow.scripts.run_tests import run_tests
 from main2main_flow.scripts.update_commit_reference import run_update
 from main2main_flow.utils import (
-    UpgradeCompleted, StepCompleted, UpgradeFailed, StepRetryNeeded,
+    UpgradeCompleted, StepCompleted, UpgradeFailed,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, run_git
@@ -48,6 +48,7 @@ class Main2MainState(BaseModel):
     test_errors: list = []
     retry_count: int = 0
 
+    final_status: str = ""
 
 class Main2MainFlow(Flow[Main2MainState]):
 
@@ -131,10 +132,18 @@ class Main2MainFlow(Flow[Main2MainState]):
     def process_steps(self):
         while self.state.current_step < self.state.total_steps:
             self._ai_analysis()
-            result = self._run_e2e_test()
-            if result == UpgradeCompleted or result == UpgradeFailed:
-                return result
-        return UpgradeCompleted
+            test_pass = self._run_e2e_test()
+            if test_pass:
+                self.state.current_step += 1
+                self.state.retry_count = 0
+                continue
+            else:
+                self.state.retry_count += 1
+                if self.state.retry_count >= 3:
+                    self.state.final_status = UpgradeFailed
+                    return
+                continue
+        self.state.final_status = UpgradeCompleted
 
     def _ai_analysis(self):
         if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
@@ -258,22 +267,10 @@ class Main2MainFlow(Flow[Main2MainState]):
         summary_log = str(WORKSPACE_DIR / STEPS_DIR / str(step_id) / "tests" / f"round-{round_n}-summary.json")
         print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
 
-        if test_passed:
-            self.state.retry_count = 0
-            self.state.current_step += 1
-            if self.state.current_step >= self.state.total_steps:
-                return UpgradeCompleted
-            else:
-                return StepCompleted
-        else:
-            self.state.retry_count += 1
+        if not test_passed:
             self.state.test_errors = [summary_log]
-            if self.state.retry_count >= 3:
-                self.state.retry_count = 0
-                self.state.test_errors = []
-                return UpgradeFailed
-            else:
-                return StepRetryNeeded
+
+        return test_passed
 
     @listen(process_steps)
     def generate_final_post(self):
@@ -289,7 +286,7 @@ class Main2MainFlow(Flow[Main2MainState]):
         )
         return result
 
-    @listen(and_(UpgradeCompleted, generate_final_post))
+    @listen(generate_final_post)
     def push_to_github(self):
         if os.getenv("PUSH_TO_GITHUB", "false").lower() != "true":
             print("[push] PUSH_TO_GITHUB is not true, skipping.")
