@@ -6,14 +6,20 @@ All JSON events are printed to console and logged to step_dir.
 from __future__ import annotations
 
 import json
+import queue
 import re
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 _PROMPT_PATH = Path(__file__).parent / "prompt.md"
+
+_TIMEOUT_MINUTES = 30
+_STALE_SECONDS = 300
 
 
 # ── prompt loader ─────────────────────────────────────────────────────────────
@@ -39,6 +45,7 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
     step_dir = inputs.get("step_dir", "")
     log_path = Path(step_dir) / "opencode.log" if step_dir else None
     raw_path = Path(step_dir) / "opencode_raw.jsonl" if step_dir else None
+    stderr_path = Path(step_dir) / "opencode_stderr.log" if step_dir else None
 
     print(f"\n{'═'*60}")
     print("TEAM LEAD PROMPT:")
@@ -54,6 +61,10 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
     if raw_path:
         raw_path.write_text("")
 
+    stderr_fh = None
+    if stderr_path:
+        stderr_fh = stderr_path.open("w", encoding="utf-8")
+
     proc = subprocess.Popen(
         [
             "opencode", "run",
@@ -62,17 +73,52 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
             prompt,
         ],
         stdout=subprocess.PIPE,
-        stderr=None,
+        stderr=stderr_fh or subprocess.PIPE,
         text=True,
         bufsize=1,
     )
 
+    lines_queue: queue.Queue[str | None] = queue.Queue()
+
+    def _stdout_reader():
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines_queue.put(line)
+        lines_queue.put(None)
+
+    reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
+    reader_thread.start()
+
     state = _EventState()
-    assert proc.stdout is not None
     log_fh = log_path.open("a", encoding="utf-8") if log_path else None
     raw_fh = raw_path.open("a", encoding="utf-8") if raw_path else None
+
+    deadline = time.monotonic() + _TIMEOUT_MINUTES * 60
+    last_output_time = time.monotonic()
+    killed = False
+
     try:
-        for line in proc.stdout:
+        while True:
+            try:
+                line = lines_queue.get(timeout=1.0)
+            except queue.Empty:
+                now = time.monotonic()
+                if now > deadline:
+                    print(f"\n[opencode] TOTAL TIMEOUT ({_TIMEOUT_MINUTES}min), killing process", flush=True)
+                    proc.kill()
+                    killed = True
+                    break
+                if now - last_output_time > _STALE_SECONDS:
+                    print(f"\n[opencode] STALE TIMEOUT ({_STALE_SECONDS}s no output), killing process", flush=True)
+                    proc.kill()
+                    killed = True
+                    break
+                continue
+
+            if line is None:
+                break
+
+            last_output_time = time.monotonic()
             state.lines.append(line)
             if raw_fh:
                 raw_fh.write(line)
@@ -84,7 +130,16 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
             log_fh.close()
         if raw_fh:
             raw_fh.close()
-    proc.wait()
+        if stderr_fh:
+            stderr_fh.close()
+
+    proc.wait(timeout=10)
+
+    if killed:
+        if stderr_path and stderr_path.exists():
+            stderr_content = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+            print(f"\n[opencode] stderr tail:\n{stderr_content}", flush=True)
+        return AdaptResult(step_summary="opencode process killed due to timeout")
 
     return _parse_result("".join(state.lines))
 

@@ -1,51 +1,38 @@
-You are the team lead. Your only job is task decomposition and coordination.
-You do NOT analyze, design, code, review, or run tests. All technical work
-is delegated to your 4 teammates. Complete the following task with your team.
+Adapt vllm-ascend to upstream vLLM changes for step {step_id}.
 
 ━━━ MISSION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Adapt vllm-ascend to upstream vLLM changes for step {step_id}.
+You are a single agent performing the full adapt/fix workflow end-to-end.
+Do NOT use TeamCreate or Agent tools — work directly without sub-agents.
 
 ── adapt mode (SKILL.md § 2.3) ─────────────────────────────────────────────────
 
   Trigger: {mode} is "adapt" (no CI errors yet, fresh upstream patch).
 
-  Analyze the upstream patch to identify which vllm-ascend files need changes,
-  then implement those changes with proper version guards.
-
-  Reference workflow — adapt-guide.md:
-    Step 1: Read changed-files.txt, cross-reference Key Areas table, read
-            upstream.patch, identify concrete changes, use File Mapping table
-            to find affected vllm-ascend files.
-    Step 2: Apply changes. Use vllm_version_is("{release_tag}") for version
-            boundaries. All branches of a guard must have identical signatures.
-
-  Deliverables:
-    - analysis.md      — what changed upstream and which vllm-ascend files need work
-    - adaptation_log.md — git diff of all changes made
-    - review.md         — review verdict (approved / issues found)
+  Workflow:
+    1. Read changed-files.txt, cross-reference Key Areas table in adapt-guide.md
+    2. Read upstream.patch to identify concrete changes
+    3. Use File Mapping table in adapt-guide.md to find affected vllm-ascend files
+    4. Implement changes with vllm_version_is("{release_tag}") guards
+    5. Self-review: verify all changes, check for missing version guards or
+       mismatched function signatures
+    6. Write analysis.md, adaptation_log.md (git diff), review.md
 
 ── fix mode (SKILL.md § 2.6) ───────────────────────────────────────────────────
 
   Trigger: {mode} is "fix" (CI ran and failed, error_logs is non-empty).
 
-  Diagnose CI failures, trace each error to the upstream change that caused it,
-  then apply fixes.
-
-  Reference workflow — diagnosis-guide.md:
-    Step 1: Read structured CI output from error_logs. Separate code_bugs
-            from env_flakes (env_flakes need no fix).
-    Step 2: For each code_bug, match error_type to mechanism (TypeError →
-            signature change, AttributeError → config field moved, ImportError
-            → module path changed, NotImplementedError → new abstract method).
-            Search the error in upstream.patch to find the root cause commit.
-            Map to fix pattern in error-pattern-examples.md.
-            Apply fix with vllm_version_is("{release_tag}") guard if needed.
-
-  Deliverables:
-    - analysis.md       — error diagnosis: each error → root cause → fix plan
-    - adaptation_log.md  — git diff of all fixes
-    - review.md          — review verdict (approved / issues found)
+  Workflow:
+    1. Read structured CI output from error_logs. Separate code_bugs from
+       env_flakes (env_flakes need no fix).
+    2. For each code_bug, match error_type to mechanism in diagnosis-guide.md
+       (TypeError → signature change, AttributeError → config field moved,
+       ImportError → module path changed, NotImplementedError → new abstract
+       method).
+    3. Search the error in upstream.patch to find the root cause commit.
+    4. Map to fix pattern in error-pattern-examples.md.
+    5. Apply fix with vllm_version_is("{release_tag}") guard if needed.
+    6. Self-review changes, write analysis.md, adaptation_log.md, review.md
 
 ━━━ REPOSITORIES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -65,25 +52,14 @@ Adapt vllm-ascend to upstream vLLM changes for step {step_id}.
 ━━━ REFERENCE FILES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   {reference_dir}/adapt-guide.md            — Key Areas table, File Mapping table,
-                                              version guard decision tree,
-                                              Steps 1-2 for adapt
+                                               version guard decision tree,
+                                               Steps 1-2 for adapt
   {reference_dir}/diagnosis-guide.md        — error type → root cause mapping,
-                                              Steps 1-2 for fix
+                                               Steps 1-2 for fix
   {reference_dir}/error-pattern-examples.md — concrete fix patterns per error type
-                                              (signature change, config change,
-                                              import change, platform interface,
-                                              custom op, return type change)
-
-━━━ TEAM (4 teammates) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  analyzer      — analyzes upstream patch or CI error logs, produces analysis.md
-  analyzer_qa   — reviews the analysis, cross-verifies all claims, notifies
-                  team lead when approved (analysis_qa.md)
-  developer     — implements code changes per approved analysis, produces
-                  git diff (adaptation_log.md)
-  reviewer      — reviews the diff, verifies correctness of every change (review.md)
-
-  Workflow: analyzer → analyzer_qa → team lead forwards → developer → reviewer
+                                               (signature change, config change,
+                                               import change, platform interface,
+                                               custom op, return type change)
 
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -92,24 +68,19 @@ Adapt vllm-ascend to upstream vLLM changes for step {step_id}.
   - Use vllm_version_is() for version boundaries — never hasattr/try-except/flags
   - All branches of a version guard must have identical function signatures
   - Script execution (patch generation, CI, pre_ci_check, commit) is external —
-    your team only does analysis + code changes + review
+    you only do analysis + code changes + review
   - Never read raw CI logs into context — use structured error_logs
 
 ━━━ OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Archive all teammate outputs to {step_dir}/:
+Archive all outputs to {step_dir}/:
 
   analysis.md       — analysis report (subsystems touched, concrete changes,
                       affected files, change/fix plan, version guard assessment)
-  analysis_qa.md    — QA review of the analysis (what was verified, issues found)
   adaptation_log.md — git diff of all changes made
   review.md         — code review verdict and issues found
 
-When the team finishes:
-  1. Send shutdown_request to each teammate via SendMessage
-  2. Wait for all teammates to confirm shutdown
-  3. Call TeamDelete to destroy the team session
-  4. Output:
+After completing all work, output:
 
 ```json
 {{
