@@ -3,10 +3,21 @@ from typing import Type
 
 from pydantic import BaseModel, Field
 
-from crewai import Agent, Crew, Process, Task
+import os
+
+from crewai import Agent, Crew, LLM, Process, Task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from crewai.project import CrewBase, agent, crew, task
 from crewai.tools import BaseTool
+
+
+def _summary_llm():
+    """Return LLM for SummaryCrew, defaulting to DeepSeek V4 Flash."""
+    return LLM(
+        model="openai/deepseek-v4-flash",
+        base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+        api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+    )
 
 
 class _ListFilesInput(BaseModel):
@@ -66,6 +77,7 @@ class SummaryCrew:
         return Agent(
             config=self.agents_config["summary_reporter"],  # type: ignore[index]
             tools=[ListFilesTool(), ReadFileTool()],
+            llm=_summary_llm(),
         )
 
     @task
