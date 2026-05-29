@@ -225,7 +225,8 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @router(ai_analysis)
     def run_e2e_test(self) -> Literal["StepCompleted", "UpgradeCompleted", "UpgradeFailed", "StepRetryNeeded"]:
-        step_id = self.state.current_step
+        step = self.state.steps[self.state.current_step]
+        step_id = step["id"]
         round_n = self.state.retry_count + 1
         print(f"run_e2e_test: step-{step_id} round={round_n}")
 
@@ -237,6 +238,7 @@ class Main2MainFlow(Flow[Main2MainState]):
                 return UpgradeCompleted
             return StepCompleted
 
+        print(f"The adaptation patch is at: {self.state.cur_patch_path}")
         result = run_tests(
             vllm_path=self.state.vllm_path,
             vllm_commit=self.state.cur_vllm_commit,
@@ -244,6 +246,9 @@ class Main2MainFlow(Flow[Main2MainState]):
             ascend_commit=self.state.cur_ascend_commit,
             patch_path=self.state.cur_patch_path or None,
             step_id=step_id,
+            total_cards=8,
+            suites=["e2e-singlecard-light", "e2e-2card-light", "e2e-4card-light"],
+            remote="env",
             round_number=round_n,
             log_dir=str(WORKSPACE_DIR / "steps"),
         )

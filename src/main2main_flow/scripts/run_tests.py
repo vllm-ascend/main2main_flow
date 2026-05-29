@@ -9,43 +9,14 @@ Given the total NPU cards available on the target machine, this script:
 
 Execution targets:
   - Local:       run directly (no --remote)
-  - Remote host: --remote user@host (container taken from env)
-  - Remote env:  --remote env (reads env vars below)
-
-  Remote execution always runs inside a Docker container on the target machine.
-  The container must already exist — it is NOT auto-created.
-  ascend_path is used directly as the remote workdir (typically backed by a
-  shared filesystem).
-
-Remote environment variables:
-  MAIN2MAIN_REMOTE_HOST       SSH target for remote execution, e.g. root@1.2.3.4
-  MAIN2MAIN_REMOTE_CONTAINER  container name for "docker exec"
+  - Remote host: --remote user@host (container from env)
+  - Remote env:  --remote env (reads MAIN2MAIN_REMOTE_HOST / _CONTAINER)
 
 Usage:
-  # Local execution (multi-card parallel)
-  python3 run_tests.py \\
-    --vllm-path /vllm-workspace/vllm \\
-    --vllm-commit abc1234 \\
-    --ascend-path /vllm-workspace/vllm-ascend \\
-    --ascend-commit def5678 \\
-    --patch /tmp/main2main/steps/step-0/fix.patch \\
-    --step-id 0 --total-cards 8 \\
-    --suite e2e-singlecard-light \\
-    --suite e2e-2card-light
-
-  # Remote execution with container
-  python3 run_tests.py \\
-    --vllm-path /vllm-workspace/vllm \\
-    --vllm-commit abc1234 \\
-    --ascend-path /vllm-workspace/vllm-ascend \\
-    --ascend-commit def5678 \\
-    --step-id 1 --total-cards 8 \\
-    --remote container-e2e \\
-    --suite e2e-singlecard-light \\
-    --suite e2e-2card-light
-
-  # Dry-run: print schedule only, no execution
-  python3 run_tests.py ... --dry-run
+  python3 run_tests.py --vllm-path /workspace/vllm --vllm-commit abc1234 \\
+      --ascend-path /workspace/vllm-ascend --ascend-commit def5678 \\
+      --step-id 0 --total-cards 8 --suite e2e-singlecard-light
+  python3 run_tests.py ... --remote env --dry-run
 """
 from __future__ import annotations
 
@@ -63,266 +34,28 @@ from pathlib import Path
 
 PASS_RESULTS = {"passed", "env_flake_pass"}
 DEFAULT_SUITES = ["e2e-singlecard-light"]
-
-# ---------------------------------------------------------------------------
-# Environment setup (was set_env.py)
-# ---------------------------------------------------------------------------
-
 DEFAULT_VLLM_REPO = "https://github.com/vllm-project/vllm.git"
 DEFAULT_ASCEND_REPO = "https://github.com/vllm-project/vllm-ascend.git"
 
+_SSH_OPTS = ["-o", "StrictHostKeyChecking=no"]
 
-def _git_run(cmd: list[str], cwd: Path, msg: str) -> None:
-    """Run a git command locally."""
-    print(f"  {msg} ... ", end="", flush=True)
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print("FAILED")
-        print(result.stderr.strip(), file=sys.stderr)
-        sys.exit(result.returncode)
-    print("OK")
-
-
-def _ensure_repo(path: Path, remote_url: str) -> bool:
-    """Clone the repo if the directory doesn't exist or is not a git repo.
-
-    Returns True if the repo was freshly cloned, False if it already existed.
-    """
-    if path.exists():
-        if not (path / ".git").exists():
-            print(f"  {path} exists but is not a git repo, removing ... ", end="", flush=True)
-            shutil.rmtree(path)
-            print("OK")
-        else:
-            print(f"  {path} already exists, fetching ... ", end="", flush=True)
-            _git_run(["git", "fetch", "--tags"], path, "fetch")
-            return False
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  Cloning {remote_url} -> {path} ... ", end="", flush=True)
-    _git_run(["git", "clone", remote_url, str(path)], path, "clone")
-    return True
-
-
-def _checkout(path: Path, commit: str) -> None:
-    """Checkout a specific commit (detached HEAD)."""
-    _git_run(["git", "checkout", commit], path, f"checkout {commit[:8]}")
-
-
-def _apply_patch(path: Path, patch_path: Path) -> None:
-    """Apply a patch file. Supports .patch (git am) and .diff (git apply)."""
-    if not patch_path.exists():
-        print(f"Error: patch not found: {patch_path}", file=sys.stderr)
-        sys.exit(1)
-
-    suffix = patch_path.suffix
-    if suffix == ".patch":
-        _git_run(["git", "am", str(patch_path)], path, f"git am {patch_path.name}")
-    else:
-        _git_run(["git", "apply", str(patch_path)], path, f"git apply {patch_path.name}")
-
-
-def _build_exec_cmd(
-    inner_cmd: str,
-    remote_host: str,
-    remote_container: str,
-) -> list[str]:
-    """Wrap *inner_cmd* for execution inside the remote container."""
-    return ["ssh", "-o", "StrictHostKeyChecking=no", remote_host,
-            f"docker exec {remote_container} sh -c {shlex.quote(inner_cmd)}"]
-
-
-def _pip_install(
-    repo_path: Path,
-    extra_env: dict[str, str] | None = None,
-    requirements: str | None = None,
-    verbose: bool = False,
-    skip_editable: bool = False,
-) -> None:
-    """Run pip install in *repo_path* locally."""
-    merged_env = dict(_PIP_INSTALL_BASE_ENV)
-    if extra_env:
-        merged_env.update(extra_env)
-    env_prefix = " ".join(f"{k}={v}" for k, v in merged_env.items()) + " "
-
-    verbose_flag = "-v " if verbose else ""
-
-    cmds = []
-    if requirements:
-        cmds.append(f"pip install -r {shlex.quote(requirements)}")
-    if not skip_editable:
-        cmds.append(f"{env_prefix}pip install {verbose_flag}-e .")
-
-    for i, cmd in enumerate(cmds):
-        full_cmd = f"cd {shlex.quote(str(repo_path))} && {cmd}"
-        label = f"pip install ({repo_path.name}) [{i+1}/{len(cmds)}]"
-        print(f"  {label} ... ", end="", flush=True)
-        result = subprocess.run(["sh", "-c", full_cmd], capture_output=True, text=True)
-        if result.returncode != 0:
-            print("FAILED")
-            print(result.stderr.strip(), file=sys.stderr)
-            sys.exit(result.returncode)
-        print("OK")
-
-
-_PIP_INSTALL_BASE_ENV = {
-    "PIP_EXTRA_INDEX_URL": "https://mirrors.huaweicloud.com/ascend/repos/pypi",
-}
-
-
-def setup_env(
-    vllm_path: Path,
-    vllm_commit: str,
-    ascend_path: Path,
-    ascend_commit: str,
-    patch_path: Path | None = None,
-    vllm_remote: str = DEFAULT_VLLM_REPO,
-    ascend_remote: str = DEFAULT_ASCEND_REPO,
-) -> None:
-    """Prepare the environment locally: clone, checkout, install, apply patch, install."""
-    _setup_mirrors()
-
-    print("=== Setup vLLM ===")
-    _ensure_repo(vllm_path, vllm_remote)
-    _checkout(vllm_path, vllm_commit)
-    print("=== Install vLLM ===")
-    _pip_install(vllm_path, extra_env={"VLLM_TARGET_DEVICE": "empty"})
-
-    print("=== Setup vllm-ascend ===")
-    ascend_fresh = _ensure_repo(ascend_path, ascend_remote)
-    _checkout(ascend_path, ascend_commit)
-
-    if patch_path:
-        print("=== Apply patch ===")
-        _apply_patch(ascend_path, patch_path)
-
-    print("=== Install vllm-ascend ===")
-    _pip_install(ascend_path, requirements="requirements-dev.txt", verbose=True,
-                 skip_editable=not ascend_fresh)
-
-    print("\nSetup complete.")
-    print(f"  vLLM:        {vllm_path} @ {vllm_commit[:8]}")
-    print(f"  vllm-ascend: {ascend_path} @ {ascend_commit[:8]}"
-          + (f" + {patch_path.name}" if patch_path else ""))
-
-
-def _setup_mirrors() -> None:
-    """Configure git proxy and pip mirrors locally."""
-    cmds = [
-        "git config --global url.https://ghfast.top/https://github.com/.insteadOf https://github.com/",
-        "pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple",
-    ]
-    for cmd in cmds:
-        subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
-
-
-# ---- Shell helpers for remote execution ----
-
-def _sh_ensure_repo(path_q: str, remote_q: str, name: str) -> str:
-    """Generate shell snippet: clone or fetch repo *name*, return 'fresh' or 'cached'."""
-    return f'''
-# --- {name}: ensure repo ---
-if [ -d {path_q} ] && [ -d {path_q}/.git ]; then
-    echo "  {path_q} already exists, fetching ..."
-    cd {path_q} && git fetch --tags || exit 1
-    _{name}_fresh=0
-elif [ -d {path_q} ]; then
-    echo "  {path_q} exists but is not a git repo, removing ..."
-    rm -rf {path_q}
-    echo "  Cloning {remote_q} -> {path_q} ..."
-    mkdir -p $(dirname {path_q}) && git clone {remote_q} {path_q} || exit 1
-    _{name}_fresh=1
-else
-    echo "  Cloning {remote_q} -> {path_q} ..."
-    mkdir -p $(dirname {path_q}) && git clone {remote_q} {path_q} || exit 1
-    _{name}_fresh=1
-fi
-'''
-
-
-def _build_setup_script(
-    vllm_path: Path,
-    vllm_commit: str,
-    ascend_path: Path,
-    ascend_commit: str,
-    patch_path: Path | None = None,
-    vllm_remote: str = DEFAULT_VLLM_REPO,
-    ascend_remote: str = DEFAULT_ASCEND_REPO,
-) -> str:
-    """Build a shell script that performs the full setup on a remote target."""
-    vp = shlex.quote(str(vllm_path))
-    ap = shlex.quote(str(ascend_path))
-    vr = shlex.quote(vllm_remote)
-    ar = shlex.quote(ascend_remote)
-    vc = shlex.quote(vllm_commit[:8])
-    ac = shlex.quote(ascend_commit[:8])
-
-    pip_extra = shlex.quote(_PIP_INSTALL_BASE_ENV["PIP_EXTRA_INDEX_URL"])
-
-    patch_block = ""
-    if patch_path:
-        pp = shlex.quote(str(patch_path))
-        patch_block = f'''
-# --- ascend: apply patch ---
-echo "  Applying patch {patch_path.name} ..."
-cd {ap} && git am {pp} || exit 1
-'''
-
-    return f'''#!/bin/sh
-set -e
-echo "=== Setup mirrors ==="
-git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
-pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-
-echo "=== Setup vLLM ==="
-{_sh_ensure_repo(vp, vr, "vllm")}
-echo "  checkout {vllm_commit[:8]} ..."
-cd {vp} && git checkout {vc} || exit 1
-
-echo "=== Install vLLM ==="
-cd {vp} && VLLM_TARGET_DEVICE=empty PIP_EXTRA_INDEX_URL={pip_extra} pip install -e . || exit 1
-
-echo "=== Setup vllm-ascend ==="
-{_sh_ensure_repo(ap, ar, "ascend")}
-echo "  checkout {ascend_commit[:8]} ..."
-cd {ap} && git checkout {ac} || exit 1
-{patch_block}
-echo "=== Install vllm-ascend ==="
-cd {ap} && PIP_EXTRA_INDEX_URL={pip_extra} pip install -r requirements-dev.txt || exit 1
-if [ $_ascend_fresh -eq 1 ]; then
-    echo "  (fresh clone, running editable install)"
-    cd {ap} && PIP_EXTRA_INDEX_URL={pip_extra} pip install -v -e . || exit 1
-else
-    echo "  (existing repo, skipping editable install)"
-fi
-
-echo ""
-echo "Setup complete."
-echo "  vLLM:        {vllm_path} @ {vllm_commit[:8]}"
-echo "  vllm-ascend: {ascend_path} @ {ascend_commit[:8]}''' + (
-    f' + {patch_path.name}' if patch_path else ''
-) + '"\n'
-
-# ---------------------------------------------------------------------------
-# Suite -> card requirement
-# ---------------------------------------------------------------------------
+# ---- suite -> cards ----
 
 _SUITE_CARDS: dict[str, int] = {
-    "e2e-singlecard-light": 1,
-    "e2e-2card-light": 2,
-    "e2e-4card-light": 4,
-    "e2e-singlecard": 1,
-    "e2e-multicard-2-cards": 2,
-    "e2e-multicard-4-cards": 4,
-    "e2e-upstream_singlecard": 1,
+    "e2e-singlecard-light": 1, "e2e-2card-light": 2, "e2e-4card-light": 4,
+    "e2e-singlecard": 1, "e2e-multicard-2-cards": 2,
+    "e2e-multicard-4-cards": 4, "e2e-upstream_singlecard": 1,
 }
-
 _SUITE_CARDS_FALLBACK: list[tuple[str, int]] = [
     (r"singlecard|single.card|1card|1.cards?|1-card", 1),
     (r"2card|2.cards?|2-card|two.card", 2),
     (r"4card|4.cards?|4-card|four.card", 4),
     (r"8card|8.cards?|8-card|eight.card", 8),
 ]
+_MOCK_DURATIONS: dict[str, int] = {
+    "e2e-singlecard-light": 1111, "e2e-2card-light": 477, "e2e-4card-light": 365,
+    "e2e-singlecard": 3200, "e2e-multicard-2-cards": 2400, "e2e-multicard-4-cards": 3000,
+}
 
 
 def _suite_cards(suite_name: str) -> int:
@@ -335,72 +68,30 @@ def _suite_cards(suite_name: str) -> int:
     return 1
 
 
-# ---------------------------------------------------------------------------
-# Remote config
-# ---------------------------------------------------------------------------
-
-def _resolve_remote(remote: str) -> tuple[str, str]:
-    """Resolve --remote to (host, container).
-
-    If *remote* contains '@', treat as literal SSH target, container is still
-    taken from environment variable.
-    Otherwise read from environment variables:
-      MAIN2MAIN_REMOTE_HOST      (required)
-      MAIN2MAIN_REMOTE_CONTAINER (required)
-    """
-    host = remote if "@" in remote else os.getenv("MAIN2MAIN_REMOTE_HOST", "")
-    if not host:
-        print("Error: --remote used but MAIN2MAIN_REMOTE_HOST is not set",
-              file=sys.stderr)
-        sys.exit(1)
-
-    container = os.getenv("MAIN2MAIN_REMOTE_CONTAINER", "")
-    if not container:
-        print("Error: --remote used but MAIN2MAIN_REMOTE_CONTAINER is not set",
-              file=sys.stderr)
-        sys.exit(1)
-
-    print(f"  Remote target: {host}  container: {container}")
-    return host, container
-
-
-# ---------------------------------------------------------------------------
-# Scheduler: greedy first-fit decreasing bin-packing
-# ---------------------------------------------------------------------------
+# =============================================================================
+# scheduling
+# =============================================================================
 
 def _schedule_rounds(suite_names: list[str], total_cards: int) -> list[list[str]]:
     ordered = sorted(suite_names, key=lambda s: (-_suite_cards(s), s))
     rounds: list[list[str]] = []
     usage: list[int] = []
-
     for name in ordered:
         need = _suite_cards(name)
         if need > total_cards:
-            raise ValueError(
-                f"Suite '{name}' requires {need} cards but only {total_cards} available"
-            )
-        placed = False
+            raise ValueError(f"Suite '{name}' requires {need} cards but only {total_cards} available")
         for i in range(len(rounds)):
             if usage[i] + need <= total_cards:
                 rounds[i].append(name)
                 usage[i] += need
-                placed = True
                 break
-        if not placed:
+        else:
             rounds.append([name])
             usage.append(need)
-
     return rounds
 
 
 def _assign_devices(rounds: list[list[str]]) -> list[list[tuple[str, str]]]:
-    """Assign non-overlapping device IDs to suites within each round.
-
-    Within a round, suites get disjoint device ranges so they don't contend.
-    Across rounds, devices reset — previous round's processes have finished.
-    Returns the same structure with each suite name paired with its device list
-    string, e.g. "0,1,2,3" for ASCEND_RT_VISIBLE_DEVICES.
-    """
     result: list[list[tuple[str, str]]] = []
     for rnd in rounds:
         assigned: list[tuple[str, str]] = []
@@ -414,67 +105,262 @@ def _assign_devices(rounds: list[list[str]]) -> list[list[tuple[str, str]]]:
     return result
 
 
+# =============================================================================
+# remote helpers
+# =============================================================================
 
-# ---------------------------------------------------------------------------
-# Unchanged from original run_main2main_ci.py
-# ---------------------------------------------------------------------------
-
-def _run_to_log(command: list[str], cwd: Path, log_path: Path, env: dict[str, str]) -> int:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as log_file:
-        process = subprocess.Popen(
-            command, cwd=cwd, env=env,
-            stdout=log_file, stderr=subprocess.STDOUT,
-        )
-        return process.wait()
+def _resolve_remote(remote: str) -> tuple[str, str]:
+    host = remote if "@" in remote else os.getenv("MAIN2MAIN_REMOTE_HOST", "")
+    container = os.getenv("MAIN2MAIN_REMOTE_CONTAINER", "")
+    if not host or not container:
+        print("Error: --remote used but MAIN2MAIN_REMOTE_HOST / _CONTAINER not set", file=sys.stderr)
+        sys.exit(1)
+    print(f"  Remote target: {host}  container: {container}")
+    return host, container
 
 
-def _run_summary(
-    ci_log_summary: Path,
-    log_path: Path,
-    summary_path: Path,
-    step_id: int,
-    round_number: int,
-) -> dict:
-    if not ci_log_summary.exists():
-        return {
-            "summary_exit_code": 1,
-            "summary_error": f"ci_log_summary.py not found: {ci_log_summary}",
-            "summary": None,
-        }
-    command = [
-        sys.executable, str(ci_log_summary),
-        "--log-file", str(log_path),
-        "--format", "llm-json",
-        "--output", str(summary_path),
-        "--step-name", f"main2main {step_id} round {round_number}",
-    ]
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
+def _ssh(host: str, cmd: str, **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run(["ssh", *_SSH_OPTS, host, cmd], **kwargs)
+
+
+def _ensure_container_running(host: str, container: str) -> None:
+    cq = shlex.quote(container)
+    check = _ssh(host, f"docker inspect -f '{{{{.State.Running}}}}' {cq}",
+                 capture_output=True, text=True)
+    if check.returncode != 0:
+        print(f"  Container {container} not found on {host}, will try to proceed anyway")
+        return
+    if check.stdout.strip() == "true":
+        print(f"  Container {container} is already running")
+        return
+
+    print(f"  Container {container} is stopped, starting ...", flush=True)
+    _ssh(host, f"docker start {cq}", capture_output=True, text=True)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        time.sleep(3)
+        poll = _ssh(host, f"docker inspect -f '{{{{.State.Running}}}}' {cq}",
+                    capture_output=True, text=True)
+        if poll.stdout.strip() == "true":
+            print(f"  Container {container} is now running", flush=True)
+            return
+    print(f"  [warn] Container {container} did not become running within 60s", flush=True)
+
+
+def _sync_remote_dir(host: str, remote_dir: str, local_dir: Path) -> bool:
+    check = _ssh(host, f"test -d {shlex.quote(remote_dir)} && ls -A {shlex.quote(remote_dir)} 2>/dev/null | head -1",
+                 capture_output=True, text=True)
+    if check.returncode != 0 or not check.stdout.strip():
+        return False
+    local_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.which("rsync"):
+        cmd = ["rsync", "-az", "-e", f"ssh {' '.join(_SSH_OPTS)}",
+               f"{host}:{remote_dir}/", str(local_dir) + "/"]
+    else:
+        cmd = ["scp", "-r", *_SSH_OPTS, f"{host}:{remote_dir}/.", str(local_dir) + "/"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        return {
-            "summary_exit_code": result.returncode,
-            "summary_error": result.stderr.strip() or result.stdout.strip(),
-            "summary": None,
-        }
+        print(f"  [ERROR] Failed to sync: {result.stderr.strip()}", flush=True)
+        return False
+    return True
+
+
+# =============================================================================
+# local env setup
+# =============================================================================
+
+def _run_checked(cmd: list[str], cwd: Path, label: str) -> None:
+    print(f"  {label} ... ", end="", flush=True)
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print("FAILED")
+        print(r.stderr.strip(), file=sys.stderr)
+        sys.exit(r.returncode)
+    print("OK")
+
+
+def _ensure_repo(path: Path, remote_url: str) -> bool:
+    if path.exists():
+        if not (path / ".git").exists():
+            print(f"  {path} exists but is not a git repo, removing ... ", end="", flush=True)
+            shutil.rmtree(path)
+            print("OK")
+        else:
+            _run_checked(["git", "fetch", "--tags"], path, "fetch")
+            return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _run_checked(["git", "clone", remote_url, str(path)], path, "clone")
+    return True
+
+
+_MIRROR_CMDS: list[str] = [
+    "pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple",
+]
+
+
+def _setup_mirrors() -> None:
+    for cmd in _MIRROR_CMDS:
+        subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
+
+
+def _pip_install(repo_path: Path, extra_env: dict | None = None,
+                 requirements: str | None = None, verbose: bool = False,
+                 skip_editable: bool = False) -> None:
+    env = {"PIP_EXTRA_INDEX_URL": "https://mirrors.huaweicloud.com/ascend/repos/pypi"}
+    if extra_env:
+        env.update(extra_env)
+    env_prefix = " ".join(f"{k}={v}" for k, v in env.items()) + " "
+    vflag = "-v " if verbose else ""
+    cmds = []
+    if requirements:
+        cmds.append(f"pip install -r {shlex.quote(requirements)}")
+    if not skip_editable:
+        cmds.append(f"{env_prefix}pip install {vflag}-e .")
+    for i, cmd in enumerate(cmds):
+        _run_checked(["sh", "-c", f"cd {shlex.quote(str(repo_path))} && {cmd}"],
+                     repo_path, f"pip install ({repo_path.name}) [{i+1}/{len(cmds)}]")
+
+
+def setup_env(vllm_path: Path, vllm_commit: str, ascend_path: Path,
+              ascend_commit: str, patch_path: Path | None = None,
+              vllm_remote: str = DEFAULT_VLLM_REPO,
+              ascend_remote: str = DEFAULT_ASCEND_REPO) -> None:
+    _setup_mirrors()
+    print("=== Setup vLLM ===")
+    _ensure_repo(vllm_path, vllm_remote)
+    _run_checked(["git", "checkout", vllm_commit], vllm_path, f"checkout {vllm_commit[:8]}")
+    print("=== Install vLLM ===")
+    _pip_install(vllm_path, extra_env={"VLLM_TARGET_DEVICE": "empty"})
+
+    print("=== Setup vllm-ascend ===")
+    _ensure_repo(ascend_path, ascend_remote)
+    _run_checked(["git", "fetch", "origin"], ascend_path, "fetch origin")
+    _run_checked(["git", "reset", "--hard", "origin/main"], ascend_path, "reset to origin/main")
+    _run_checked(["git", "checkout", ascend_commit], ascend_path, f"checkout {ascend_commit[:8]}")
+    if patch_path:
+        if not patch_path.exists():
+            print(f"Error: patch not found: {patch_path}", file=sys.stderr)
+            sys.exit(1)
+        _run_checked(["git", "apply", str(patch_path)], ascend_path, f"git apply {patch_path.name}")
+    print("=== Install vllm-ascend ===")
+    _pip_install(ascend_path, requirements="requirements-dev.txt", verbose=True, skip_editable=True)
+    print(f"\nSetup complete.\n  vLLM: {vllm_path} @ {vllm_commit[:8]}\n"
+          f"  vllm-ascend: {ascend_path} @ {ascend_commit[:8]}"
+          + (f" + {patch_path.name}" if patch_path else ""))
+
+
+# =============================================================================
+# remote setup script (shell, executed via docker exec)
+# =============================================================================
+
+_SHELL_ENSURE_REPO = r'''
+# --- {name}: ensure repo ---
+if [ -d {path} ] && [ -d {path}/.git ]; then
+    echo "  {path} already exists, fetching ..."
+    cd {path} && git fetch --tags || exit 1
+elif [ -d {path} ]; then
+    echo "  {path} exists but is not a git repo, removing ..."
+    rm -rf {path}
+    echo "  Cloning {remote} -> {path} ..."
+    mkdir -p $(dirname {path}) && git clone {remote} {path} || exit 1
+else
+    echo "  Cloning {remote} -> {path} ..."
+    mkdir -p $(dirname {path}) && git clone {remote} {path} || exit 1
+fi
+'''
+
+_SHELL_SETUP = r'''#!/bin/sh
+set -e
+echo "=== Setup mirrors ==="
+{mirror_cmds}
+
+echo "=== Setup vLLM ==="
+{ensure_vllm}
+echo "  checkout {vllm_commit_short} ..."
+cd {vp} && git checkout {vc} || exit 1
+
+echo "=== Install vLLM ==="
+cd {vp} && VLLM_TARGET_DEVICE=empty pip install -e . || exit 1
+
+echo "=== Setup vllm-ascend ==="
+{ensure_ascend}
+echo "  fetch origin && reset to origin/main ..."
+cd {ap} && git fetch origin && git reset --hard origin/main || exit 1
+echo "  checkout {ascend_commit_short} ..."
+cd {ap} && git checkout {ac} || exit 1
+{patch_block}
+echo "=== Install vllm-ascend ==="
+cd {ap} && pip install --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi -r requirements-dev.txt || exit 1
+
+echo ""
+echo "Setup complete."
+echo "  vLLM:        {vllm_path} @ {vllm_commit_short}"
+echo "  vllm-ascend: {ascend_path} @ {ascend_commit_short}{patch_suffix}"
+'''
+
+
+def _build_setup_script(vllm_path: Path, vllm_commit: str, ascend_path: Path,
+                        ascend_commit: str, patch_path: Path | None = None,
+                        vllm_remote: str = DEFAULT_VLLM_REPO,
+                        ascend_remote: str = DEFAULT_ASCEND_REPO) -> str:
+    patch_block = ""
+    patch_suffix = ""
+    if patch_path:
+        pp = shlex.quote(str(patch_path))
+        patch_block = f'echo "  Applying patch {patch_path.name} ..."\ncd {shlex.quote(str(ascend_path))} && git apply {pp} || exit 1'
+        patch_suffix = f" + {patch_path.name}"
+
+    return _SHELL_SETUP.format(
+        vp=shlex.quote(str(vllm_path)),
+        ap=shlex.quote(str(ascend_path)),
+        vc=shlex.quote(vllm_commit[:8]),
+        ac=shlex.quote(ascend_commit[:8]),
+        vllm_path=str(vllm_path), ascend_path=str(ascend_path),
+        vllm_commit_short=vllm_commit[:8], ascend_commit_short=ascend_commit[:8],
+        mirror_cmds="\n".join(_MIRROR_CMDS),
+        ensure_vllm=_SHELL_ENSURE_REPO.format(name="vllm", path=shlex.quote(str(vllm_path)),
+                                               remote=shlex.quote(vllm_remote)),
+        ensure_ascend=_SHELL_ENSURE_REPO.format(name="ascend", path=shlex.quote(str(ascend_path)),
+                                                 remote=shlex.quote(ascend_remote)),
+        patch_block=patch_block, patch_suffix=patch_suffix,
+    )
+
+
+# =============================================================================
+# test execution helpers
+# =============================================================================
+
+def _run_to_log(command: list[str], cwd: Path, log_path: Path,
+                env: dict[str, str]) -> int:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as f:
+        return subprocess.Popen(command, cwd=cwd, env=env, stdout=f,
+                                stderr=subprocess.STDOUT).wait()
+
+
+def _run_summary(ci_log_summary: Path, log_path: Path, summary_path: Path,
+                 step_id: int, round_number: int) -> dict:
+    if not ci_log_summary.exists():
+        return {"summary_exit_code": 1,
+                "summary_error": f"ci_log_summary.py not found: {ci_log_summary}",
+                "summary": None}
+    r = subprocess.run([sys.executable, str(ci_log_summary), "--log-file", str(log_path),
+                        "--format", "llm-json", "--output", str(summary_path),
+                        "--step-name", f"main2main {step_id} round {round_number}"],
+                       text=True, capture_output=True, check=False)
+    if r.returncode != 0:
+        return {"summary_exit_code": r.returncode,
+                "summary_error": r.stderr.strip() or r.stdout.strip(), "summary": None}
     if not summary_path.exists() or summary_path.stat().st_size == 0:
-        return {
-            "summary_exit_code": result.returncode,
-            "summary_error": f"summary output was not written: {summary_path}",
-            "summary": None,
-        }
+        return {"summary_exit_code": r.returncode,
+                "summary_error": f"summary output was not written: {summary_path}",
+                "summary": None}
     try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        return {"summary_exit_code": r.returncode, "summary_error": None,
+                "summary": json.loads(summary_path.read_text(encoding="utf-8"))}
     except json.JSONDecodeError as exc:
-        return {
-            "summary_exit_code": result.returncode,
-            "summary_error": f"invalid summary JSON: {exc}",
-            "summary": None,
-        }
-    return {
-        "summary_exit_code": result.returncode,
-        "summary_error": None,
-        "summary": summary,
-    }
+        return {"summary_exit_code": r.returncode,
+                "summary_error": f"invalid summary JSON: {exc}", "summary": None}
 
 
 def _count(summary: dict | None, field: str) -> int:
@@ -487,32 +373,76 @@ def _count(summary: dict | None, field: str) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
-def _classify_result(run_suite_exit_code: int, summary: dict | None, summary_error: str | None) -> str:
-    if run_suite_exit_code == 0:
+def _classify(exit_code: int, summary: dict | None, error: str | None) -> str:
+    if exit_code == 0:
         return "passed"
-    if summary_error or summary is None:
+    if error or summary is None:
         return "summary_error"
-    code_bugs_count = len(summary.get("code_bugs", []))
-    env_flakes_count = len(summary.get("env_flakes", []))
-    if code_bugs_count == 0 and env_flakes_count > 0:
+    if len(summary.get("code_bugs", [])) == 0 and len(summary.get("env_flakes", [])) > 0:
         return "env_flake_pass"
     return "failed"
 
 
-# ---------------------------------------------------------------------------
-# Programmatic entry point (called by main.py)
-# ---------------------------------------------------------------------------
+def _build_suite_cmd(suite_name: str, devices: str, *,
+                     mock: bool, mock_scale: float = 0.1,
+                     remote_host: str | None,
+                     remote_container: str | None,
+                     remote_ascend: Path, local_run_suite: Path,
+                     s_env: dict[str, str]) -> list[str]:
+    """Build the command list to run a single test suite."""
+    if mock:
+        duration = int(_MOCK_DURATIONS.get(suite_name, 60) * mock_scale)
+        if remote_host:
+            return ["ssh", *_SSH_OPTS, remote_host,
+                    f"docker exec {remote_container} sleep {duration}"]
+        return ["sleep", str(duration)]
+    if remote_host:
+        env_vars = [f"ASCEND_RT_VISIBLE_DEVICES={devices}"]
+        for k in sorted(s_env):
+            if k.startswith("VLLM_"):
+                env_vars.append(f"{k}={shlex.quote(s_env[k])}")
+        inner = (f"docker exec -w {shlex.quote(str(remote_ascend))} {remote_container} "
+                 f"env {' '.join(env_vars)} "
+                 f"python3 {shlex.quote(str(remote_ascend / '.github' / 'workflows' / 'scripts' / 'run_suite.py'))} "
+                 f"--suite {shlex.quote(suite_name)} --continue-on-error")
+        return ["ssh", *_SSH_OPTS, remote_host, inner]
+    return [sys.executable, str(local_run_suite), "--suite", suite_name, "--continue-on-error"]
 
-# Estimated durations per suite (sum of test estimated_time from config.yaml)
-_MOCK_DURATIONS: dict[str, int] = {
-    "e2e-singlecard-light": 1111,
-    "e2e-2card-light": 477,
-    "e2e-4card-light": 365,
-    "e2e-singlecard": 3200,
-    "e2e-multicard-2-cards": 2400,
-    "e2e-multicard-4-cards": 3000,
-}
 
+def _run_one_suite(cmd: list[str], log_path: Path, summary_path: Path,
+                   suite_name: str, devices: str, ci_log_summary: Path,
+                   step_id: int, round_number: int, env: dict[str, str],
+                   *, is_remote: bool, is_mock: bool) -> dict:
+    """Execute one suite and return its result dict."""
+    if not is_remote:
+        env["ASCEND_RT_VISIBLE_DEVICES"] = devices
+    cwd = Path("/tmp") if is_remote else Path.cwd()
+    exit_code = _run_to_log(cmd, cwd, log_path, env)
+
+    if is_mock:
+        return {"suite": suite_name, "cards_required": _suite_cards(suite_name),
+                "run_suite_exit_code": exit_code,
+                "ci_result": "passed" if exit_code == 0 else "failed",
+                "summary_error": None, "code_bugs_count": 0, "env_flakes_count": 0,
+                "failed_test_files_count": 0, "failed_test_cases_count": 0,
+                "log_path": str(log_path), "summary_path": str(summary_path)}
+
+    sr = _run_summary(ci_log_summary, log_path, summary_path, step_id, round_number)
+    s, se = sr["summary"], sr["summary_error"]
+    return {"suite": suite_name, "cards_required": _suite_cards(suite_name),
+            "run_suite_exit_code": exit_code,
+            "ci_result": _classify(exit_code, s, se),
+            "summary_error": se,
+            "code_bugs_count": len((s or {}).get("code_bugs", [])),
+            "env_flakes_count": len((s or {}).get("env_flakes", [])),
+            "failed_test_files_count": _count(s, "failed_test_files"),
+            "failed_test_cases_count": _count(s, "failed_test_cases"),
+            "log_path": str(log_path), "summary_path": str(summary_path)}
+
+
+# =============================================================================
+# main entry point
+# =============================================================================
 
 def run_tests(
     vllm_path: str | Path,
@@ -526,254 +456,144 @@ def run_tests(
     remote: str | None = None,
     log_dir: str | Path = "",
     remote_log_dir: str | Path | None = None,
+    remote_vllm_path: str | Path = "/vllm-workspace/vllm",
+    remote_ascend_path: str | Path = "/vllm-workspace/vllm-ascend",
     round_number: int = 1,
     dry_run: bool = False,
     sequential: bool = False,
     mock: bool = False,
     mock_scale: float = 0.1,
 ) -> dict:
-    """Run end-to-end tests for a main2main step.
-
-    1. Resolves remote target and ensures container is running
-    2. Clones/checkouts repos, applies patch, pip-installs on target
-    3. Schedules and executes CI suites
-    4. Writes result JSON to <log_dir>/<id>/tests/round-<round>-result.json
-    5. Returns the result dict (includes ``can_commit`` bool and ``ci_result`` str)
-
-    Returns:
-        dict with keys: step_id, round, suite, suites, ci_result, passed,
-        can_commit, requires_fix, code_bugs_count, env_flakes_count,
-        failed_test_files_count, failed_test_cases_count, suite_results, ...
-    """
+    """Run end-to-end tests for a main2main step.  Returns a dict with
+    can_commit, ci_result, suite_results, etc."""
     vllm_path = Path(vllm_path)
     ascend_path = Path(ascend_path)
     if patch_path:
         patch_path = Path(patch_path)
     log_dir = Path(log_dir)
-    if remote_log_dir is None:
-        remote_log_dir = log_dir
-    else:
-        remote_log_dir = Path(remote_log_dir)
+    remote_log_dir = Path(remote_log_dir) if remote_log_dir else log_dir
+    remote_vllm = Path(remote_vllm_path)
+    remote_ascend = Path(remote_ascend_path)
 
-    # ---- Step 1: Resolve remote ----
+    # ---- step 1: resolve remote ----
     remote_host: str | None = None
     remote_container: str | None = None
-
     if remote:
         remote_host, remote_container = _resolve_remote(remote)
+        _ensure_container_running(remote_host, remote_container)
 
-    # ---- Step 2: Setup environment (git + pip install) ----
+    # ---- step 1.5: sync patch ----
+    if patch_path and remote_host:
+        local = patch_path.resolve()
+        if not local.exists():
+            local = Path.cwd() / str(patch_path).lstrip("/")
+        if local.exists():
+            print(f"=== Syncing patch: {local} -> {remote_container}:{patch_path} ===")
+            _ssh(remote_host, f"docker exec {remote_container} mkdir -p {shlex.quote(str(patch_path.parent))}",
+                 capture_output=True, text=True, check=True)
+            with open(local, "rb") as f:
+                _ssh(remote_host, f"docker exec -i {remote_container} sh -c 'cat > {shlex.quote(str(patch_path))}'",
+                     stdin=f, capture_output=True, text=False, check=True)
+            print("  Patch synced to container successfully")
+
+    # ---- step 2: setup repos ----
     if remote_host:
         print("=== Running setup on remote container ===")
-        script = _build_setup_script(
-            vllm_path=vllm_path,
-            vllm_commit=vllm_commit,
-            ascend_path=ascend_path,
-            ascend_commit=ascend_commit,
-            patch_path=patch_path,
-        )
-        exec_cmd = _build_exec_cmd(script, remote_host, remote_container)
-        result = subprocess.run(exec_cmd, capture_output=True, text=True)
-        print(result.stdout)
-        if result.returncode != 0:
-            print("Remote setup FAILED")
-            print(result.stderr.strip(), file=sys.stderr)
-            sys.exit(result.returncode)
+        script = _build_setup_script(remote_vllm, vllm_commit, remote_ascend, ascend_commit, patch_path)
+        inner = f"docker exec {remote_container} sh -c {shlex.quote(script)}"
+        proc = subprocess.Popen(["ssh", *_SSH_OPTS, remote_host, inner],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+        if proc.wait() != 0:
+            raise RuntimeError(f"Remote setup failed with exit code {proc.returncode}")
     else:
-        setup_env(
-            vllm_path=vllm_path,
-            vllm_commit=vllm_commit,
-            ascend_path=ascend_path,
-            ascend_commit=ascend_commit,
-            patch_path=patch_path,
-        )
+        setup_env(vllm_path, vllm_commit, ascend_path, ascend_commit, patch_path)
 
-    # ---- Step 3: Verify run_suite.py exists ----
-    run_suite = ascend_path / ".github" / "workflows" / "scripts" / "run_suite.py"
-    # ci_log_summary always runs locally. In remote mode ascend_path points
-    # to the remote filesystem; use the script's own repo root instead.
-    if remote_host:
-        _repo_root = Path(__file__).resolve().parents[3]
-        ci_log_summary = _repo_root / ".github" / "workflows" / "scripts" / "ci_log_summary.py"
-    else:
-        ci_log_summary = ascend_path / ".github" / "workflows" / "scripts" / "ci_log_summary.py"
-
-    if not remote_host and not run_suite.exists():
-        print(f"Error: run_suite.py not found: {run_suite}", file=sys.stderr)
+    # ---- step 3: locate scripts ----
+    run_suite = (remote_ascend if remote_host else ascend_path) / ".github/workflows/scripts/run_suite.py"
+    ci_log_summary = ascend_path / ".github/workflows/scripts/ci_log_summary.py"
+    if not ci_log_summary.exists():
+        print(f"Error: ci_log_summary.py not found: {ci_log_summary}", file=sys.stderr)
         sys.exit(1)
 
-    # ---- Step 4: Setup env vars ----
+    # ---- step 4: env ----
     env = os.environ.copy()
     env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     env.setdefault("VLLM_USE_MODELSCOPE", "true")
 
-    # ---- Step 5: Determine output dirs ----
+    # ---- steps 5-6: schedule ----
     ci_dir = log_dir / str(step_id) / "tests"
     result_path = ci_dir / f"round-{round_number}-result.json"
-
     suite_names = suites or DEFAULT_SUITES
-
-    # ---- Step 6: Schedule rounds ----
-    if sequential:
-        rounds = [[s] for s in suite_names]
-    else:
-        rounds = _schedule_rounds(suite_names, total_cards)
-
+    rounds = [[s] for s in suite_names] if sequential else _schedule_rounds(suite_names, total_cards)
     device_rounds = _assign_devices(rounds)
 
-    # Print schedule
     parallel_count = sum(1 for r in rounds if len(r) > 1)
-    print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, "
-          f"total cards: {total_cards}):")
+    print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {total_cards}):")
     for i, rnd in enumerate(device_rounds):
         usage = sum(_suite_cards(s) for s, _ in rnd)
         mode = "parallel" if len(rnd) > 1 else "serial"
         parts = [f"{s}({_suite_cards(s)}c, devs={d})" for s, d in rnd]
-        print(f"  Round {i + 1} ({mode}, using {usage}/{total_cards} cards): "
-              f"{', '.join(parts)}")
+        print(f"  Round {i+1} ({mode}, using {usage}/{total_cards} cards): {', '.join(parts)}")
     print(flush=True)
 
     if dry_run:
         print("[dry-run] Skipping execution.", flush=True)
         return {}
 
-    # ---- Step 7: Execute rounds ----
+    # ---- step 7: execute ----
     t0 = time.monotonic()
-    all_suite_results: list[dict] = []
+    all_results: list[dict] = []
     rounds_info: list[dict] = []
 
     for round_idx, rnd in enumerate(device_rounds, start=1):
         round_t0 = time.monotonic()
-        print(f"\n== Round {round_idx}/{len(device_rounds)}: {len(rnd)} suite(s) ==",
-              flush=True)
+        print(f"\n== Round {round_idx}/{len(device_rounds)}: {len(rnd)} suite(s) ==", flush=True)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(rnd)) as executor:
-            future_to_suite = {}
-
+            futs = {}
             for suite_name, devices in rnd:
-                log_path = ci_dir / f"round-{round_number}-{suite_name}.log"
-                summary_path = ci_dir / f"round-{round_number}-{suite_name}-summary.json"
-
-                if mock:
-                    duration = int(_MOCK_DURATIONS.get(suite_name, 60) * mock_scale)
-                    if remote_host:
-                        inner_cmd = f"docker exec {remote_container} sleep {duration}"
-                        command = ["ssh", "-o", "StrictHostKeyChecking=no", remote_host, inner_cmd]
-                    else:
-                        command = ["sleep", str(duration)]
-                    print(f"  [{suite_name}] mock: sleep {duration}s (scale={mock_scale})", flush=True)
-                elif remote_host:
-                    remote_run_suite = (
-                        ascend_path / ".github" / "workflows" / "scripts" / "run_suite.py"
-                    )
-                    remote_env = [
-                        f"ASCEND_RT_VISIBLE_DEVICES={devices}",
-                    ]
-                    for k in sorted(env):
-                        if k.startswith("VLLM_"):
-                            remote_env.append(f"{k}={shlex.quote(env[k])}")
-                    inner_cmd = (
-                        f"docker exec -w {shlex.quote(str(ascend_path))} {remote_container} "
-                        f"env {' '.join(remote_env)} "
-                        f"python3 {shlex.quote(str(remote_run_suite))} "
-                        f"--suite {shlex.quote(suite_name)} --continue-on-error"
-                    )
-                    command = ["ssh", "-o", "StrictHostKeyChecking=no", remote_host, inner_cmd]
-                else:
-                    command = [
-                        sys.executable, str(run_suite),
-                        "--suite", suite_name, "--continue-on-error",
-                    ]
-
-                def _run_and_summarize(cmd, lp, sp, sn, dvs, asc, cls, sid, rn, env_copy):
-                    if not remote_host:
-                        env_copy["ASCEND_RT_VISIBLE_DEVICES"] = dvs
-                    # In remote mode, ascend_path is on the remote; use a local
-                    # CWD so subprocess can start (SSH doesn't need it anyway).
-                    cwd = Path("/tmp") if remote_host else asc
-                    exit_code = _run_to_log(cmd, cwd, lp, env_copy)
-                    if mock:
-                        return {
-                            "suite": sn,
-                            "cards_required": _suite_cards(sn),
-                            "run_suite_exit_code": exit_code,
-                            "ci_result": "passed" if exit_code == 0 else "failed",
-                            "summary_error": None,
-                            "code_bugs_count": 0,
-                            "env_flakes_count": 0,
-                            "failed_test_files_count": 0,
-                            "failed_test_cases_count": 0,
-                            "log_path": str(lp),
-                            "summary_path": str(sp),
-                        }
-                    summary_result = _run_summary(cls, lp, sp, sid, rn)
-                    s = summary_result["summary"]
-                    se = summary_result["summary_error"]
-                    cr = _classify_result(exit_code, s, se)
-                    return {
-                        "suite": sn,
-                        "cards_required": _suite_cards(sn),
-                        "run_suite_exit_code": exit_code,
-                        "ci_result": cr,
-                        "summary_error": se,
-                        "code_bugs_count": len((s or {}).get("code_bugs", [])),
-                        "env_flakes_count": len((s or {}).get("env_flakes", [])),
-                        "failed_test_files_count": _count(s, "failed_test_files"),
-                        "failed_test_cases_count": _count(s, "failed_test_cases"),
-                        "log_path": str(lp),
-                        "summary_path": str(sp),
-                    }
-
-                fut = executor.submit(
-                    _run_and_summarize,
-                    command, log_path, summary_path, suite_name, devices,
-                    ascend_path, ci_log_summary,
-                    step_id, round_number, env.copy(),
-                )
-                future_to_suite[fut] = suite_name
+                lp = ci_dir / f"round-{round_number}-{suite_name}.log"
+                sp = ci_dir / f"round-{round_number}-{suite_name}-summary.json"
+                cmd = _build_suite_cmd(suite_name, devices, mock=mock, mock_scale=mock_scale,
+                                       remote_host=remote_host, remote_container=remote_container,
+                                       remote_ascend=remote_ascend, local_run_suite=run_suite,
+                                       s_env=env)
+                fut = executor.submit(_run_one_suite, cmd, lp, sp, suite_name, devices,
+                                      ci_log_summary, step_id, round_number, env.copy(),
+                                      is_remote=bool(remote_host), is_mock=mock)
+                futs[fut] = suite_name
                 print(f"  [{suite_name}] started ({_suite_cards(suite_name)} card(s))", flush=True)
 
-            round_suite_results = []
-            for fut in concurrent.futures.as_completed(future_to_suite):
-                suite_name = future_to_suite[fut]
+            round_results = []
+            for fut in concurrent.futures.as_completed(futs):
                 r = fut.result()
-                round_suite_results.append(r)
-                print(
-                    f"  [{suite_name}] done: exit={r['run_suite_exit_code']}, "
-                    f"result={r['ci_result']}, "
-                    f"bugs={r['code_bugs_count']}, flakes={r['env_flakes_count']}",
-                    flush=True,
-                )
+                round_results.append(r)
+                print(f"  [{futs[fut]}] done: exit={r['run_suite_exit_code']}, "
+                      f"result={r['ci_result']}, bugs={r['code_bugs_count']}, "
+                      f"flakes={r['env_flakes_count']}", flush=True)
 
         round_elapsed = time.monotonic() - round_t0
-        all_suite_results.extend(round_suite_results)
-        rounds_info.append({
-            "round": round_idx,
-            "suites": [r["suite"] for r in round_suite_results],
-            "cards_used": sum(_suite_cards(s) for s, _ in rnd),
-            "total_cards": total_cards,
-            "elapsed_s": round(round_elapsed, 1),
-        })
+        all_results.extend(round_results)
+        rounds_info.append({"round": round_idx, "suites": [r["suite"] for r in round_results],
+                            "cards_used": sum(_suite_cards(s) for s, _ in rnd),
+                            "total_cards": total_cards, "elapsed_s": round(round_elapsed, 1)})
         print(f"  Round {round_idx} elapsed: {round_elapsed:.1f}s", flush=True)
 
-        # Pull remote logs back to local log_dir
         if remote_host:
-            remote_ci_dir = f"{remote_log_dir}/{step_id}/tests/"
-            print(f"  Pulling remote logs: {remote_host}:{remote_ci_dir} -> {ci_dir}", flush=True)
-            scp_result = subprocess.run(
-                ["scp", "-r", "-o", "StrictHostKeyChecking=no",
-                 f"{remote_host}:{remote_ci_dir}*", str(ci_dir) + "/"],
-                capture_output=True, text=True,
-            )
-            if scp_result.returncode != 0:
-                print(f"  [warn] scp pull failed (non-fatal): {scp_result.stderr.strip()}", flush=True)
-            else:
-                print(f"  Remote logs pulled successfully.", flush=True)
+            remote_ci = f"{remote_log_dir}/{step_id}/tests"
+            print(f"  Pulling remote logs: {remote_host}:{remote_ci} -> {ci_dir}", flush=True)
+            _sync_remote_dir(remote_host, remote_ci, ci_dir)
 
     total_elapsed = time.monotonic() - t0
+    if remote_host:
+        print(f"\n=== Final log sync ===", flush=True)
+        _sync_remote_dir(remote_host, f"{remote_log_dir}/{step_id}/tests", ci_dir)
 
-    # ---- Step 8: Aggregate results ----
-    outcomes = {r["ci_result"] for r in all_suite_results}
+    # ---- step 8: aggregate ----
+    outcomes = {r["ci_result"] for r in all_results}
     if "failed" in outcomes:
         overall = "failed"
     elif "summary_error" in outcomes:
@@ -783,107 +603,64 @@ def run_tests(
     else:
         overall = "env_flake_pass"
 
-    suite_names = [r["suite"] for r in all_suite_results]
-    suite_label = suite_names[0] if len(suite_names) == 1 else "+".join(suite_names)
-    can_commit = overall in PASS_RESULTS
-
     result = {
-        "step_id": step_id,
-        "round": round_number,
-        "suite": suite_label,
-        "suites": suite_names,
-        "ci_result": overall,
-        "passed": overall == "passed",
-        "can_commit": can_commit,
-        "requires_fix": overall == "failed",
-        "log_path": str(ci_dir),
-        "summary_path": str(ci_dir),
-        "total_cards": total_cards,
-        "sequential": sequential,
-        "remote": remote,
-        "elapsed_s": round(total_elapsed, 1),
-        "rounds": rounds_info,
-        "suite_results": {r["suite"]: r for r in all_suite_results},
-        "code_bugs_count": sum(r["code_bugs_count"] for r in all_suite_results),
-        "env_flakes_count": sum(r["env_flakes_count"] for r in all_suite_results),
-        "failed_test_files_count": sum(r["failed_test_files_count"] for r in all_suite_results),
-        "failed_test_cases_count": sum(r["failed_test_cases_count"] for r in all_suite_results),
+        "step_id": step_id, "round": round_number,
+        "suite": "+".join(r["suite"] for r in all_results),
+        "suites": [r["suite"] for r in all_results],
+        "ci_result": overall, "passed": overall == "passed",
+        "can_commit": overall in PASS_RESULTS, "requires_fix": overall == "failed",
+        "log_path": str(ci_dir), "summary_path": str(ci_dir),
+        "total_cards": total_cards, "sequential": sequential, "remote": remote,
+        "elapsed_s": round(total_elapsed, 1), "rounds": rounds_info,
+        "suite_results": {r["suite"]: r for r in all_results},
+        "code_bugs_count": sum(r["code_bugs_count"] for r in all_results),
+        "env_flakes_count": sum(r["env_flakes_count"] for r in all_results),
+        "failed_test_files_count": sum(r["failed_test_files_count"] for r in all_results),
+        "failed_test_cases_count": sum(r["failed_test_cases_count"] for r in all_results),
     }
     result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-
-    print(f"\nmain2main CI aggregated: {overall}  (can_commit={can_commit})", flush=True)
+    print(f"\nmain2main CI aggregated: {overall}  (can_commit={result['can_commit']})", flush=True)
     print(f"Total elapsed: {total_elapsed:.1f}s  ({total_elapsed/60:.1f} min)", flush=True)
     print(f"Result written to {result_path}", flush=True)
-
     return result
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+# =============================================================================
+# CLI
+# =============================================================================
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Run main2main CI with resource-aware parallel scheduling.",
-    )
-    # --- Setup env args ---
-    parser.add_argument("--vllm-path", type=Path, required=True,
-                        help="Path to the vLLM repository")
-    parser.add_argument("--vllm-commit", required=True,
-                        help="vLLM commit hash to checkout")
-    parser.add_argument("--ascend-path", type=Path, required=True,
-                        help="Path to the vllm-ascend repository (local)")
-    parser.add_argument("--ascend-commit", required=True,
-                        help="vllm-ascend commit hash to checkout before applying patch")
-    parser.add_argument("--patch", type=Path,
-                        help="Patch file to apply to vllm-ascend after checkout")
-    # --- CI args ---
-    parser.add_argument("--step-id", type=int, required=True,
-                        help="Step identifier, for example step-1")
-    parser.add_argument("--round", type=int, default=1,
-                        help="CI round number for this step")
-    parser.add_argument("--suite", action="append",
-                        help="run_suite.py suite name. Can be specified multiple times. "
-                             "Defaults to e2e-singlecard-light.")
-    parser.add_argument("--log-dir", type=Path, default=Path("."),
-                        help="Directory for test logs (receives './tests/')")
-    parser.add_argument("--total-cards", type=int, default=1,
-                        help="Total NPU cards available on the target machine "
-                             "(default: 1)")
-    parser.add_argument("--sequential", action="store_true",
-                        help="Force serial execution (one suite at a time)")
-    parser.add_argument("--remote",
-                        help="Enable remote execution. Use 'user@host' for direct SSH, "
-                             "or any value to read from env vars "
-                             "(MAIN2MAIN_REMOTE_HOST / _CONTAINER / _IMAGE).")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print schedule only, do not execute")
-    parser.add_argument("--mock", action="store_true",
-                        help="Use sleep-based simulation instead of real run_suite.py")
-    parser.add_argument("--mock-scale", type=float, default=0.1,
-                        help="Time scale factor for --mock (default: 0.1 = 10x faster)")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description="Run main2main CI with resource-aware parallel scheduling.")
+    p.add_argument("--vllm-path", type=Path, required=True)
+    p.add_argument("--vllm-commit", required=True)
+    p.add_argument("--ascend-path", type=Path, required=True)
+    p.add_argument("--ascend-commit", required=True)
+    p.add_argument("--patch", type=Path)
+    p.add_argument("--step-id", type=int, required=True)
+    p.add_argument("--round", type=int, default=1)
+    p.add_argument("--suite", action="append")
+    p.add_argument("--log-dir", type=Path, default=Path("."))
+    p.add_argument("--total-cards", type=int, default=1)
+    p.add_argument("--sequential", action="store_true")
+    p.add_argument("--remote")
+    p.add_argument("--remote-vllm-path", type=Path)
+    p.add_argument("--remote-ascend-path", type=Path)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--mock", action="store_true")
+    p.add_argument("--mock-scale", type=float, default=0.1)
+    args = p.parse_args()
 
     result = run_tests(
-        vllm_path=args.vllm_path,
-        vllm_commit=args.vllm_commit,
-        ascend_path=args.ascend_path,
-        ascend_commit=args.ascend_commit,
-        patch_path=args.patch,
-        step_id=args.step_id,
-        suites=args.suite,
-        total_cards=args.total_cards,
-        remote=args.remote,
-        log_dir=args.log_dir,
-        round_number=args.round,
-        dry_run=args.dry_run,
-        sequential=args.sequential,
-        mock=args.mock,
-        mock_scale=args.mock_scale,
+        vllm_path=args.vllm_path, vllm_commit=args.vllm_commit,
+        ascend_path=args.ascend_path, ascend_commit=args.ascend_commit,
+        patch_path=args.patch, step_id=args.step_id, suites=args.suite,
+        total_cards=args.total_cards, remote=args.remote, log_dir=args.log_dir,
+        remote_vllm_path=args.remote_vllm_path,
+        remote_ascend_path=args.remote_ascend_path,
+        round_number=args.round, dry_run=args.dry_run,
+        sequential=args.sequential, mock=args.mock, mock_scale=args.mock_scale,
     )
-
-    can_commit = result.get("can_commit", False)
-    sys.exit(0 if can_commit else 1)
+    sys.exit(0 if result.get("can_commit", False) else 1)
 
 
 if __name__ == "__main__":
