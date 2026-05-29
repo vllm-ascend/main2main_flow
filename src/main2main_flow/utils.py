@@ -5,7 +5,6 @@ from pathlib import Path
 UpgradeCompleted = "UpgradeCompleted"
 StepCompleted = "StepCompleted"
 UpgradeFailed = "UpgradeFailed"
-StepRetryNeeded = "StepRetryNeeded"
 HasCommit = "HasCommit"
 HasNoCommit = "HasNoCommit"
 
