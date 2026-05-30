@@ -23,7 +23,8 @@ from main2main_flow.utils import (
     UpgradeCompleted, UpgradeFailed,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
-    EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, run_git
+    EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
+    FINAL_CODE_STRUCTURE_GUIDE_FILE, run_git
 )
 
 _REFERENCE_DIR = str(Path(__file__).parent / "reference")
@@ -160,6 +161,13 @@ class Main2MainFlow(Flow[Main2MainState]):
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
         step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
+        previous_step = self.state.steps[self.state.current_step - 1] if self.state.current_step > 0 else None
+        previous_step_id = previous_step["id"] if previous_step else ""
+        previous_step_summary_path = (
+            WORKSPACE_DIR / STEPS_DIR / previous_step_id / EACH_STEP_SUMMARY_FILE
+            if previous_step_id else ""
+        )
+        is_last_step = self.state.current_step == self.state.total_steps - 1
 
         vllm_path = self.state.vllm_path
         ascend_path = self.state.vllm_ascend_path
@@ -193,6 +201,9 @@ class Main2MainFlow(Flow[Main2MainState]):
             print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, mode={mode}")
             adapt_result = run_opencode_adapter({
                 "step_id": step_id,
+                "previous_step_id": previous_step_id,
+                "previous_step_summary_path": str(previous_step_summary_path),
+                "is_last_step": is_last_step,
                 "step_dir": str(step_dir),
                 "patch_path": str(patch_path),
                 "changed_files_path": str(changed_files_path),
@@ -202,6 +213,7 @@ class Main2MainFlow(Flow[Main2MainState]):
                 "reference_dir": _REFERENCE_DIR,
                 "mode": mode,
                 "error_logs": json.dumps(error_logs, ensure_ascii=False),
+                "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
             })
 
             check_result = run_check(ascend_path, self.state.release_tag)
@@ -216,8 +228,9 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         self.state.test_errors = []
 
-        summary = adapt_result.step_summary if adapt_result else ""
-        (step_dir / EACH_STEP_SUMMARY_FILE).write_text(summary, encoding="utf-8")
+        summary_path = step_dir / EACH_STEP_SUMMARY_FILE
+        if adapt_result and adapt_result.step_summary and not summary_path.exists():
+            summary_path.write_text(adapt_result.step_summary, encoding="utf-8")
 
         adaptation_patch_path = step_dir / EACH_STEP_TARGET_PATCH_FILE
         adaptation_patch = run_git(ascend_path, "diff", "HEAD")
@@ -269,13 +282,35 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @listen(process_steps)
     def generate_final_post(self):
-        # copy summry and target patch from workspace/steps/{current_step_id} folder to workspace/
+        # The last successful step's patch is cumulative: git diff HEAD after all
+        # successful adaptations. Prefer its cumulative summary, and fall back to
+        # concatenating available step summaries if the last one is missing.
         if self.state.current_step == 0:
             print(f"[generate_final_post] fail to upgrade, no step success")
             return
-        step_dir = WORKSPACE_DIR / STEPS_DIR / f"step-{self.state.current_step}"
-        shutil.copy2(step_dir / EACH_STEP_SUMMARY_FILE, WORKSPACE_DIR / FINAL_SUMMARY_FILE)
+
+        last_step = self.state.steps[self.state.current_step - 1]
+        step_dir = WORKSPACE_DIR / STEPS_DIR / last_step["id"]
+        final_summary_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
+        last_summary_path = step_dir / EACH_STEP_SUMMARY_FILE
+
+        if last_summary_path.exists():
+            shutil.copy2(last_summary_path, final_summary_path)
+        else:
+            summaries = []
+            for index in range(self.state.current_step):
+                current_step = self.state.steps[index]
+                summary_path = WORKSPACE_DIR / STEPS_DIR / current_step["id"] / EACH_STEP_SUMMARY_FILE
+                if summary_path.exists():
+                    summaries.append(summary_path.read_text(encoding="utf-8"))
+            final_summary_path.write_text("\n\n".join(summaries), encoding="utf-8")
+
         shutil.copy2(step_dir / EACH_STEP_TARGET_PATCH_FILE, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
+
+        last_guide_path = step_dir / EACH_STEP_CODE_STRUCTURE_GUIDE_FILE
+        if last_guide_path.exists():
+            shutil.copy2(last_guide_path, WORKSPACE_DIR / FINAL_CODE_STRUCTURE_GUIDE_FILE)
+            print(f"[generate_final_post] Copied code-structure-guide to workspace.")
 
     @listen(generate_final_post)
     def push_to_github(self):
@@ -283,9 +318,16 @@ class Main2MainFlow(Flow[Main2MainState]):
             print("[push] PUSH_TO_GITHUB is not true, skipping.")
             return "SKIP_PUSH"
 
+        github_repo = os.getenv("GITHUB_REPO", "")
+        if not github_repo:
+            print("[push] GITHUB_REPO is empty, cannot create PR.")
+            return "SKIP_PUSH"
+
         return push_and_create_pr(
             ascend_path=Path(self.state.vllm_ascend_path),
-            github_repo=os.getenv("GITHUB_REPO", ""),
+            github_repo=github_repo,
+            patch_path=WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE,
+            summary_path=WORKSPACE_DIR / FINAL_SUMMARY_FILE,
         )
 
 

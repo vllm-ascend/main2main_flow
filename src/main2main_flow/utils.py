@@ -14,10 +14,12 @@ STEPS_DIR = "steps"
 VLLM_GIT_PATCH_FILE = "upstream.patch"
 VLLM_GIT_CHANGED_FILES = "changed_files.txt"
 PRE_CI_CHECK_FILE = "pre_ci_check.json"
-EACH_STEP_SUMMARY_FILE = "step_summary.json"
+EACH_STEP_SUMMARY_FILE = "step_summary.md"
 EACH_STEP_TARGET_PATCH_FILE = "step_target.patch"
-FINAL_SUMMARY_FILE = "final_summary.json"
+EACH_STEP_CODE_STRUCTURE_GUIDE_FILE = "code-structure-guide.md"
+FINAL_SUMMARY_FILE = "final_summary.md"
 FINAL_TARGET_PATCH_FILE = "final_target.patch"
+FINAL_CODE_STRUCTURE_GUIDE_FILE = "final_code-structure-guide.md"
 
 def run_git(repo: Path | str, *args: str) -> str:
     result = subprocess.run(

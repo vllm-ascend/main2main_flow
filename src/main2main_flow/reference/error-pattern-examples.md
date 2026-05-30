@@ -20,7 +20,7 @@ from vllm_ascend.utils import vllm_version_is
 
 # Option 1: Add parameter conditionally to call site
 kwargs = {"existing_param": value}
-if not vllm_version_is("0.16.0"):
+if not vllm_version_is("<release_tag>"):
     kwargs["new_param"] = new_value
 function(**kwargs)
 
@@ -51,7 +51,7 @@ config, `enable_eplb` added to `FusedMoEParallelConfig`).
 **Fix:** Use `vllm_version_is()` to access from the correct location:
 
 ```python
-if vllm_version_is('0.16.0'):
+if vllm_version_is('<release_tag>'):
     value = self.vllm_config.old_location.attribute
 else:
     value = self.new_class.new_location.attribute
@@ -60,6 +60,41 @@ else:
 For config access that changes frequently, consider helper methods like
 `_get_positions()` / `_set_positions()` to abstract the logic. For new required
 fields, add them to the config wrapper.
+
+---
+
+## Constructor / Dataclass Field Change
+
+**Error:** `TypeError: __init__() got an unexpected keyword argument 'X'`,
+`missing 1 required positional argument: 'X'`, or dataclass/config construction
+failures.
+
+**Cause:** vLLM changed constructor parameters, dataclass fields, metadata
+objects, request/sequence structures, or config wrapper requirements.
+
+**Fix:** Compare the upstream constructor or dataclass definition in
+`upstream.patch` with the vllm-ascend call site. Add, remove, or rename fields at
+the call site. Use `vllm_version_is("<release_tag>")` only when the same
+vllm-ascend code path must support both old and new constructor shapes. Prefer a
+small helper when the same field mapping appears in multiple places.
+
+---
+
+## Registry / Plugin Interface Change
+
+**Error:** backend/platform/model loader not found, registry key mismatch,
+plugin factory `TypeError`, or an object returned from a registry no longer
+matches the expected protocol.
+
+**Cause:** vLLM changed a registry key, plugin constructor, backend factory,
+platform registration contract, attention backend interface, or model loader
+protocol. vllm-ascend often integrates through these extension points.
+
+**Fix:** Find the changed registry or factory contract in `upstream.patch`, then
+update the corresponding vllm-ascend registration, key, constructor arguments, or
+returned object. Do not add broad fallback registration unless both old and new
+APIs must be supported in the same code path; use a narrow version guard when
+needed.
 
 ---
 
@@ -97,11 +132,14 @@ code path (e.g., re-force `+rms_norm` in `custom_ops` for SP).
 **Fix:** For moved/renamed modules, use `vllm_version_is()` to branch imports:
 
 ```python
-if vllm_version_is("0.16.0"):
+if vllm_version_is("<release_tag>"):
     from vllm.old.path import X
 else:
     from vllm.new.path import X
 ```
+
+Follow the existing import style in the file. If module-level guarded imports
+create cycles or heavy side effects, move the import to the narrowest local scope.
 
 For removed modules, delete the import **and** all usages (decorators, function
 calls) — clean removal over `# type: ignore`.
@@ -119,6 +157,41 @@ signature and return type, then provide an Ascend-appropriate implementation.
 
 ---
 
+## pre_ci_check Failure
+
+**Error source:** `{step_dir}/pre_ci_check.json`
+
+**Cause:** Static policy failure detected by the main2main flow after an opencode
+attempt. pre_ci_check currently checks newly added `vllm_version_is()` calls for
+the expected release tag and checks for temporary/debug artifacts in the repo.
+
+It does not prove that every necessary guard exists, nor that signatures are
+semantically correct. Those still require static self-review.
+
+**Fix:** Read the structured JSON and inspect the affected source files. Apply a
+static code fix, then update `analysis.md`, `review.md`, and `step_summary.md`.
+Do not rerun pre_ci_check manually; the main2main flow will run it after the AI
+step.
+
+---
+
+## Local Environment Missing Dependencies (NO FIX NEEDED)
+
+**Error:** `ModuleNotFoundError: No module named 'vllm'`, missing `vllm_ascend`,
+missing NPU/GPU, missing torch-npu/CANN/runtime libraries, or device discovery
+failures from local commands attempted during the AI adaptation step.
+
+**Cause:** The AI adaptation environment may contain source code only. Runtime
+imports and device checks are not meaningful during the AI step.
+
+**Fix:** Do not add dependency hacks, fallback imports, or code workarounds for
+local environment failures. Use static source inspection only. Runtime validation
+is handled later by the main2main flow. If a similar error appears in structured
+`_run_e2e_test` output, classify it according to that summary; it is usually an
+environment/setup issue rather than an adaptation code bug.
+
+---
+
 ## Environment Flakes (NO FIX NEEDED)
 
 These are transient infrastructure issues — note them in the report but require
@@ -128,6 +201,9 @@ no code changes:
 - `ConnectionResetError` — transient network failure
 - `filelock` errors — model download contention
 - `ConnectionRefusedError` — service not ready
-- `TimeoutError` — transient timeout
+- `TimeoutError` — env flake only when the structured summary classifies it as
+  environmental or the context clearly shows infrastructure/resource delay. If
+  it follows scheduler, worker, model runner, or code-path changes, treat it as a
+  possible code bug.
 - `torch.cuda.OutOfMemoryError` — resource exhaustion
 - `OSError: No space left on device` — disk full

@@ -1,205 +1,181 @@
 # Diagnosis Guide
 
-The goal of diagnosis isn't just "find the failing test" — it's to trace each
-failure back to the specific upstream change that caused it, so the fix addresses
-the root cause rather than the symptom.
+Use this guide during fix mode. The goal is not to rerun validation locally; it
+is to read the structured `error_logs` provided by the prompt, trace each
+actionable failure back to the upstream change that caused it, and update
+vllm-ascend statically. Never modify the vLLM repository; it is only an upstream
+reference.
 
-**Write `vllm_error_analyze.md` immediately after Step 1** — start with just the
-skeleton (Overview table, error list), then fill in upstream commit details as
-Step 2 progresses. This ensures a useful record exists even if context runs low
-before finishing.
-
----
-
-## Re-orient (every fix round, not just the first)
-
-Re-read this file before each fix round. The error pattern table in Step 2 and
-the `reference/error-pattern-examples.md` reference help match CI failures to
-known fix patterns — this lookup produces better fixes than reasoning from the
-error message alone, especially after multiple rounds when context is saturated.
-
-Before starting, confirm:
-- Current step, round number, compatible release tag (`main_vllm_tag`)
-- Which issues from `vllm_error_analyze.md` are still open
-- The upstream patch for this step: `/tmp/main2main/steps/<step-id>/upstream.patch`
+Runtime validation is external. The main2main flow runs pre_ci_check after each
+opencode attempt and runs `_run_e2e_test` after `_ai_analysis` completes.
 
 ---
 
-## Step 1: Read structured CI output
+## Cumulative fix model
 
-`run_main2main_ci.py` already runs `ci_log_summary.py` after every CI round.
-Start diagnosis from these files:
+Fix mode runs on the same cumulative vllm-ascend working tree as adapt mode.
+Successful changes from previous steps and earlier attempts are already present.
+Do not reinitialize, revert, or duplicate them unless the structured error proves
+they are obsolete or harmful.
 
-- `/tmp/main2main/steps/<step-id>/ci/round-<N>-result.json`
-- `/tmp/main2main/steps/<step-id>/ci/round-<N>-summary.json`
+Before changing code:
+- Read the previous step summary path from the prompt when it exists
+- Inspect existing vllm-ascend changes relevant to the failure
+- Reuse prior version guards, helper functions, imports, and adaptation patterns
 
-Do not rerun `ci_log_summary.py` by hand during normal main2main execution. The
-wrapper output is the source of truth for `ci_result`, `run_suite_exit_code`,
-and the path to the structured summary.
-
-The summary does the heavy lifting: it extracts root-cause exceptions, filters
-wrapper errors (`Engine core initialization failed`), filters downstream effects
-(`KeyError: 'choices'` caused by engine crash), and deduplicates by normalized
-signature.
-
-**Relevant output fields:**
-
-```json
-{
-  "good_commit": "...",
-  "bad_commit": "...",
-  "code_bugs": [
-    {
-      "error_type": "TypeError",
-      "error_message": "forward_oot() got an unexpected keyword argument 'kv_cache_dtype'",
-      "context": ["...traceback lines..."],
-      "error_failed_test_cases": ["tests/...::test_xxx"]
-    }
-  ],
-  "env_flakes": [{ "error_type": "OSError", "error_message": "Stale file handle" }]
-}
-```
-
-Only `code_bugs` need fixing. If only `env_flakes` remain, record CI as
-`env_flake_pass` and proceed to commit.
-
-**Immediately write the skeleton of `vllm_error_analyze.md`:**
-
-```markdown
-# CI Failure Analysis — step-<N>, round-<M>
-
-## Overview
-| Item | Value |
-|:---|:---|
-| Step | step-<N> |
-| Round | <M> |
-| Good commit | `<sha>` |
-| Bad commit | `<sha>` |
-| Compatible release | `<main_vllm_tag>` |
-| Code bugs | <count> |
-| Env flakes | <count> |
-
-## Issues
-| # | Error type | Message | Root cause commit | Version guard needed | Status |
-|:---|:---|:---|:---|:---|:---|
-| 1 | TypeError | forward_oot() got... | TBD | TBD | open |
-
-## Details
-(fill in during Step 2)
-```
-
-The **Version guard needed** column forces an explicit decision per issue —
-fill in YES / NO / N/A during Step 2.
+The patch is generated externally from `git diff HEAD`, so do not run git add,
+git commit, git reset, or git checkout in vllm-ascend.
 
 ---
 
-## Step 2: Root Cause Correlation and Apply Fixes
+## Step 1: Read structured error_logs
 
-For each code bug from the script output, use the error type, message, and
-context to figure out how upstream changes caused it. Find the commit(s) that
-introduced the relevant change, then analyze the code diff to understand why it
-breaks vllm-ascend.
+Fix mode receives `error_logs` from the prompt. Each entry is a structured JSON
+file path produced by the main2main flow. Start from these files; do not read raw
+CI logs unless a structured summary explicitly points to a small relevant section.
 
-**1. Use the error type to narrow the mechanism:**
-- `TypeError` → almost always a signature change (added/removed parameter)
-- `AttributeError` → config field moved or renamed
-- `ImportError` → module path changed
-- `NotImplementedError` → new abstract method added to base class
-- Unfamiliar downstream error (e.g., `KeyError: 'choices'`) → read the traceback
-  upward to find the actual root cause
+Possible inputs:
 
-Then look up the matching pattern in `reference/error-pattern-examples.md` — it
-has concrete fix examples for each error type. Don't skip this lookup in later
-rounds; the reference covers edge cases (like signature consistency across
-version-guarded branches) that are easy to miss when reasoning from the error
-alone.
+1. `pre_ci_check.json`
+   - Produced automatically after an opencode attempt when static checks fail
+   - This fix attempt is still before e2e; fix the static policy issue first and
+     do not reason about runtime behavior unless the JSON explicitly includes it
+   - Currently checks newly added `vllm_version_is()` calls for the expected
+     release tag and checks for temporary/debug artifacts in the repo
+   - It does not prove that every necessary guard exists, nor that signatures are
+     semantically correct; those still require static self-review
+   - Fix by reading the JSON and inspecting source; do not rerun pre_ci_check
+     manually
 
-**2. Extract a search term from the error message** and search the step's
-upstream.patch: `/tmp/main2main/steps/<step-id>/upstream.patch`
+2. `tests/round-<N>-summary.json`
+   - Produced by `_run_e2e_test` after runtime validation fails
+   - The exact schema may vary; prefer fields named `code_bugs` and `env_flakes`
+     when present
+   - If those fields are absent, inspect the available top-level keys and use the
+     most structured error list or summary field before considering raw logs
+   - Only actionable code bugs require code changes
 
-This reveals the diff chunk that introduced the change — not just the symptom,
-but the full context of what changed and why.
-
-**3. Identify the intent of the upstream change.** Was it a rename? A removal? A
-new parameter? This determines the fix:
-- New parameter → add to vllm-ascend's override with a default, use `vllm_version_is()` guard
-- Removal → delete the usage from vllm-ascend, guarded by `vllm_version_is()` if release still has it
-- Rename → update to new name with `vllm_version_is()` guard
-- New abstract method → implement in `AscendPlatform` or relevant class
-
-For each fix, decide whether a version guard is needed using the decision tree
-in `reference/adapt-guide.md` Step 2.
-
-**4. Update `vllm_error_analyze.md`** with the root cause commit and fix plan:
-
-```markdown
-### Issue 1: TypeError in forward_oot()
-
-| Item | Detail |
-|:---|:---|
-| Error | `TypeError: forward_oot() got an unexpected keyword argument 'kv_cache_dtype'` |
-| Affected tests | `tests/e2e/test_basic_correctness.py::test_chunked_prefill` |
-| Root cause commit | `abc1234` — "refactor attention forward signature" |
-| Changed file | `vllm/model_executor/layers/attention/backends/abstract.py` |
-| vllm-ascend file | `vllm_ascend/attention/ascend_attn_backend.py` |
-| Version guard needed | **YES** — release uses old signature without `kv_cache_dtype` |
-
-**Error Traceback:**
-(use context from script output)
-
-**Explanation:** <Why this change breaks vllm-ascend>
-
-**Fix:**
-<Specific code change, with vllm_version_is() guard if YES above>
-```
-
-**5. Apply fixes**
-
-For each issue, apply the fix from the plan above. Map each error to the
-corresponding fix pattern in `reference/error-pattern-examples.md`.
+If a summary contains only environment flakes or missing local/runtime
+dependencies, record that in `analysis.md` and `step_summary.md`; do not add code
+workarounds.
 
 ---
 
-## Step 3: Verify Before Re-running CI
+## Step 2: Classify failures
 
-Run `scripts/pre_ci_check.py` before re-running CI — same script as in the
-adapt phase. Review any failures; a missing version guard on a YES issue from
-`vllm_error_analyze.md` means the fix is incomplete.
+For each structured error, decide whether it is actionable:
 
-```bash
-python3 <skill_dir>/scripts/pre_ci_check.py \
-  --ascend-path <ascend_path> \
-  --release-tag <main_vllm_tag>
-```
+- `code_bugs` → fix in vllm-ascend
+- `env_flakes` → no code fix; record in the analysis
+- pre_ci static issues → fix statically in vllm-ascend
+- local environment errors from commands attempted during the AI adaptation step,
+  such as `ModuleNotFoundError: No module named 'vllm'`, missing NPU/GPU, or
+  missing runtime dependencies → not an adaptation failure
+- similar errors from `_run_e2e_test` structured summaries → classify according
+  to the summary; they are usually environment/setup issues, not code fixes
+
+Common code-bug mechanisms:
+
+- `TypeError` → signature change, added/removed/renamed parameter, constructor
+  argument change
+- `AttributeError` / `KeyError` → config field moved/renamed, new required field,
+  changed data shape
+- `ImportError` → module path changed or symbol removed
+- `NotImplementedError` / abstract class instantiation error → new required
+  interface method
+- Downstream errors such as `KeyError: 'choices'` → read upward in the structured
+  traceback context to find the original engine/model failure. Do not fix
+  wrapper/downstream symptoms directly unless they are the first actionable root
+  cause.
+
+Then look up the matching pattern in `reference/error-pattern-examples.md`.
 
 ---
 
-## Step 4: Re-run CI and Track Progress
+## Step 3: Correlate with the upstream patch
 
-Re-run CI using **Verify by CI** in SKILL.md. Then compare the new
-`round-<N>-summary.json` error signatures with the previous round:
+For each actionable issue:
 
-- **Fewer failing tests** → making progress, continue
-- **Same error signatures two rounds in a row** → fix isn't working, trigger partial stop
-- **New errors not in the previous round** → fix introduced a regression, revert and trigger partial stop
+1. Extract a stable search term from the error message or traceback, such as a
+   method name, config field, import path, class name, or keyword argument.
+2. Search the current step's `upstream.patch` from the prompt-provided
+   `patch_path`.
+3. Identify the upstream intent: rename, removal, new parameter, new abstract
+   method, new required config, moved module, or changed return type.
+4. Map the upstream change to the vllm-ascend code that subclasses, overrides,
+   calls, imports, or reads the changed contract.
+5. Decide whether a `vllm_version_is("<release_tag>")` guard is required. Use the
+   release tag from the prompt.
 
-Update the Status column in `vllm_error_analyze.md` each round.
+Do not infer fixes only from symptoms. Prefer root-cause fixes tied to the
+upstream diff.
 
-**Stop conditions** (authoritative list — check before each round):
-1. Only `env_flakes` remain → record CI as `env_flake_pass`
-2. Two consecutive rounds with identical error signatures → partial stop
-3. This round produced no code diff → partial stop
-4. No actionable `code_bugs` in summary → partial stop
-5. Hard cap of 5 rounds → partial stop
+---
+
+## Step 4: Apply fixes statically
+
+Apply the smallest vllm-ascend change that restores compatibility:
+
+- Add missing parameters with safe defaults when overriding upstream methods
+- Keep all version-guarded branches' public function signatures identical
+- Update config field access through guarded branches or helper methods
+- Update imports with guarded import branches when both old and new paths must be
+  supported
+- Implement new required platform/interface methods with Ascend-appropriate
+  behavior
+- Remove obsolete usages only when the upstream patch proves the API is gone
+
+Do not run tests, import vllm/vllm-ascend, launch models, inspect devices, or run
+pre_ci_check manually. Those checks happen outside the AI step.
+
+---
+
+## Step 5: Write analysis, review, and cumulative summary
+
+Write fix diagnosis into `{step_dir}/analysis.md`. For fix mode, include:
+
+- Structured error source file(s)
+- Classification: code bug, env flake, pre_ci static issue, or non-actionable
+  local/runtime dependency issue
+- Root-cause upstream change and affected vLLM symbol/file
+- Affected vllm-ascend file(s)
+- Fix plan and implemented fix
+- Version guard decision and release tag used
+
+Write `{step_dir}/review.md` with static review results:
+
+- Diff reviewed
+- Version guards checked
+- Function signatures checked
+- Imports/config accesses checked
+- Remaining risks or no known issues
+
+Update `{step_dir}/step_summary.md` cumulatively. Preserve previous sections and
+append/update the current step section, including a "Carry forward to next step"
+subsection.
+
+---
+
+## Stop conditions controlled externally
+
+The main2main flow controls retry limits and validation. Do not try to rerun CI
+or override the retry policy manually.
+
+During this AI step, stop after:
+- Applying the static fix, or determining there is no actionable code fix
+- Writing `analysis.md`, `review.md`, and `step_summary.md`
+
+The next pre_ci/e2e round will be triggered by the main2main flow.
 
 ---
 
 ## Context management
 
-CI logs can be enormous. Never read raw logs into context:
-- Always use `round-<N>-summary.json` first — it contains only structured output
-- To read a specific section of the raw log: `grep -A 10 '<pattern>' <logfile> | head -30`
-- Write `vllm_error_analyze.md` incrementally — it serves as external memory for
-  this task. Re-orient by reading the file rather than reconstructing from context
-- At the start of each fix round, re-read this file's Re-orient block and the open
-  issues in `vllm_error_analyze.md` before writing any code
+Structured logs can still be large. Prefer concise evidence:
+
+- Read structured summaries first
+- Use targeted source searches for symbols from the error
+- Avoid raw CI logs unless the structured summary points to a specific small
+  section
+- Use `analysis.md` and cumulative `step_summary.md` as external memory instead
+  of reconstructing prior decisions from context

@@ -7,12 +7,11 @@ from __future__ import annotations
 
 import json
 import queue
-import re
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +19,7 @@ _PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 _TIMEOUT_MINUTES = 30
 _STALE_SECONDS = 300
+_MAX_STALE_RETRIES = 3
 
 
 # ── prompt loader ─────────────────────────────────────────────────────────────
@@ -28,6 +28,33 @@ def _build_prompt(inputs: dict[str, Any]) -> str:
     template = _PROMPT_PATH.read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
     return template.format_map(ctx)
+
+
+def _build_continue_prompt(base_prompt: str, inputs: dict[str, Any], retry: int) -> str:
+    step_dir = inputs.get("step_dir", "")
+    return f"""Continue the adaptation task for step {inputs.get('step_id', '')}.
+
+The previous opencode run produced no output for {_STALE_SECONDS} seconds and
+was terminated. This is continuation retry {retry}/{_MAX_STALE_RETRIES}.
+
+Do not start from scratch. The current vllm-ascend working tree may already
+contain partial code changes from the previous attempt. These files may also
+contain partial results:
+
+  - {step_dir}/analysis.md
+  - {step_dir}/review.md
+  - {step_dir}/step_summary.md
+  - {step_dir}/opencode.log
+  - {step_dir}/opencode_raw.jsonl
+
+First inspect the existing changes and generated files. Reuse prior work, then
+continue any unfinished adaptation, static review, and step_summary.md updates.
+Continue to follow the original task requirements below.
+
+━━━ ORIGINAL TASK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{base_prompt}
+"""
 
 
 # ── result model ──────────────────────────────────────────────────────────────
@@ -41,26 +68,79 @@ class AdaptResult(BaseModel):
 # ── main entry point ──────────────────────────────────────────────────────────
 
 def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
-    prompt = _build_prompt(inputs)
+    base_prompt = _build_prompt(inputs)
+    prompt = base_prompt
     step_dir = inputs.get("step_dir", "")
-    log_path = Path(step_dir) / "opencode.log" if step_dir else None
-    raw_path = Path(step_dir) / "opencode_raw.jsonl" if step_dir else None
-    stderr_path = Path(step_dir) / "opencode_stderr.log" if step_dir else None
+    step_path = Path(step_dir) if step_dir else None
+    log_path = step_path / "opencode.log" if step_path else None
+    raw_path = step_path / "opencode_raw.jsonl" if step_path else None
+    stderr_path = step_path / "opencode_stderr.log" if step_path else None
 
+    if log_path:
+        log_path.write_text("")
+    if raw_path:
+        raw_path.write_text("")
+    if stderr_path:
+        stderr_path.write_text("")
+
+    all_lines: list[str] = []
+    last_reason: _StopReason | None = None
+
+    for attempt in range(_MAX_STALE_RETRIES + 1):
+        _print_prompt(prompt, attempt)
+        if log_path:
+            _log_prompt(prompt, attempt, log_path)
+
+        lines, reason = _run_once(prompt, log_path, raw_path, stderr_path)
+        all_lines.extend(lines)
+        last_reason = reason
+
+        if reason is None:
+            break
+
+        if reason == "stale_timeout" and attempt < _MAX_STALE_RETRIES:
+            retry = attempt + 1
+            print(f"\n[opencode] retrying after stale timeout ({retry}/{_MAX_STALE_RETRIES})", flush=True)
+            prompt = _build_continue_prompt(base_prompt, inputs, retry)
+            continue
+
+        if stderr_path and stderr_path.exists():
+            stderr_content = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+            if stderr_content:
+                print(f"\n[opencode] stderr tail:\n{stderr_content}", flush=True)
+        break
+
+    result = _build_result(step_path, inputs.get("ascend_path", ""), "".join(all_lines))
+    if last_reason and not result.step_summary:
+        result.step_summary = f"opencode process stopped due to {last_reason}"
+    return result
+
+
+_StopReason = Literal["stale_timeout", "total_timeout"]
+
+
+def _print_prompt(prompt: str, attempt: int) -> None:
+    title = "TEAM LEAD PROMPT" if attempt == 0 else f"TEAM LEAD CONTINUE PROMPT #{attempt}"
     print(f"\n{'═'*60}")
-    print("TEAM LEAD PROMPT:")
+    print(title)
     print(f"{'═'*60}")
     print(prompt)
     print(f"{'═'*60}\n")
 
-    if log_path:
-        log_path.write_text(
-            f"{'═'*60}\nTEAM LEAD PROMPT:\n{'═'*60}\n{prompt}\n{'═'*60}\n\n",
-            encoding="utf-8",
-        )
-    if raw_path:
-        raw_path.write_text("")
 
+def _log_prompt(prompt: str, attempt: int, log_path: Path) -> None:
+    title = "TEAM LEAD PROMPT" if attempt == 0 else f"TEAM LEAD CONTINUE PROMPT #{attempt}"
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{'═'*60}\n{title}:\n{'═'*60}\n{prompt}\n{'═'*60}\n\n")
+
+
+def _run_once(
+    prompt: str,
+    log_path: Path | None,
+    raw_path: Path | None,
+    stderr_path: Path | None,
+) -> tuple[list[str], _StopReason | None]:
+    stderr_fh = stderr_path.open("a", encoding="utf-8") if stderr_path else None
     proc = subprocess.Popen(
         [
             "opencode", "run",
@@ -69,7 +149,7 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
             prompt,
         ],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=stderr_fh or subprocess.DEVNULL,
         text=True,
         bufsize=1,
     )
@@ -91,7 +171,7 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
 
     deadline = time.monotonic() + _TIMEOUT_MINUTES * 60
     last_output_time = time.monotonic()
-    killed = False
+    stop_reason: _StopReason | None = None
 
     try:
         while True:
@@ -102,12 +182,12 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
                 if now > deadline:
                     print(f"\n[opencode] TOTAL TIMEOUT ({_TIMEOUT_MINUTES}min), killing process", flush=True)
                     proc.kill()
-                    killed = True
+                    stop_reason = "total_timeout"
                     break
                 if now - last_output_time > _STALE_SECONDS:
                     print(f"\n[opencode] STALE TIMEOUT ({_STALE_SECONDS}s no output), killing process", flush=True)
                     proc.kill()
-                    killed = True
+                    stop_reason = "stale_timeout"
                     break
                 continue
 
@@ -126,16 +206,17 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
             log_fh.close()
         if raw_fh:
             raw_fh.close()
+        if stderr_fh:
+            stderr_fh.close()
 
-    proc.wait(timeout=10)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stop_reason = stop_reason or "total_timeout"
+        proc.wait(timeout=10)
 
-    if killed:
-        if stderr_path and stderr_path.exists():
-            stderr_content = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
-            print(f"\n[opencode] stderr tail:\n{stderr_content}", flush=True)
-        return AdaptResult(step_summary="opencode process killed due to timeout")
-
-    return _parse_result("".join(state.lines))
+    return state.lines, stop_reason
 
 
 # ── event state ───────────────────────────────────────────────────────────────
@@ -227,9 +308,27 @@ def _log_event(line: str, state: _EventState, fh: Any) -> None:  # noqa: ARG001
     fh.flush()
 
 
-# ── result parser ─────────────────────────────────────────────────────────────
+# ── result builder ─────────────────────────────────────────────────────────────
 
-def _parse_result(jsonl: str) -> AdaptResult:
+def _build_result(step_dir: Path | None, ascend_path: str, jsonl: str) -> AdaptResult:
+    summary = ""
+    if step_dir:
+        summary_path = step_dir / "step_summary.md"
+        if summary_path.exists():
+            summary = summary_path.read_text(encoding="utf-8")
+
+    if not summary:
+        summary = _text_from_jsonl(jsonl)[-4000:]
+
+    modified_files = _modified_files(ascend_path)
+    return AdaptResult(
+        modified_files=modified_files,
+        is_noop=not modified_files,
+        step_summary=summary,
+    )
+
+
+def _text_from_jsonl(jsonl: str) -> str:
     text_parts: list[str] = []
     for line in jsonl.strip().splitlines():
         try:
@@ -238,12 +337,20 @@ def _parse_result(jsonl: str) -> AdaptResult:
             continue
         if ev.get("type") == "text":
             text_parts.append(ev.get("part", {}).get("text", ""))
+    return "\n".join(text_parts)
 
-    full_text = "\n".join(text_parts)
-    matches = re.findall(r"```json\s*(.*?)\s*```", full_text, re.DOTALL)
-    if matches:
-        try:
-            return AdaptResult(**json.loads(matches[-1]))
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return AdaptResult(step_summary=full_text[-4000:] if full_text else "")
+
+def _modified_files(ascend_path: str) -> list[str]:
+    if not ascend_path:
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            cwd=ascend_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        return []
+    return [line for line in result.stdout.splitlines() if line]
