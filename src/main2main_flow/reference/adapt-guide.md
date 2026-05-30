@@ -6,48 +6,64 @@ upstream contracts changed, then update the Ascend implementation that depends
 on those contracts.
 
 This file is only about adaptation decisions and code changes. Mechanical
-pipeline work, such as updating the pinned vLLM commit reference, is handled by
-`SKILL.md` and `scripts/update_commit_reference.py`.
+pipeline work, such as updating the pinned vLLM commit reference, generating
+patches, running pre_ci_check, running e2e tests, and committing changes, is
+handled externally by the main2main flow.
 
 ---
 
 ## Re-orient (every step, not just the first)
 
-Re-read this file at the start of every step — not because the instructions
-change, but because the lookup tables below (Key Areas, File Mapping) surface
-different results for each step's patch. A step that touches `vllm/config*.py`
-needs different vllm-ascend files than one that touches `vllm/platforms/`. The
-tables do the routing; skipping them means guessing.
+Re-read this file at the start of every step. For code-structure routing, use
+`reference/code-structure-guide.md` only when you need to map changed upstream
+paths/symbols to likely vllm-ascend files.
 
 Before starting, confirm:
-- Current step and upstream range
-- Compatible release tag (`main_vllm_tag` from conf.py) — needed for any `vllm_version_is()` guards
-- Guardrails from SKILL.md still apply: only modify vllm-ascend, temp files in `/tmp/main2main/`, never `git add .`
+- Current step and upstream range from the prompt
+- Compatible release tag from the prompt — needed for any `vllm_version_is()` guards
+- The prompt-provided paths for `changed_files_path`, `patch_path`, and `step_dir`
+- The previous step summary path, if present, so this step can reuse prior work
+
+---
+
+## Cumulative step model
+
+Each step runs on the same vllm-ascend working tree. Successful changes from
+previous steps are already present. Do not reinitialize, revert, or duplicate
+those changes. Read the previous step summary path from the prompt when it
+exists, then reuse prior version guards, helper functions, imports, and
+adaptation patterns.
+
+The per-step `step_target.patch` is generated externally from `git diff HEAD` and
+is cumulative from the original vllm-ascend base HEAD through the current step.
+Do not run git add, git commit, git reset, or git checkout in vllm-ascend.
 
 ---
 
 ## Inputs
 
-For each step, use these files:
+For each step, use the prompt-provided paths:
 
-- `/tmp/main2main/steps/<step-id>/changed-files.txt` — file paths changed by the upstream step
-- `/tmp/main2main/steps/<step-id>/upstream.patch` — full upstream diff for the step
+- `changed_files_path` / `changed_files.txt` — file paths changed by the upstream step
+- `patch_path` / `upstream.patch` — full upstream diff for the step
+- `step_dir` — archive directory for `analysis.md`, `review.md`, and `step_summary.md`
 
-Read `changed-files.txt` first. It is a cheap routing signal that tells you
+Read `changed_files.txt` first. It is a cheap routing signal that tells you
 which parts of `upstream.patch` deserve attention.
 
 ---
 
 ## Step 1: Analyze vLLM Changes
 
-1. Read `changed-files.txt`. Cross-reference each path against the **Key Areas**
-   table below to identify which subsystems are touched — do this before reading
-   any actual diff.
-2. Find the relevant chunks in `upstream.patch` and identify the concrete change:
+1. Read `changed_files.txt`.
+2. When the changed upstream paths/symbols are not obvious, consult
+   `reference/code-structure-guide.md` to identify key areas and likely
+   vllm-ascend locations. Do not read the whole structure guide unless needed.
+3. Find the relevant chunks in `upstream.patch` and identify the concrete change:
    new/removed abstract methods, changed signatures, renamed config fields, moved
    imports, changed constructor args, dependency bumps, or changed return types.
-3. Use the **File Mapping Table** below to find likely vllm-ascend locations that
-   need adaptation.
+4. Use the structure guide's File Mapping Table to find likely vllm-ascend
+   locations that need adaptation.
 
 The key question: **does vllm-ascend subclass, override, call, import, or read
 anything this patch changed?** Internal implementation changes only need
@@ -67,184 +83,74 @@ needed:
   Preserve vLLM Ascend specific modifications (e.g., code under vllm_ascend/)
 
 - **Dependency Changes**
-  Check for dependency version changes in pyproject.toml or setup.py
-  Update dependency declarations in vLLM Ascend
+  Check for dependency version changes in pyproject.toml or setup.py, but do not
+  blindly mirror upstream vLLM dependency bumps. Only update vLLM Ascend
+  dependency declarations when the change is required by vllm-ascend code or by
+  the external validation flow.
 
 - **Version Compatibility**
 
   Every signature change, config field move, or import path change is a potential
-  version boundary. Use this decision tree for each code change:
+  version boundary. Use a guard only when vllm-ascend must support both the
+  release API and the new upstream API in the same codebase, and the affected
+  code path can run against both versions.
 
   ```
-  Does this change touch an API that differs between release and upstream main?
-    ├─ YES → wrap with vllm_version_is("<release_tag>")
-    └─ NO  → no guard needed
+  Does this vllm-ascend code path need to support both release and upstream main?
+    ├─ YES, and the API differs → wrap behavior with vllm_version_is("<release_tag>")
+    └─ NO, or an enclosing guard already separates behavior → no new guard needed
   ```
 
-  When unsure, check existing patterns:
-  ```bash
-  grep -rn 'vllm_version_is' <ascend_path>/vllm_ascend/ | head -20
-  ```
-  Follow the same import style, version string, and branching structure.
-  Full version guard rules are in SKILL.md — Version Compatibility Rules section.
+  No guard is needed when the upstream change is internal and vllm-ascend does
+  not call, override, import, or read it. When unsure, search existing patterns in
+  source and follow the same import style, version string, and branching
+  structure. All branches of a version guard must keep identical public function
+  signatures.
 
 When a feature genuinely can't be supported on Ascend yet, add a stub with a
 `# TODO` comment referencing the issue.
 
-A no-op adapt (nothing to change) is fine, but it does not skip CI — the updated
-commit reference still needs verification.
+A no-op adapt (nothing to change) is fine, but still write `analysis.md`,
+`review.md`, and `step_summary.md` explaining why no vllm-ascend code change was
+needed. The main2main flow will still run pre_ci_check and `_run_e2e_test`
+externally.
 
 ---
 
-## Step 3: Verify Before CI
+## Step 3: Static Self Review
 
-```bash
-python3 <skill_dir>/scripts/pre_ci_check.py \
-  --ascend-path <ascend_path> \
-  --release-tag <main_vllm_tag>
-```
+Do not run pre_ci_check.py, tests, imports, model launches, or runtime validation
+manually. The main2main flow runs pre_ci_check automatically after each opencode
+attempt, and `_run_e2e_test` handles real validation later.
 
-The script checks version guard presence in changed files, version string
-consistency, and temp file cleanliness. Review any failures before running CI —
-a missing version guard here is cheaper to fix than a CI round-trip.
+During this AI step, only do static review:
+- Inspect the vllm-ascend diff and relevant source files
+- Verify version guards use the release tag from the prompt
+- Verify guarded branches keep identical public function signatures
+- Verify imports by reading source, not by importing vllm/vllm-ascend locally
+- Record findings in `analysis.md`, `review.md`, and `step_summary.md`
 
----
+For adapt mode, `analysis.md` should include:
+- Upstream files changed and relevant upstream contracts identified
+- vllm-ascend files checked through the File Mapping Table
+- `Checked but unchanged` notes for relevant vllm-ascend files that did not need
+  edits, with the reason they were unaffected
+- Adaptation plan and implemented changes, or no-op rationale
+- Version guard decisions and release tag used
 
-### vLLM Key Areas to Focus On
-
-When analyzing vLLM changes, pay special attention to these areas that typically
-require vLLM Ascend adaptation:
-
-<!-- BEGIN AUTO-MAINTAINED: key-areas -->
-1. **Platform Interface** (`vllm/platforms/`)
-   - New abstract methods — implement immediately; missing ones cause `TypeError: Can't
-     instantiate abstract class AscendPlatform` at runtime, not at import time, so they
-     won't surface until a test actually executes
-   - Method signature changes
-   - New platform capability flags
-
-2. **Worker / Model Runner** (`vllm/v1/worker/`, `vllm/v1/worker/gpu/model_runner.py`)
-   - New or removed parameters in `execute_model` or `load_model` — vllm-ascend heavily
-     overrides these; signature mismatches cause `TypeError` during inference
-   - New lifecycle methods
-   - Changes to model runner initialization
-
-3. **Attention** (`vllm/model_executor/layers/attention/`, `vllm/v1/attention/`)
-   - New parameters in `forward()` — vllm-ascend registers its own backend; interface
-     changes require updating both registration and implementation
-   - Changes to attention backend interface
-   - MLA-specific updates
-
-4. **MoE** (`vllm/model_executor/layers/fused_moe/`)
-   - FusedMoE layer signature changes — vllm-ascend has Ascend-specific MoE kernels
-     that call into this interface
-   - Router interface changes
-   - Activation function changes
-
-5. **Config** (`vllm/config*.py`)
-   - Field renames or moves between config classes — vllm-ascend reads config fields
-     directly in many places; a rename causes `AttributeError` everywhere it's accessed
-   - New required fields
-   - Constructor changes
-
-6. **Distributed** (`vllm/distributed/`)
-   - Changes to collective op interfaces
-   - KV transfer protocol changes
-   - Device communicator updates
-
-7. **Speculative Decoding** (`vllm/v1/worker/gpu/spec_decode/`, `vllm/config/speculative.py`)
-   - Import path changes
-   - Config field changes
-   - New proposer interface methods — vllm-ascend has MTP and Eagle proposer implementations
-
-8. **Compilation** (`vllm/compilation/`)
-   - Pass manager interface changes
-   - New required passes
-   - Changes to how passes register
-
-9. **Quantization** (`vllm/model_executor/layers/quantization/`)
-   - Quantization config changes
-   - compress-tensor method changes
-
-10. **Models** (`vllm/model_executor/models/`)
-    - Changes to model forward signatures — when vllm-ascend overrides a model's
-      forward method, signature changes break inference
-    - New model architectures
-<!-- END AUTO-MAINTAINED: key-areas -->
+For adapt mode, `review.md` should include:
+- Static diff review result
+- Guard, signature, import, and config-access checks
+- Remaining risks or explicit "no known issues"
 
 ---
 
-## vllm-ascend Key File Locations
+## Code structure routing reference
 
-<!-- BEGIN AUTO-MAINTAINED: file-locations -->
-| Project | Path |
-|---------|------|
-| vLLM Ascend version compatibility | `vllm-ascend/docs/source/conf.py` |
-| vLLM Ascend source code | `vllm_ascend/` |
-| **Core Modules** | |
-| Ascend-specific attention | `vllm_ascend/attention/` |
-| Ascend-specific executor | `vllm_ascend/worker/` |
-| Ascend-specific ops | `vllm_ascend/ops/` |
-| Scheduling extensions | `vllm_ascend/core/` |
-| Device abstractions | `vllm_ascend/device/` |
-| Device memory allocator | `vllm_ascend/device_allocator/` |
-| Custom CANN ops (placeholder dir) | `vllm_ascend/_cann_ops_custom/` |
-| **Specialized Implementations** | |
-| Ascend 310P specific | `vllm_ascend/_310p/` |
-| EPLB load balancing | `vllm_ascend/eplb/` |
-| XLite compiler | `vllm_ascend/xlite/` |
-| **Compilation & Fusion** | |
-| Graph fusion pass manager | `vllm_ascend/compilation/` |
-| Compilation passes | `vllm_ascend/compilation/passes/` |
-| **Quantization** | |
-| Quantization methods | `vllm_ascend/quantization/` |
-| ModelSlim integration | `vllm_ascend/quantization/modelslim_config.py` |
-| **Distributed & KV Cache** | |
-| KV transfer | `vllm_ascend/distributed/kv_transfer/` |
-| Device communicators | `vllm_ascend/distributed/device_communicators/` |
-| KV cache offload (CPU/NPU) | `vllm_ascend/kv_offload/` |
-| **Speculative Decoding** | |
-| Eagle proposer (also dispatches MTP via `method="mtp"`) | `vllm_ascend/spec_decode/eagle_proposer.py` |
-| **Sampling & LoRA** | |
-| Sampler, rejection sampler, penalties | `vllm_ascend/sample/` |
-| LoRA NPU ops | `vllm_ascend/lora/` |
-| **Plugin & Model Loading** | |
-| Upstream patches (platform / worker) | `vllm_ascend/patch/` |
-| Custom model loader | `vllm_ascend/model_loader/` |
-| **Profiling** | |
-| Torch NPU profiler wrapper | `vllm_ascend/profiler/` |
-| **Utility Modules** | |
-| Common utilities | `vllm_ascend/utils.py` |
-| Ascend config | `vllm_ascend/ascend_config.py` |
-| Environment variables | `vllm_ascend/envs.py` |
-<!-- END AUTO-MAINTAINED: file-locations -->
+The vLLM key areas, vllm-ascend key file locations, and File Mapping Table live in
+`reference/code-structure-guide.md`.
 
----
-
-## File Mapping Table
-
-Use this table after identifying a changed upstream symbol. It points to likely
-vllm-ascend locations, not guaranteed locations.
-
-<!-- BEGIN AUTO-MAINTAINED: file-mapping -->
-| vLLM upstream path | vllm-ascend path | What to check |
-|:---|:---|:---|
-| `vllm/platforms/` | `vllm_ascend/platform.py` | Abstract methods, platform capabilities |
-| `vllm/v1/worker/` | `vllm_ascend/worker/` | Worker lifecycle, model loading, `execute_model` |
-| `vllm/v1/worker/gpu/model_runner.py` | `vllm_ascend/worker/model_runner_v1.py`, `vllm_ascend/worker/v2/model_runner.py` | Runner initialization and execution |
-| `vllm/v1/attention/` | `vllm_ascend/attention/` | Backend interface and metadata |
-| `vllm/model_executor/layers/attention/` | `vllm_ascend/attention/`, `vllm_ascend/ops/mm_encoder_attention.py` | Attention wrappers and kernels |
-| `vllm/model_executor/layers/fused_moe/` | `vllm_ascend/ops/fused_moe/` | MoE kernel interface, router, experts |
-| `vllm/distributed/` | `vllm_ascend/distributed/` | Collective ops, TP/PP, KV transfer |
-| `vllm/config*.py` | `vllm_ascend/ascend_config.py`, plus call sites under `vllm_ascend/` | Config fields and constructor args |
-| `vllm/compilation/` | `vllm_ascend/compilation/` | Passes, fusion rules, registration |
-| `vllm/model_executor/models/` | `vllm_ascend/models/` | Model forward signatures and loaders |
-| `vllm/model_executor/layers/quantization/` | `vllm_ascend/quantization/` | Quantization methods and kernels |
-| `vllm/model_executor/layers/layernorm.py` | `vllm_ascend/ops/layernorm.py` | LayerNorm op interface |
-| `vllm/model_executor/custom_op.py` | `vllm_ascend/ops/` | Custom op registration |
-| `vllm/v1/worker/gpu/spec_decode/` | `vllm_ascend/spec_decode/` | MTP/Eagle proposer interfaces |
-| `vllm/lora/` | `vllm_ascend/lora/` | LoRA op interface, punica integration |
-| `vllm/v1/sample/`, `vllm/model_executor/layers/sampler.py` | `vllm_ascend/sample/` | Sampler, rejection sampler, penalty kernels |
-| `vllm/model_executor/model_loader/` | `vllm_ascend/model_loader/` | Model loading hooks, weight format adapters |
-| `requirements*`, `constraints*`, `pyproject.toml`, `setup.py`, `setup.cfg` | Matching dependency files in vllm-ascend | Dependency versions |
-<!-- END AUTO-MAINTAINED: file-mapping -->
+Use that file as an on-demand routing reference when changed upstream paths or
+symbols need mapping to vllm-ascend code. It is intentionally separate from this
+workflow guide because it describes relatively stable code structure and can be
+refreshed independently.

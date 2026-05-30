@@ -2,17 +2,18 @@
 """Push the main2main patch as a new branch and open a GitHub pull request.
 
 Steps:
-  1. Find the highest-numbered *.patch file in STEPS_DIR.
-  2. Create a new local branch "update/main2main-<timestamp>" in ascend_path.
-  3. Apply the patch with ``git apply``.
+  1. Stash any uncommitted working-tree changes in the ascend repo.
+  2. Create a new local branch "update/main2main-<timestamp>" from the
+     current branch (which should be at the original base commit).
+  3. Apply the final_target.patch file with ``git apply``.
   4. Commit the applied changes.
   5. Push the branch to origin.
   6. Open a PR via ``gh pr create``, using final_summary.md as the description.
+  7. Restore the original branch and pop the stash.
 
 Environment variables (all overridable by CLI flags):
   PUSH_TO_GITHUB  — must be "true" to do anything
-  GITHUB_REPO     — target repo "owner/name" (optional; gh infers from remote)
-  STEPS_DIR       — directory that contains N.patch files
+  GITHUB_REPO     — target repo "owner/name" (required)
 """
 from __future__ import annotations
 
@@ -25,60 +26,75 @@ from pathlib import Path
 
 from main2main_flow.utils import run_git
 
-DEFAULT_STEPS_DIR = Path("/tmp/main2main/steps")
-DEFAULT_SUMMARY_PATH = Path("output/final_summary.md")
+DEFAULT_WORKSPACE_DIR = Path(__file__).parent.parent.parent.parent / "workspace"
 
 
 def push_and_create_pr(
     ascend_path: Path,
     github_repo: str,
-    steps_dir: Path = DEFAULT_STEPS_DIR,
-    summary_path: Path = DEFAULT_SUMMARY_PATH,
+    patch_path: Path | None = None,
+    summary_path: Path | None = None,
+    workspace_dir: Path = DEFAULT_WORKSPACE_DIR,
 ) -> str:
-    """Create a branch, apply the last patch, push, and open a GitHub PR.
+    """Create a branch, apply the final patch, push, and open a GitHub PR.
 
-    Returns the PR URL, or "" when no patch file is found.
+    Returns the PR URL, or "" when the patch file is missing.
     Raises subprocess.CalledProcessError on git/gh failure.
     """
-    # 1. Find the last patch file by numeric stem (1.patch < 2.patch < N.patch)
-    patch_files = sorted(
-        steps_dir.glob("*.patch"),
-        key=lambda p: int(p.stem) if p.stem.isdigit() else -1,
-    )
-    if not patch_files:
-        print("[push] No patch files found in STEPS_DIR, skipping PR.", file=sys.stderr)
+    if not github_repo:
+        print("[push] GITHUB_REPO is empty, cannot create PR.", file=sys.stderr)
         return ""
 
-    last_patch = patch_files[-1].resolve()
-    print(f"[push] Applying patch: {last_patch}")
+    patch_file = patch_path or workspace_dir / "final_target.patch"
+    if not patch_file.exists():
+        print(f"[push] Patch file not found: {patch_file}, skipping PR.", file=sys.stderr)
+        return ""
 
-    # 2. Create a new branch
+    summary_file = summary_path or workspace_dir / "final_summary.md"
+    if not summary_file.exists():
+        print(f"[push] Summary file not found: {summary_file}, using empty description.", file=sys.stderr)
+        pr_description = ""
+    else:
+        pr_description = summary_file.read_text(encoding="utf-8")
+
+    patch_file = patch_file.resolve()
+    print(f"[push] Applying patch: {patch_file}")
+
+    original_branch = run_git(ascend_path, "branch", "--show-current").strip()
+    if not original_branch:
+        original_branch = run_git(ascend_path, "rev-parse", "--short", "HEAD").strip()
+
+    has_stash = run_git(ascend_path, "stash", "list").strip() != ""
+    stash_ref = ""
+
+    diff_output = run_git(ascend_path, "diff", "--stat").strip()
+    if diff_output:
+        print("[push] Stashing uncommitted working-tree changes...")
+        run_git(ascend_path, "stash", "push", "-u", "-m", "main2main-auto-stash")
+        stash_ref = "stash@{0}"
+
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     branch = f"update/main2main-{timestamp}"
     run_git(ascend_path, "checkout", "-b", branch)
-    print(f"[push] Created branch '{branch}'.")
+    print(f"[push] Created branch '{branch}' from '{original_branch}'.")
 
-    # 3. Apply the patch
-    run_git(ascend_path, "apply", str(last_patch))
+    run_git(ascend_path, "apply", str(patch_file))
 
-    # 4. Stage all changes introduced by the patch and commit
     run_git(ascend_path, "add", "-A")
     commit_msg = f"main2main: sync vllm upstream ({timestamp})"
     run_git(ascend_path, "commit", "-s", "-m", commit_msg)
     print(f"[push] Committed patch as '{commit_msg}'.")
 
-    # 5. Push branch to origin
     run_git(ascend_path, "push", "origin", branch)
     print(f"[push] Pushed branch '{branch}' to origin.")
 
-    # 6. Create the PR; use final_summary.md (written by the summary crew) as description
-    pr_description = summary_path.read_text(encoding="utf-8")
-
+    base_branch = original_branch if original_branch != branch else "main"
     gh_cmd = [
         "gh", "pr", "create",
         "--title", commit_msg,
         "--body", pr_description,
         "--head", branch,
+        "--base", base_branch,
         "--repo", github_repo,
     ]
 
@@ -87,23 +103,32 @@ def push_and_create_pr(
     )
     pr_url = result.stdout.strip()
     print(f"[push] PR created: {pr_url}")
+
+    run_git(ascend_path, "checkout", original_branch)
+    print(f"[push] Restored original branch '{original_branch}'.")
+
+    if stash_ref:
+        run_git(ascend_path, "stash", "pop")
+        print("[push] Restored stashed working-tree changes.")
+
     return pr_url
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Apply the last main2main patch to a new branch and open a GitHub PR."
+        description="Apply the main2main final patch to a new branch and open a GitHub PR."
     )
     parser.add_argument("--ascend-path", type=Path, required=True,
                         help="Local vllm-ascend repository path.")
-    parser.add_argument("--steps-dir", type=Path,
-                        default=Path(os.getenv("STEPS_DIR", "/tmp/main2main/steps")),
-                        help="Directory containing N.patch files (default: $STEPS_DIR).")
+    parser.add_argument("--patch-path", type=Path, default=None,
+                        help="Path to final_target.patch (default: workspace/final_target.patch).")
+    parser.add_argument("--summary-path", type=Path, default=None,
+                        help="Markdown file used as PR description (default: workspace/final_summary.md).")
+    parser.add_argument("--workspace-dir", type=Path, default=DEFAULT_WORKSPACE_DIR,
+                        help="Workspace directory containing final_target.patch and final_summary.md.")
     parser.add_argument("--github-repo", default=os.getenv("GITHUB_REPO"),
                         required=not os.getenv("GITHUB_REPO"),
                         help="Target repo in owner/name form, e.g. vllm-project/vllm-ascend (or set $GITHUB_REPO).")
-    parser.add_argument("--summary-path", type=Path, default=None,
-                        help="Markdown file used as PR description.")
     parser.add_argument("--push", action="store_true",
                         default=os.getenv("PUSH_TO_GITHUB", "false").lower() == "true",
                         help="Actually push and create PR (default: $PUSH_TO_GITHUB).")
@@ -115,9 +140,10 @@ def main() -> None:
 
     push_and_create_pr(
         ascend_path=args.ascend_path,
-        steps_dir=args.steps_dir,
-        github_repo=args.github_repo,
+        patch_path=args.patch_path,
         summary_path=args.summary_path,
+        workspace_dir=args.workspace_dir,
+        github_repo=args.github_repo,
     )
 
 
