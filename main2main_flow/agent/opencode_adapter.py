@@ -6,28 +6,58 @@ All JSON events are printed to console and logged to step_dir.
 from __future__ import annotations
 
 import json
+import os
 import queue
+import shutil
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from main2main_flow.utils import ts_print
+
 _PROMPT_PATH = Path(__file__).parent / "prompt.md"
+_REFERENCE_DIR = Path(__file__).parent.parent / "reference"
 
 _TIMEOUT_MINUTES = 30
 _STALE_SECONDS = 300
 _MAX_STALE_RETRIES = 3
+_DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
 
+# Verify opencode is available at import time
+if not shutil.which("opencode"):
+    raise SystemExit(
+        "opencode CLI not found. Install it with:\n"
+        "  curl -fsSL https://opencode.ai/install | bash\n"
+        "Or: npm install -g opencode-ai"
+    )
 
-# ── prompt loader ─────────────────────────────────────────────────────────────
+# ── prompt builder ─────────────────────────────────────────────────────────────
 
 def _build_prompt(inputs: dict[str, Any]) -> str:
     template = _PROMPT_PATH.read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
+
+    mode = inputs.get("mode", "adapt")
+    code_structure = _load_ref("code-structure-guide.md")
+    if mode == "fix":
+        ref_content = _load_ref("diagnosis-guide.md") + "\n\n" + _load_ref("error-pattern-examples.md") + "\n\n" + code_structure
+    else:
+        ref_content = _load_ref("adapt-guide.md") + "\n\n" + code_structure
+
+    ctx["reference_content"] = ref_content
     return template.format_map(ctx)
+
+
+def _load_ref(filename: str) -> str:
+    path = _REFERENCE_DIR / filename
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return ""
 
 
 def _build_continue_prompt(base_prompt: str, inputs: dict[str, Any], retry: int) -> str:
@@ -100,14 +130,14 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
 
         if reason == "stale_timeout" and attempt < _MAX_STALE_RETRIES:
             retry = attempt + 1
-            print(f"\n[opencode] retrying after stale timeout ({retry}/{_MAX_STALE_RETRIES})", flush=True)
+            ts_print(f"\n[opencode] retrying after stale timeout ({retry}/{_MAX_STALE_RETRIES})", flush=True)
             prompt = _build_continue_prompt(base_prompt, inputs, retry)
             continue
 
         if stderr_path and stderr_path.exists():
             stderr_content = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
             if stderr_content:
-                print(f"\n[opencode] stderr tail:\n{stderr_content}", flush=True)
+                ts_print(f"\n[opencode] stderr tail:\n{stderr_content}", flush=True)
         break
 
     result = _build_result(step_path, inputs.get("ascend_path", ""), "".join(all_lines))
@@ -121,17 +151,18 @@ _StopReason = Literal["stale_timeout", "total_timeout"]
 
 def _print_prompt(prompt: str, attempt: int) -> None:
     title = "TEAM LEAD PROMPT" if attempt == 0 else f"TEAM LEAD CONTINUE PROMPT #{attempt}"
-    print(f"\n{'═'*60}")
-    print(title)
-    print(f"{'═'*60}")
-    print(prompt)
-    print(f"{'═'*60}\n")
+    ts_print(f"\n{'═'*60}")
+    ts_print(title)
+    ts_print(f"{'═'*60}")
+    ts_print(prompt)
+    ts_print(f"{'═'*60}\n")
 
 
 def _log_prompt(prompt: str, attempt: int, log_path: Path) -> None:
     title = "TEAM LEAD PROMPT" if attempt == 0 else f"TEAM LEAD CONTINUE PROMPT #{attempt}"
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}"
     with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(f"{'═'*60}\n{title}:\n{'═'*60}\n{prompt}\n{'═'*60}\n\n")
+        fh.write(f"[{ts}] {'═'*60}\n[{ts}] {title}:\n[{ts}] {'═'*60}\n{prompt}\n[{ts}] {'═'*60}\n\n")
 
 
 def _run_once(
@@ -145,6 +176,7 @@ def _run_once(
         [
             "opencode", "run",
             "--format", "json",
+            "--model", _DEFAULT_MODEL,
             "--dangerously-skip-permissions",
             prompt,
         ],
@@ -180,12 +212,12 @@ def _run_once(
             except queue.Empty:
                 now = time.monotonic()
                 if now > deadline:
-                    print(f"\n[opencode] TOTAL TIMEOUT ({_TIMEOUT_MINUTES}min), killing process", flush=True)
+                    ts_print(f"\n[opencode] TOTAL TIMEOUT ({_TIMEOUT_MINUTES}min), killing process", flush=True)
                     proc.kill()
                     stop_reason = "total_timeout"
                     break
                 if now - last_output_time > _STALE_SECONDS:
-                    print(f"\n[opencode] STALE TIMEOUT ({_STALE_SECONDS}s no output), killing process", flush=True)
+                    ts_print(f"\n[opencode] STALE TIMEOUT ({_STALE_SECONDS}s no output), killing process", flush=True)
                     proc.kill()
                     stop_reason = "stale_timeout"
                     break
@@ -255,19 +287,19 @@ def _print_event(line: str, state: _EventState) -> None:
             state._tool_by_call[call_id] = tool
             if tool == "Agent":
                 agent_name = inp.get("name", "") or inp.get("subagent_type", "?")
-                print(f"\n{'━'*60}", flush=True)
-                print(f"▶ [Team: {agent_name}] spawning ({tool})", flush=True)
-                print(f"{'━'*60}", flush=True)
+                ts_print(f"\n{'━'*60}", flush=True)
+                ts_print(f"▶ [Team: {agent_name}] spawning ({tool})", flush=True)
+                ts_print(f"{'━'*60}", flush=True)
             elif tool == "TeamCreate":
                 team_name = inp.get("team_name", "?")
-                print(f"\n▶ [TeamLead] creating team '{team_name}'", flush=True)
+                ts_print(f"\n▶ [TeamLead] creating team '{team_name}'", flush=True)
             elif tool == "SendMessage":
                 to = inp.get("to", "?")
                 summary = inp.get("summary", "")
-                print(f"\n▶ [TeamLead] → {to}: {summary}", flush=True)
+                ts_print(f"\n▶ [TeamLead] → {to}: {summary}", flush=True)
             else:
                 brief = json.dumps(inp, ensure_ascii=False)[:200]
-                print(f"\n[TeamLead: {tool}] ← {brief}", flush=True)
+                ts_print(f"\n[TeamLead: {tool}] ← {brief}", flush=True)
 
         elif status == "completed":
             output = st.get("output", "")
@@ -276,16 +308,17 @@ def _print_event(line: str, state: _EventState) -> None:
                 label = f"Team: {agent}" if agent else "TeamLead"
                 # Truncate very long outputs for display
                 display = output if len(output) <= 3000 else output[:3000] + "\n... [truncated]"
-                print(f"\n{'─'*60}\n[{label}] output:\n{display}\n{'─'*60}", flush=True)
+                ts_print(f"\n{'─'*60}\n[{label}] output:\n{display}\n{'─'*60}", flush=True)
 
 
 # ── event logger ─────────────────────────────────────────────────────────────
 
 def _log_event(line: str, state: _EventState, fh: Any) -> None:  # noqa: ARG001
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}"
     try:
         ev = json.loads(line)
     except json.JSONDecodeError:
-        fh.write(line)
+        fh.write(f"[{ts}] {line}")
         return
 
     t = ev.get("type")
@@ -294,16 +327,16 @@ def _log_event(line: str, state: _EventState, fh: Any) -> None:  # noqa: ARG001
     if t == "text":
         text = part.get("text", "")
         if text:
-            fh.write(text)
+            fh.write(f"[{ts}] {text}")
 
     elif t == "tool_use":
         tool = part.get("tool", "")
         st = part.get("state", {})
         inp = json.dumps(st.get("input", {}), ensure_ascii=False)
-        fh.write(f"\n[TeamLead: {tool}] ← {inp[:500]}\n")
+        fh.write(f"\n[{ts}] [TeamLead: {tool}] ← {inp[:500]}\n")
         output = st.get("output", "")
         if output:
-            fh.write(f"{'─'*60}\n[output]\n{output[:4000]}\n{'─'*60}\n")
+            fh.write(f"[{ts}] {'─'*60}\n[{ts}] [output]\n[{ts}] {output[:4000]}\n[{ts}] {'─'*60}\n")
 
     fh.flush()
 

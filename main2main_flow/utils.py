@@ -1,13 +1,22 @@
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def ts_print(*args, **kwargs) -> None:
+    """Print with [HH:MM:SS.mmm] timestamp prefix."""
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}"
+    print(f"[{ts}]", *args, **kwargs)
 
 UpgradeCompleted = "UpgradeCompleted"
 UpgradeFailed = "UpgradeFailed"
 HasCommit = "HasCommit"
 HasNoCommit = "HasNoCommit"
 
-WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
+import os as _os
+_ws_env = _os.environ.get("MAIN2MAIN_WORKSPACE", "")
+WORKSPACE_DIR = Path(_ws_env) if _ws_env else (Path(__file__).parent.parent / "workspace")
 DETECT_FILE = "detect.json"
 STEPS_FILE = "steps.json"
 STEPS_DIR = "steps"
@@ -25,10 +34,13 @@ def run_git(repo: Path | str, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=str(repo),
-        check=True,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        cmd = " ".join(args)
+        ts_print(f"[git] FAILED: git {cmd}\n{result.stderr.strip()}", flush=True)
+        result.check_returncode()
     return result.stdout
 
 
@@ -37,7 +49,7 @@ def is_git_url(path: str) -> bool:
 
 
 def clone_repo(url: str, target: str) -> None:
-    print(f"[init] Cloning {url} → {target}")
+    ts_print(f"[init] Cloning {url} → {target}")
     subprocess.run(["git", "clone", url, target], check=True)
 
 
