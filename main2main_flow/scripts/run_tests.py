@@ -191,13 +191,19 @@ def _detect_cards(run_cmd) -> tuple[int, str]:
 # =============================================================================
 
 def _run_checked(cmd: list[str], cwd: Path, label: str) -> None:
-    ts_print(f"  {label} ... ", end="", flush=True)
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    if r.returncode != 0:
-        ts_print("FAILED")
-        ts_print(r.stderr.strip(), file=sys.stderr)
-        sys.exit(r.returncode)
-    ts_print("OK")
+    ts_print(f"  {label} ...", flush=True)
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    captured: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        captured.append(line)
+        ts_print(f"    {line}", end="", flush=True)
+    rc = proc.wait()
+    if rc != 0:
+        ts_print(f"  {label} FAILED (exit {rc})", file=sys.stderr, flush=True)
+        sys.exit(rc)
+    ts_print(f"  {label} OK", flush=True)
 
 
 def _ensure_repo(path: Path, remote_url: str) -> bool:
@@ -231,19 +237,30 @@ def _pip_install(repo_path: Path, extra_env: dict | None = None,
     if os.environ.get("SKIP_PIP_INSTALL", "false").lower() == "true":
         ts_print(f"  SKIP_PIP_INSTALL=true, skipping pip install for {repo_path.name}")
         return
-    env = {"PIP_EXTRA_INDEX_URL": "https://mirrors.huaweicloud.com/ascend/repos/pypi"}
+    # uv reads UV_INDEX_URL / UV_EXTRA_INDEX_URL / UV_INDEX_STRATEGY etc. from the
+    # environment (set by schedule_main2main.yaml). pip fallback uses pip.conf set
+    # by _setup_mirrors. Only forward caller-provided extra_env (e.g. VLLM_TARGET_DEVICE).
+    env_prefix = ""
     if extra_env:
-        env.update(extra_env)
-    env_prefix = " ".join(f"{k}={v}" for k, v in env.items()) + " "
+        env_prefix = " ".join(f"{k}={v}" for k, v in extra_env.items()) + " "
     vflag = "-v " if verbose else ""
+
+    use_uv = shutil.which("uv") is not None
+    if use_uv:
+        installer = "uv pip install --no-build-isolation"
+        label_prefix = "uv pip install"
+    else:
+        installer = "pip install"
+        label_prefix = "pip install"
+
     cmds = []
     if requirements:
-        cmds.append(f"pip install -r {shlex.quote(requirements)}")
+        cmds.append(f"{installer} -r {shlex.quote(requirements)}")
     if not skip_editable:
-        cmds.append(f"{env_prefix}pip install {vflag}-e .")
+        cmds.append(f"{installer} {vflag}-e .")
     for i, cmd in enumerate(cmds):
-        _run_checked(["sh", "-c", f"cd {shlex.quote(str(repo_path))} && {cmd}"],
-                     repo_path, f"pip install ({repo_path.name}) [{i+1}/{len(cmds)}]")
+        _run_checked(["sh", "-c", f"cd {shlex.quote(str(repo_path))} && {env_prefix}{cmd}"],
+                     repo_path, f"{label_prefix} ({repo_path.name}) [{i+1}/{len(cmds)}]")
 
 
 def setup_env(vllm_path: Path, vllm_commit: str, ascend_path: Path,
