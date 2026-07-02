@@ -247,7 +247,7 @@ def _pip_install(repo_path: Path, extra_env: dict | None = None,
 
     use_uv = shutil.which("uv") is not None
     if use_uv:
-        installer = "uv pip install --no-build-isolation"
+        installer = "uv pip install"
         label_prefix = "uv pip install"
     else:
         installer = "pip install"
@@ -257,7 +257,7 @@ def _pip_install(repo_path: Path, extra_env: dict | None = None,
     if requirements:
         cmds.append(f"{installer} -r {shlex.quote(requirements)}")
     if not skip_editable:
-        cmds.append(f"{installer} {vflag}-e .")
+        cmds.append(f"{installer} {vflag}.")
     for i, cmd in enumerate(cmds):
         _run_checked(["sh", "-c", f"cd {shlex.quote(str(repo_path))} && {env_prefix}{cmd}"],
                      repo_path, f"{label_prefix} ({repo_path.name}) [{i+1}/{len(cmds)}]")
