@@ -33,8 +33,8 @@ covers how to install and run.
 pip install -e .
 ```
 
-This registers the `kickoff` console script. (`uv sync` also works if you use
-[`uv`](https://docs.astral.sh/uv/); the repo already ships a `uv.lock`.)
+(`uv sync` also works if you use [`uv`](https://docs.astral.sh/uv/); the repo
+already ships a `uv.lock`.)
 
 ## Run
 
@@ -116,24 +116,26 @@ workspace/
 ## Project layout
 
 ```
-src/main2main_flow/
-├── flow.py              # CrewAI Flow: nodes, routing, retry loop
-├── main.py              # `kickoff` / `plot` CLI entrypoints
-├── utils.py             # filename constants + git helpers
+main.py                               # convenience entry point
+main2main_flow/
+├── cli.py                            # CLI (kickoff, plot, etc.)
+├── flow.py                           # Flow: nodes, routing, retry loop
+├── utils.py                          # filename constants + git helpers
 ├── agent/
-│   ├── opencode_adapter.py   # spawns `opencode run`, parses JSONL events
-│   └── prompt.md             # single-agent task prompt
-├── reference/           # knowledge base the agent reads at runtime
+│   ├── opencode_adapter.py           # spawns `opencode run`, parses JSONL events
+│   └── prompt.md                     # single-agent task prompt
+├── reference/                        # knowledge base the agent reads at runtime
 │   ├── adapt-guide.md
 │   ├── code-structure-guide.md
 │   ├── diagnosis-guide.md
 │   └── error-pattern-examples.md
-└── scripts/             # deterministic helpers (no AI)
+└── scripts/                          # deterministic helpers (no AI)
     ├── detect_commits.py
     ├── plan_steps.py
     ├── update_commit_reference.py
     ├── pre_ci_check.py
     ├── run_tests.py
+    ├── ci_log_summary.py
     └── push_to_github.py
 ```
 

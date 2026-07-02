@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Run main2main tests with resource-aware parallel scheduling.
 
-Given the total NPU cards available on the target machine, this script:
-1. Maps each suite to its card requirement
-2. Schedules suites into rounds (greedy bin-packing); suites in the same round
-   run in parallel, rounds run sequentially
-3. Aggregates per-suite results into a single result JSON
+Runs pytest on individual test files (matching vllm-ascend's PR CI pattern),
+scheduling them into rounds based on NPU card requirements inferred from the
+test path (e.g. one_card → 1, two_card → 2, four_card → 4).
+
+Both local and remote executions parallelize tests across the available NPU
+cards within each round: a one_card test takes 1 card, so up to ``total_cards``
+of them run concurrently; a two_card test takes 2, so two can share a 4-card
+runner. Each test gets its own ``ASCEND_RT_VISIBLE_DEVICES`` so processes do not
+collide on the same device. Pass ``--sequential`` to force one-test-per-round.
 
 Execution targets:
   - Local:       run directly (no --remote)
@@ -15,8 +19,8 @@ Execution targets:
 Usage:
   python3 run_tests.py --vllm-path /workspace/vllm --vllm-commit abc1234 \\
       --ascend-path /workspace/vllm-ascend --ascend-commit def5678 \\
-      --step-id 0 --total-cards 8 --suite e2e-singlecard-light
-  python3 run_tests.py ... --remote env --dry-run
+      --step-id 0 --total-cards 8 --test tests/e2e/pull_request/light/one_card/test_foo.py
+  python3 run_tests.py ... --test tests/e2e/pull_request/light/ --remote env --dry-run
 """
 from __future__ import annotations
 
@@ -24,7 +28,6 @@ import argparse
 import concurrent.futures
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -32,38 +35,30 @@ import sys
 import time
 from pathlib import Path
 
+from main2main_flow.utils import ts_print
+
 PASS_RESULTS = {"passed", "env_flake_pass"}
-DEFAULT_SUITES = ["e2e-singlecard-light"]
 DEFAULT_VLLM_REPO = "https://github.com/vllm-project/vllm.git"
 DEFAULT_ASCEND_REPO = "https://github.com/vllm-project/vllm-ascend.git"
 
 _SSH_OPTS = ["-o", "StrictHostKeyChecking=no"]
 
-# ---- suite -> cards ----
+# ---- test path → cards ----
 
-_SUITE_CARDS: dict[str, int] = {
-    "e2e-singlecard-light": 1, "e2e-2card-light": 2, "e2e-4card-light": 4,
-    "e2e-singlecard": 1, "e2e-multicard-2-cards": 2,
-    "e2e-multicard-4-cards": 4, "e2e-upstream_singlecard": 1,
-}
-_SUITE_CARDS_FALLBACK: list[tuple[str, int]] = [
-    (r"singlecard|single.card|1card|1.cards?|1-card", 1),
-    (r"2card|2.cards?|2-card|two.card", 2),
-    (r"4card|4.cards?|4-card|four.card", 4),
-    (r"8card|8.cards?|8-card|eight.card", 8),
+_CARD_PATTERNS: list[tuple[str, int]] = [
+    ("one_card", 1), ("singlecard", 1), ("single_card", 1),
+    ("two_card", 2), ("2.cards", 2), ("2-card", 2),
+    ("four_card", 4), ("4.cards", 4), ("4-card", 4),
+    ("eight_card", 8), ("8.cards", 8), ("8-card", 8),
+    ("multi.node", 8),
 ]
-_MOCK_DURATIONS: dict[str, int] = {
-    "e2e-singlecard-light": 1111, "e2e-2card-light": 477, "e2e-4card-light": 365,
-    "e2e-singlecard": 3200, "e2e-multicard-2-cards": 2400, "e2e-multicard-4-cards": 3000,
-}
 
 
-def _suite_cards(suite_name: str) -> int:
-    if suite_name in _SUITE_CARDS:
-        return _SUITE_CARDS[suite_name]
-    lower = suite_name.lower()
-    for pattern, cards in _SUITE_CARDS_FALLBACK:
-        if re.search(pattern, lower):
+def _test_cards(test_path: str) -> int:
+    """Infer required NPU cards from the test file path."""
+    lower = test_path.lower()
+    for pattern, cards in _CARD_PATTERNS:
+        if pattern in lower:
             return cards
     return 1
 
@@ -72,35 +67,39 @@ def _suite_cards(suite_name: str) -> int:
 # scheduling
 # =============================================================================
 
-def _schedule_rounds(suite_names: list[str], total_cards: int) -> list[list[str]]:
-    ordered = sorted(suite_names, key=lambda s: (-_suite_cards(s), s))
+def _schedule_rounds(tests: list[str], total_cards: int) -> list[list[str]]:
+    ordered = sorted(tests, key=lambda t: (-_test_cards(t), t))
     rounds: list[list[str]] = []
     usage: list[int] = []
-    for name in ordered:
-        need = _suite_cards(name)
+    for t in ordered:
+        need = _test_cards(t)
         if need > total_cards:
-            raise ValueError(f"Suite '{name}' requires {need} cards but only {total_cards} available")
+            raise ValueError(f"Test '{t}' requires {need} cards but only {total_cards} available")
         for i in range(len(rounds)):
             if usage[i] + need <= total_cards:
-                rounds[i].append(name)
+                rounds[i].append(t)
                 usage[i] += need
                 break
         else:
-            rounds.append([name])
+            rounds.append([t])
             usage.append(need)
     return rounds
 
 
-def _assign_devices(rounds: list[list[str]]) -> list[list[tuple[str, str]]]:
+def _assign_devices(rounds: list[list[str]],
+                    phy_ids: list[int] | None = None) -> list[list[tuple[str, str]]]:
+    if phy_ids is None:
+        max_round = max(sum(_test_cards(t) for t in rnd) for rnd in rounds) if rounds else 0
+        phy_ids = list(range(max_round))
     result: list[list[tuple[str, str]]] = []
     for rnd in rounds:
         assigned: list[tuple[str, str]] = []
-        next_dev = 0
-        for suite_name in rnd:
-            need = _suite_cards(suite_name)
-            devices = ",".join(str(i) for i in range(next_dev, next_dev + need))
-            next_dev += need
-            assigned.append((suite_name, devices))
+        offset = 0
+        for test in rnd:
+            need = _test_cards(test)
+            devices = ",".join(str(phy_ids[offset + i]) for i in range(need))
+            offset += need
+            assigned.append((test, devices))
         result.append(assigned)
     return result
 
@@ -113,9 +112,9 @@ def _resolve_remote(remote: str) -> tuple[str, str]:
     host = remote if "@" in remote else os.getenv("MAIN2MAIN_REMOTE_HOST", "")
     container = os.getenv("MAIN2MAIN_REMOTE_CONTAINER", "")
     if not host or not container:
-        print("Error: --remote used but MAIN2MAIN_REMOTE_HOST / _CONTAINER not set", file=sys.stderr)
+        ts_print("Error: --remote used but MAIN2MAIN_REMOTE_HOST / _CONTAINER not set", file=sys.stderr)
         sys.exit(1)
-    print(f"  Remote target: {host}  container: {container}")
+    ts_print(f"  Remote target: {host}  container: {container}")
     return host, container
 
 
@@ -128,13 +127,13 @@ def _ensure_container_running(host: str, container: str) -> None:
     check = _ssh(host, f"docker inspect -f '{{{{.State.Running}}}}' {cq}",
                  capture_output=True, text=True)
     if check.returncode != 0:
-        print(f"  Container {container} not found on {host}, will try to proceed anyway")
+        ts_print(f"  Container {container} not found on {host}, will try to proceed anyway")
         return
     if check.stdout.strip() == "true":
-        print(f"  Container {container} is already running")
+        ts_print(f"  Container {container} is already running")
         return
 
-    print(f"  Container {container} is stopped, starting ...", flush=True)
+    ts_print(f"  Container {container} is stopped, starting ...", flush=True)
     _ssh(host, f"docker start {cq}", capture_output=True, text=True)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
@@ -142,9 +141,9 @@ def _ensure_container_running(host: str, container: str) -> None:
         poll = _ssh(host, f"docker inspect -f '{{{{.State.Running}}}}' {cq}",
                     capture_output=True, text=True)
         if poll.stdout.strip() == "true":
-            print(f"  Container {container} is now running", flush=True)
+            ts_print(f"  Container {container} is now running", flush=True)
             return
-    print(f"  [warn] Container {container} did not become running within 60s", flush=True)
+    ts_print(f"  [warn] Container {container} did not become running within 60s", flush=True)
 
 
 def _sync_remote_dir(host: str, remote_dir: str, local_dir: Path) -> bool:
@@ -160,9 +159,31 @@ def _sync_remote_dir(host: str, remote_dir: str, local_dir: Path) -> bool:
         cmd = ["scp", "-r", *_SSH_OPTS, f"{host}:{remote_dir}/.", str(local_dir) + "/"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"  [ERROR] Failed to sync: {result.stderr.strip()}", flush=True)
+        ts_print(f"  [ERROR] Failed to sync: {result.stderr.strip()}", flush=True)
         return False
     return True
+
+
+# =============================================================================
+# NPU auto-detection
+# =============================================================================
+
+def _detect_cards(run_cmd) -> tuple[int, str]:
+    visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+    if visible:
+        ids = [s.strip() for s in visible.split(",") if s.strip().isdigit()]
+        if ids:
+            return len(ids), ",".join(ids)
+    result = run_cmd(
+        "ls /dev/davinci[0-9]* 2>/dev/null | sed 's/.*davinci//' | sort -n"
+    )
+    ids = []
+    for token in result.stdout.strip().split():
+        try:
+            ids.append(str(int(token)))
+        except ValueError:
+            pass
+    return len(ids), ",".join(ids) if ids else "unknown"
 
 
 # =============================================================================
@@ -170,23 +191,23 @@ def _sync_remote_dir(host: str, remote_dir: str, local_dir: Path) -> bool:
 # =============================================================================
 
 def _run_checked(cmd: list[str], cwd: Path, label: str) -> None:
-    print(f"  {label} ... ", end="", flush=True)
+    ts_print(f"  {label} ... ", end="", flush=True)
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if r.returncode != 0:
-        print("FAILED")
-        print(r.stderr.strip(), file=sys.stderr)
+        ts_print("FAILED")
+        ts_print(r.stderr.strip(), file=sys.stderr)
         sys.exit(r.returncode)
-    print("OK")
+    ts_print("OK")
 
 
 def _ensure_repo(path: Path, remote_url: str) -> bool:
     if path.exists():
         if not (path / ".git").exists():
-            print(f"  {path} exists but is not a git repo, removing ... ", end="", flush=True)
+            ts_print(f"  {path} exists but is not a git repo, removing ... ", end="", flush=True)
             shutil.rmtree(path)
-            print("OK")
+            ts_print("OK")
         else:
-            _run_checked(["git", "fetch", "--tags"], path, "fetch")
+            _run_checked(["git", "fetch", "--tags", "--force"], path, "fetch")
             return False
     path.parent.mkdir(parents=True, exist_ok=True)
     _run_checked(["git", "clone", remote_url, str(path)], path, "clone")
@@ -195,6 +216,7 @@ def _ensure_repo(path: Path, remote_url: str) -> bool:
 
 _MIRROR_CMDS: list[str] = [
     "pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple",
+    '''git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"''',
 ]
 
 
@@ -206,6 +228,9 @@ def _setup_mirrors() -> None:
 def _pip_install(repo_path: Path, extra_env: dict | None = None,
                  requirements: str | None = None, verbose: bool = False,
                  skip_editable: bool = False) -> None:
+    if os.environ.get("SKIP_PIP_INSTALL", "false").lower() == "true":
+        ts_print(f"  SKIP_PIP_INSTALL=true, skipping pip install for {repo_path.name}")
+        return
     env = {"PIP_EXTRA_INDEX_URL": "https://mirrors.huaweicloud.com/ascend/repos/pypi"}
     if extra_env:
         env.update(extra_env)
@@ -226,25 +251,28 @@ def setup_env(vllm_path: Path, vllm_commit: str, ascend_path: Path,
               vllm_remote: str = DEFAULT_VLLM_REPO,
               ascend_remote: str = DEFAULT_ASCEND_REPO) -> None:
     _setup_mirrors()
-    print("=== Setup vLLM ===")
+    ts_print("=== Setup vLLM ===")
     _ensure_repo(vllm_path, vllm_remote)
     _run_checked(["git", "checkout", vllm_commit], vllm_path, f"checkout {vllm_commit[:8]}")
-    print("=== Install vLLM ===")
+    ts_print("=== Install vLLM ===")
     _pip_install(vllm_path, extra_env={"VLLM_TARGET_DEVICE": "empty"})
 
-    print("=== Setup vllm-ascend ===")
-    _ensure_repo(ascend_path, ascend_remote)
-    _run_checked(["git", "fetch", "origin"], ascend_path, "fetch origin")
-    _run_checked(["git", "reset", "--hard", "origin/main"], ascend_path, "reset to origin/main")
-    _run_checked(["git", "checkout", ascend_commit], ascend_path, f"checkout {ascend_commit[:8]}")
-    if patch_path:
-        if not patch_path.exists():
-            print(f"Error: patch not found: {patch_path}", file=sys.stderr)
-            sys.exit(1)
-        _run_checked(["git", "apply", str(patch_path)], ascend_path, f"git apply {patch_path.name}")
-    print("=== Install vllm-ascend ===")
-    _pip_install(ascend_path, requirements="requirements-dev.txt", verbose=True, skip_editable=True)
-    print(f"\nSetup complete.\n  vLLM: {vllm_path} @ {vllm_commit[:8]}\n"
+    if os.getenv("MAIN2MAIN_KEEP_BRANCH", "false").lower() == "true":
+        ts_print("=== vllm-ascend: branch kept, no reset needed ===")
+    else:
+        ts_print("=== Setup vllm-ascend ===")
+        _ensure_repo(ascend_path, ascend_remote)
+        _run_checked(["git", "fetch", "origin", "--force"], ascend_path, "fetch origin")
+        _run_checked(["git", "reset", "--hard", "origin/main"], ascend_path, "reset to origin/main")
+        _run_checked(["git", "checkout", ascend_commit], ascend_path, f"checkout {ascend_commit[:8]}")
+        if patch_path:
+            if not patch_path.exists():
+                ts_print(f"Error: patch not found: {patch_path}", file=sys.stderr)
+                sys.exit(1)
+            _run_checked(["git", "apply", str(patch_path)], ascend_path, f"git apply {patch_path.name}")
+        ts_print("=== Install vllm-ascend ===")
+        _pip_install(ascend_path, requirements="requirements-dev.txt", verbose=True, skip_editable=True)
+    ts_print(f"\nSetup complete.\n  vLLM: {vllm_path} @ {vllm_commit[:8]}\n"
           f"  vllm-ascend: {ascend_path} @ {ascend_commit[:8]}"
           + (f" + {patch_path.name}" if patch_path else ""))
 
@@ -257,7 +285,7 @@ _SHELL_ENSURE_REPO = r'''
 # --- {name}: ensure repo ---
 if [ -d {path} ] && [ -d {path}/.git ]; then
     echo "  {path} already exists, fetching ..."
-    cd {path} && git fetch --tags || exit 1
+    cd {path} && git fetch --tags --force || exit 1
 elif [ -d {path} ]; then
     echo "  {path} exists but is not a git repo, removing ..."
     rm -rf {path}
@@ -285,7 +313,7 @@ cd {vp} && VLLM_TARGET_DEVICE=empty pip install -e . || exit 1
 echo "=== Setup vllm-ascend ==="
 {ensure_ascend}
 echo "  fetch origin && reset to origin/main ..."
-cd {ap} && git fetch origin && git reset --hard origin/main || exit 1
+cd {ap} && git fetch origin --force && git reset --hard origin/main || exit 1
 echo "  checkout {ascend_commit_short} ..."
 cd {ap} && git checkout {ac} || exit 1
 {patch_block}
@@ -334,8 +362,13 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
                 env: dict[str, str]) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as f:
-        return subprocess.Popen(command, cwd=cwd, env=env, stdout=f,
-                                stderr=subprocess.STDOUT).wait()
+        proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            f.write(line)
+            ts_print(line, end="", flush=True)
+        return proc.wait()
 
 
 def _run_summary(ci_log_summary: Path, log_path: Path, summary_path: Path,
@@ -383,44 +416,109 @@ def _classify(exit_code: int, summary: dict | None, error: str | None) -> str:
     return "failed"
 
 
-def _build_suite_cmd(suite_name: str, devices: str, *,
-                     mock: bool, mock_scale: float = 0.1,
-                     remote_host: str | None,
-                     remote_container: str | None,
-                     remote_ascend: Path, local_run_suite: Path,
-                     s_env: dict[str, str]) -> list[str]:
-    """Build the command list to run a single test suite."""
+def _discover_test_files(ascend_path: Path, paths: list[str]) -> list[str]:
+    """Expand directories into individual test_*.py files."""
+    result: list[str] = []
+    for p in paths:
+        full = (ascend_path / p).resolve() if not os.path.isabs(p) else Path(p).resolve()
+        if full.is_file():
+            result.append(str(full.relative_to(ascend_path)))
+        elif full.is_dir():
+            for tf in sorted(full.rglob("test_*.py")):
+                result.append(str(tf.relative_to(ascend_path)))
+        else:
+            ts_print(f"  [warn] Test path not found: {p}", flush=True)
+    return result
+
+
+def _select_tests_by_files(ascend_path: Path, changed_files: list[str]) -> list[str] | None:
+    """Call vllm-ascend's select_tests.py to resolve changed files → test files.
+
+    Returns a list of test file paths, or None if the selector is unavailable.
+    """
+    select_script = ascend_path / ".github/workflows/scripts/select_tests.py"
+    if not select_script.exists():
+        ts_print("  [warn] select_tests.py not found, falling back to full scan", flush=True)
+        return None
+
+    r = subprocess.run(
+        [sys.executable, str(select_script), "--changed-files"] + changed_files,
+        cwd=ascend_path, capture_output=True, text=True,
+        env={**os.environ, "GITHUB_OUTPUT": ""},  # force stdout output
+    )
+    if r.stderr.strip():
+        for line in r.stderr.strip().splitlines():
+            ts_print(f"  [select_tests] {line}", flush=True)
+    if r.returncode != 0:
+        ts_print(f"  [warn] select_tests.py failed (exit {r.returncode})", flush=True)
+        return None
+
+    # Parse key=value output (GITHUB_OUTPUT format)
+    test_groups_json = ""
+    for line in r.stdout.strip().splitlines():
+        if line.startswith("test_groups="):
+            test_groups_json = line[len("test_groups="):]
+            break
+
+    if not test_groups_json:
+        return None
+
+    try:
+        groups = json.loads(test_groups_json)
+    except json.JSONDecodeError:
+        return None
+
+    tests: list[str] = []
+    for g in groups:
+        if g.get("npu_type") == "cpu":
+            continue  # skip CPU-only tests, main2main runs on NPU
+        for t in g.get("tests", "").split():
+            tests.append(t)
+    return tests or None
+
+
+def _build_test_cmd(test: str, devices: str, *,
+                    ascend_path: Path,
+                    remote_host: str | None,
+                    remote_container: str | None,
+                    remote_ascend: Path,
+                    mock: bool, mock_scale: float = 0.1,
+                    s_env: dict[str, str]) -> list[str]:
+    """Build the command to run a single pytest target."""
     if mock:
-        duration = int(_MOCK_DURATIONS.get(suite_name, 60) * mock_scale)
+        duration = int(max(_test_cards(test) * 120, 30) * mock_scale)
         if remote_host:
             return ["ssh", *_SSH_OPTS, remote_host,
                     f"docker exec {remote_container} sleep {duration}"]
         return ["sleep", str(duration)]
+
     if remote_host:
         env_vars = [f"ASCEND_RT_VISIBLE_DEVICES={devices}"]
         for k in sorted(s_env):
             if k.startswith("VLLM_"):
                 env_vars.append(f"{k}={shlex.quote(s_env[k])}")
-        inner = (f"docker exec -w {shlex.quote(str(remote_ascend))} {remote_container} "
-                 f"env {' '.join(env_vars)} "
-                 f"python3 {shlex.quote(str(remote_ascend / '.github' / 'workflows' / 'scripts' / 'run_suite.py'))} "
-                 f"--suite {shlex.quote(suite_name)} --continue-on-error")
+        inner = (
+            f"docker exec -w {shlex.quote(str(remote_ascend))} {remote_container} "
+            f"env {' '.join(env_vars)} "
+            f"pytest -sv --color=yes {shlex.quote(test)}"
+        )
         return ["ssh", *_SSH_OPTS, remote_host, inner]
-    return [sys.executable, str(local_run_suite), "--suite", suite_name, "--continue-on-error"]
+    return [sys.executable, "-m", "pytest", "-sv", "--color=yes", test]
 
 
-def _run_one_suite(cmd: list[str], log_path: Path, summary_path: Path,
-                   suite_name: str, devices: str, ci_log_summary: Path,
-                   step_id: int, round_number: int, env: dict[str, str],
-                   *, is_remote: bool, is_mock: bool) -> dict:
-    """Execute one suite and return its result dict."""
-    if not is_remote:
+def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
+                  test: str, devices: str, ci_log_summary: Path,
+                  ascend_path: Path, step_id: int, round_number: int,
+                  env: dict[str, str], *, is_remote: bool, is_mock: bool) -> dict:
+    """Execute one test and return its result dict."""
+    cwd = Path("/tmp") if is_remote else ascend_path
+    if not is_remote and not is_mock:
         env["ASCEND_RT_VISIBLE_DEVICES"] = devices
-    cwd = Path("/tmp") if is_remote else Path.cwd()
     exit_code = _run_to_log(cmd, cwd, log_path, env)
+    cards = _test_cards(test)
 
     if is_mock:
-        return {"suite": suite_name, "cards_required": _suite_cards(suite_name),
+        return {"test": test, "cards_required": cards,
                 "run_suite_exit_code": exit_code,
                 "ci_result": "passed" if exit_code == 0 else "failed",
                 "summary_error": None, "code_bugs_count": 0, "env_flakes_count": 0,
@@ -429,7 +527,7 @@ def _run_one_suite(cmd: list[str], log_path: Path, summary_path: Path,
 
     sr = _run_summary(ci_log_summary, log_path, summary_path, step_id, round_number)
     s, se = sr["summary"], sr["summary_error"]
-    return {"suite": suite_name, "cards_required": _suite_cards(suite_name),
+    return {"test": test, "cards_required": cards,
             "run_suite_exit_code": exit_code,
             "ci_result": _classify(exit_code, s, se),
             "summary_error": se,
@@ -451,8 +549,8 @@ def run_tests(
     ascend_commit: str,
     patch_path: str | Path | None = None,
     step_id: int = 0,
-    suites: list[str] | None = None,
-    total_cards: int = 1,
+    select_by_files: list[str] | None = None,
+    test_cases: list[str] | None = None,
     remote: str | None = None,
     log_dir: str | Path = "",
     remote_log_dir: str | Path | None = None,
@@ -464,135 +562,176 @@ def run_tests(
     mock: bool = False,
     mock_scale: float = 0.1,
 ) -> dict:
-    """Run end-to-end tests for a main2main step.  Returns a dict with
-    can_commit, ci_result, suite_results, etc."""
+    """Run end-to-end tests for a main2main step.
+
+    Args:
+        select_by_files: Changed file paths for precise test selection
+                         via vllm-ascend's select_tests.py.
+    """
     vllm_path = Path(vllm_path)
     ascend_path = Path(ascend_path)
     if patch_path:
         patch_path = Path(patch_path)
     log_dir = Path(log_dir)
     remote_log_dir = Path(remote_log_dir) if remote_log_dir else log_dir
-    remote_vllm = Path(remote_vllm_path)
-    remote_ascend = Path(remote_ascend_path)
+    remote_vllm = Path(remote_vllm_path) if remote_vllm_path else Path("/vllm-workspace/vllm")
+    remote_ascend = Path(remote_ascend_path) if remote_ascend_path else Path("/vllm-workspace/vllm-ascend")
 
-    # ---- step 1: resolve remote ----
+    # ---- step 1: resolve tests ----
+    if test_cases:
+        test_files = test_cases
+        ts_print(f"Using {len(test_files)} fixed test cases")
+    elif select_by_files:
+        ts_print(f"Selecting tests for {len(select_by_files)} changed file(s)")
+        test_files = _select_tests_by_files(ascend_path, select_by_files) or []
+        ts_print(f"Selected {len(test_files)} test(s)")
+    else:
+        test_files = []
+
+    if not test_files:
+        ts_print("No tests to run.", flush=True)
+        return {"can_commit": True, "ci_result": "passed", "suite_results": {}}
+
+    # ---- step 2: resolve remote ----
     remote_host: str | None = None
     remote_container: str | None = None
     if remote:
         remote_host, remote_container = _resolve_remote(remote)
         _ensure_container_running(remote_host, remote_container)
 
-    # ---- step 1.5: sync patch ----
+    # ---- step 2.5: auto-detect cards ----
+    if remote_host and remote_container:
+        cq = shlex.quote(remote_container)
+        run_cmd = lambda cmd: _ssh(remote_host, f"docker exec {cq} sh -c {shlex.quote(cmd)}",
+                                   capture_output=True, text=True)
+    else:
+        run_cmd = lambda cmd: subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
+
+    total_cards, phy_ids = _detect_cards(run_cmd)
+    label = "on remote" if remote_host else "local"
+    ts_print(f"  Auto-detected {total_cards} NPU(s) {label} (Phy-IDs: {phy_ids})")
+    if total_cards <= 0:
+        ts_print("Error: could not detect any NPU cards", file=sys.stderr)
+        sys.exit(1)
+    all_phy_ids = [int(x) for x in phy_ids.split(",")]
+
+    # ---- step 3: sync patch ----
     if patch_path and remote_host:
         local = patch_path.resolve()
         if not local.exists():
             local = Path.cwd() / str(patch_path).lstrip("/")
         if local.exists():
-            print(f"=== Syncing patch: {local} -> {remote_container}:{patch_path} ===")
+            ts_print(f"=== Syncing patch: {local} -> {remote_container}:{patch_path} ===")
             _ssh(remote_host, f"docker exec {remote_container} mkdir -p {shlex.quote(str(patch_path.parent))}",
                  capture_output=True, text=True, check=True)
             with open(local, "rb") as f:
                 _ssh(remote_host, f"docker exec -i {remote_container} sh -c 'cat > {shlex.quote(str(patch_path))}'",
                      stdin=f, capture_output=True, text=False, check=True)
-            print("  Patch synced to container successfully")
+            ts_print("  Patch synced to container successfully")
 
-    # ---- step 2: setup repos ----
+    # ---- step 4: setup repos ----
     if remote_host:
-        print("=== Running setup on remote container ===")
+        ts_print("=== Running setup on remote container ===")
         script = _build_setup_script(remote_vllm, vllm_commit, remote_ascend, ascend_commit, patch_path)
         inner = f"docker exec {remote_container} sh -c {shlex.quote(script)}"
         proc = subprocess.Popen(["ssh", *_SSH_OPTS, remote_host, inner],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         assert proc.stdout is not None
         for line in proc.stdout:
-            print(line, end="", flush=True)
+            ts_print(line, end="", flush=True)
         if proc.wait() != 0:
             raise RuntimeError(f"Remote setup failed with exit code {proc.returncode}")
     else:
         setup_env(vllm_path, vllm_commit, ascend_path, ascend_commit, patch_path)
 
-    # ---- step 3: locate scripts ----
-    run_suite = (remote_ascend if remote_host else ascend_path) / ".github/workflows/scripts/run_suite.py"
-    ci_log_summary = ascend_path / ".github/workflows/scripts/ci_log_summary.py"
-    if not ci_log_summary.exists():
-        print(f"Error: ci_log_summary.py not found: {ci_log_summary}", file=sys.stderr)
-        sys.exit(1)
+    # ---- step 5: locate ci_log_summary ----
+    ci_log_summary = Path(__file__).parent / "ci_log_summary.py"
 
-    # ---- step 4: env ----
+    # ---- step 6: env ----
     env = os.environ.copy()
     env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     env.setdefault("VLLM_USE_MODELSCOPE", "true")
 
-    # ---- steps 5-6: schedule ----
+    # ---- step 7: schedule ----
     ci_dir = log_dir / str(step_id) / "tests"
     result_path = ci_dir / f"round-{round_number}-result.json"
-    suite_names = suites or DEFAULT_SUITES
-    rounds = [[s] for s in suite_names] if sequential else _schedule_rounds(suite_names, total_cards)
-    device_rounds = _assign_devices(rounds)
+    rounds = [[t] for t in test_files] if sequential else _schedule_rounds(test_files, total_cards)
+    device_rounds = _assign_devices(rounds, all_phy_ids)
 
     parallel_count = sum(1 for r in rounds if len(r) > 1)
-    print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {total_cards}):")
+    ts_print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {total_cards}):")
     for i, rnd in enumerate(device_rounds):
-        usage = sum(_suite_cards(s) for s, _ in rnd)
+        usage = sum(_test_cards(t) for t, _ in rnd)
         mode = "parallel" if len(rnd) > 1 else "serial"
-        parts = [f"{s}({_suite_cards(s)}c, devs={d})" for s, d in rnd]
-        print(f"  Round {i+1} ({mode}, using {usage}/{total_cards} cards): {', '.join(parts)}")
-    print(flush=True)
+        ts_print(f"  Round {i+1} ({mode}, using {usage}/{total_cards} cards):")
+        for t, d in rnd:
+            ts_print(f"    {t}  ({_test_cards(t)}c, devs={d})")
+    ts_print(flush=True)
 
     if dry_run:
-        print("[dry-run] Skipping execution.", flush=True)
+        ts_print("[dry-run] Skipping execution.", flush=True)
         return {}
 
-    # ---- step 7: execute ----
+    # ---- step 8: execute ----
     t0 = time.monotonic()
     all_results: list[dict] = []
     rounds_info: list[dict] = []
 
     for round_idx, rnd in enumerate(device_rounds, start=1):
         round_t0 = time.monotonic()
-        print(f"\n== Round {round_idx}/{len(device_rounds)}: {len(rnd)} suite(s) ==", flush=True)
+        ts_print(f"\n== Round {round_idx}/{len(rounds)}: {len(rnd)} test(s) ==", flush=True)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(rnd)) as executor:
             futs = {}
-            for suite_name, devices in rnd:
-                lp = ci_dir / f"round-{round_number}-{suite_name}.log"
-                sp = ci_dir / f"round-{round_number}-{suite_name}-summary.json"
-                cmd = _build_suite_cmd(suite_name, devices, mock=mock, mock_scale=mock_scale,
-                                       remote_host=remote_host, remote_container=remote_container,
-                                       remote_ascend=remote_ascend, local_run_suite=run_suite,
-                                       s_env=env)
-                fut = executor.submit(_run_one_suite, cmd, lp, sp, suite_name, devices,
-                                      ci_log_summary, step_id, round_number, env.copy(),
+            for test, devices in rnd:
+                slug = test.replace("/", "__").replace(".py", "").replace("::", "--")
+                lp = ci_dir / f"round-{round_number}-{slug}.log"
+                sp = ci_dir / f"round-{round_number}-{slug}-summary.json"
+                cmd = _build_test_cmd(test, devices, ascend_path=ascend_path,
+                                      remote_host=remote_host, remote_container=remote_container,
+                                      remote_ascend=remote_ascend,
+                                      mock=mock, mock_scale=mock_scale, s_env=env)
+                fut = executor.submit(_run_one_test, cmd, lp, sp, test, devices,
+                                      ci_log_summary, ascend_path,
+                                      step_id, round_number, env.copy(),
                                       is_remote=bool(remote_host), is_mock=mock)
-                futs[fut] = suite_name
-                print(f"  [{suite_name}] started ({_suite_cards(suite_name)} card(s))", flush=True)
+                futs[fut] = test
+                ts_print(f"  [{test}] started ({_test_cards(test)} card(s))", flush=True)
 
             round_results = []
+            printed_failure = False
             for fut in concurrent.futures.as_completed(futs):
                 r = fut.result()
                 round_results.append(r)
-                print(f"  [{futs[fut]}] done: exit={r['run_suite_exit_code']}, "
+                ts_print(f"  [{futs[fut]}] done: exit={r['run_suite_exit_code']}, "
                       f"result={r['ci_result']}, bugs={r['code_bugs_count']}, "
                       f"flakes={r['env_flakes_count']}", flush=True)
+                if not printed_failure and r['run_suite_exit_code'] != 0:
+                    printed_failure = True
+                    log_path = Path(r['log_path'])
+                    if log_path.exists():
+                        log_content = log_path.read_text(encoding="utf-8", errors="replace")
+                        tail = "\n".join(log_content.splitlines()[-40:])
+                        ts_print(f"  [FAILED] log tail ({r['test']}):\n{tail}", flush=True)
 
         round_elapsed = time.monotonic() - round_t0
         all_results.extend(round_results)
-        rounds_info.append({"round": round_idx, "suites": [r["suite"] for r in round_results],
-                            "cards_used": sum(_suite_cards(s) for s, _ in rnd),
+        rounds_info.append({"round": round_idx, "tests": [r["test"] for r in round_results],
+                            "cards_used": sum(_test_cards(t) for t, _ in rnd),
                             "total_cards": total_cards, "elapsed_s": round(round_elapsed, 1)})
-        print(f"  Round {round_idx} elapsed: {round_elapsed:.1f}s", flush=True)
+        ts_print(f"  Round {round_idx} elapsed: {round_elapsed:.1f}s", flush=True)
 
         if remote_host:
             remote_ci = f"{remote_log_dir}/{step_id}/tests"
-            print(f"  Pulling remote logs: {remote_host}:{remote_ci} -> {ci_dir}", flush=True)
+            ts_print(f"  Pulling remote logs: {remote_host}:{remote_ci} -> {ci_dir}", flush=True)
             _sync_remote_dir(remote_host, remote_ci, ci_dir)
 
     total_elapsed = time.monotonic() - t0
     if remote_host:
-        print(f"\n=== Final log sync ===", flush=True)
+        ts_print(f"\n=== Final log sync ===", flush=True)
         _sync_remote_dir(remote_host, f"{remote_log_dir}/{step_id}/tests", ci_dir)
 
-    # ---- step 8: aggregate ----
+    # ---- step 9: aggregate ----
     outcomes = {r["ci_result"] for r in all_results}
     if "failed" in outcomes:
         overall = "failed"
@@ -605,23 +744,23 @@ def run_tests(
 
     result = {
         "step_id": step_id, "round": round_number,
-        "suite": "+".join(r["suite"] for r in all_results),
-        "suites": [r["suite"] for r in all_results],
+        "label": "+".join(r["test"] for r in all_results),
+        "tests": [r["test"] for r in all_results],
         "ci_result": overall, "passed": overall == "passed",
         "can_commit": overall in PASS_RESULTS, "requires_fix": overall == "failed",
         "log_path": str(ci_dir), "summary_path": str(ci_dir),
         "total_cards": total_cards, "sequential": sequential, "remote": remote,
         "elapsed_s": round(total_elapsed, 1), "rounds": rounds_info,
-        "suite_results": {r["suite"]: r for r in all_results},
+        "suite_results": {r["test"]: r for r in all_results},
         "code_bugs_count": sum(r["code_bugs_count"] for r in all_results),
         "env_flakes_count": sum(r["env_flakes_count"] for r in all_results),
         "failed_test_files_count": sum(r["failed_test_files_count"] for r in all_results),
         "failed_test_cases_count": sum(r["failed_test_cases_count"] for r in all_results),
     }
     result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"\nmain2main CI aggregated: {overall}  (can_commit={result['can_commit']})", flush=True)
-    print(f"Total elapsed: {total_elapsed:.1f}s  ({total_elapsed/60:.1f} min)", flush=True)
-    print(f"Result written to {result_path}", flush=True)
+    ts_print(f"\nmain2main CI aggregated: {overall}  (can_commit={result['can_commit']})", flush=True)
+    ts_print(f"Total elapsed: {total_elapsed:.1f}s  ({total_elapsed/60:.1f} min)", flush=True)
+    ts_print(f"Result written to {result_path}", flush=True)
     return result
 
 
@@ -638,9 +777,9 @@ def main() -> None:
     p.add_argument("--patch", type=Path)
     p.add_argument("--step-id", type=int, required=True)
     p.add_argument("--round", type=int, default=1)
-    p.add_argument("--suite", action="append")
+    p.add_argument("--select-by-files", nargs="*", default=None,
+                   help="Changed file paths for precise test selection via select_tests.py.")
     p.add_argument("--log-dir", type=Path, default=Path("."))
-    p.add_argument("--total-cards", type=int, default=1)
     p.add_argument("--sequential", action="store_true")
     p.add_argument("--remote")
     p.add_argument("--remote-vllm-path", type=Path)
@@ -653,8 +792,9 @@ def main() -> None:
     result = run_tests(
         vllm_path=args.vllm_path, vllm_commit=args.vllm_commit,
         ascend_path=args.ascend_path, ascend_commit=args.ascend_commit,
-        patch_path=args.patch, step_id=args.step_id, suites=args.suite,
-        total_cards=args.total_cards, remote=args.remote, log_dir=args.log_dir,
+        patch_path=args.patch, step_id=args.step_id,
+        select_by_files=args.select_by_files,
+        remote=args.remote, log_dir=args.log_dir,
         remote_vllm_path=args.remote_vllm_path,
         remote_ascend_path=args.remote_ascend_path,
         round_number=args.round, dry_run=args.dry_run,

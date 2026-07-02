@@ -21,10 +21,17 @@ from main2main_flow.utils import (
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
-    FINAL_CODE_STRUCTURE_GUIDE_FILE, run_git
+    FINAL_CODE_STRUCTURE_GUIDE_FILE, run_git, ts_print
 )
 
 _REFERENCE_DIR = str(Path(__file__).parent / "reference")
+
+
+def _parse_test_cases_env() -> list[str] | None:
+    val = os.getenv("MAIN2MAIN_TEST_CASES", "").strip()
+    if not val:
+        return None
+    return [t.strip() for t in val.replace("\n", " ").split() if t.strip()]
 
 
 class Main2MainState(BaseModel):
@@ -32,7 +39,7 @@ class Main2MainState(BaseModel):
     vllm_ascend_path: str = ""
     target_commit: str = ""
     test_log_dir: str = ""
-    
+
     steps: list = []
     release_tag: str = ""
 
@@ -50,6 +57,12 @@ class Main2MainState(BaseModel):
     retry_count: int = 0
 
     final_status: str = ""
+
+    # Tracked from detect step for PR title / push
+    base_commit: str = ""
+
+    # Changed files from current adaptation step (for precise test selection)
+    changed_files: list[str] = []
 
 
 class Main2MainFlow(Flow[Main2MainState]):
@@ -93,12 +106,13 @@ class Main2MainFlow(Flow[Main2MainState]):
         result, has_commit = detect(vllm_path, vllm_ascend_path,
                                     self.state.target_commit or None)
         self.state.release_tag = result.get("compat_tag") or ""
+        self.state.base_commit = result.get("base_commit", "")
 
         (WORKSPACE_DIR / DETECT_FILE).write_text(
             json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
-        print(f"[analyze] base={result['base_commit'][:8]}  "
+        ts_print(f"[analyze] base={result['base_commit'][:8]}  "
               f"target={result['target_commit'][:8]}")
 
         if not has_commit:
@@ -116,10 +130,10 @@ class Main2MainFlow(Flow[Main2MainState]):
         if self.state.total_steps == 0:
             return HasNoCommit
 
-        print(f"[analyze] 规划了 {self.state.total_steps} 个步骤，"
+        ts_print(f"[analyze] 规划了 {self.state.total_steps} 个步骤，"
               f"共 {plan['total_commits']} 个 commit。")
-        print("===========================================")
-        print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
+        ts_print("===========================================")
+        ts_print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
 
         # generate every step folder in workspace
         for index in range(self.state.total_steps):
@@ -133,7 +147,7 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @listen(HasNoCommit)
     def has_no_commit(self):
-        print(f"[done] 仓库已同步，无需适配，流程结束。")
+        ts_print(f"[done] 仓库已同步，无需适配，流程结束。")
 
     @listen(HasCommit)
     def process_steps(self):
@@ -157,7 +171,7 @@ class Main2MainFlow(Flow[Main2MainState]):
             step = self.state.steps[self.state.current_step]
             step_id = step["id"]
             step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
-            print(f"[ai_analysis] SKIP_AI_ANALYSIS=true, skipping for step {step_id}")
+            ts_print(f"[ai_analysis] SKIP_AI_ANALYSIS=true, skipping for step {step_id}")
             ascend_head = run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
             self.state.cur_vllm_commit = step["end_commit"]
             self.state.cur_ascend_commit = ascend_head
@@ -180,7 +194,7 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         if self.state.retry_count == 0:
             run_git(vllm_path, "checkout", step["end_commit"])
-            print(f"[ai_analysis] {step_id}: vllm checked out to {step['end_commit'][:8]}")
+            ts_print(f"[ai_analysis] {step_id}: vllm checked out to {step['end_commit'][:8]}")
 
             try:
                 ref_result = run_update(
@@ -188,13 +202,13 @@ class Main2MainFlow(Flow[Main2MainState]):
                     old_commit=step["start_commit"],
                     new_commit=step["end_commit"],
                 )
-                print(f"[ai_analysis] {step_id}: updated commit ref in "
+                ts_print(f"[ai_analysis] {step_id}: updated commit ref in "
                       f"{len(ref_result['files_updated'])} file(s): "
                       f"{ref_result['files_updated']}")
             except ValueError:
-                print(f"[ai_analysis] {step_id}: commit ref already updated, skipping")
+                ts_print(f"[ai_analysis] {step_id}: commit ref already updated, skipping")
         else:
-            print(f"[ai_analysis] {step_id}: retry count {self.state.retry_count}, \
+            ts_print(f"[ai_analysis] {step_id}: retry count {self.state.retry_count}, \
  skipping to fix mode")
 
         error_logs: list[str] = list(self.state.test_errors)
@@ -204,7 +218,7 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         for attempt in range(1, 4):
             mode = "fix" if error_logs else "adapt"
-            print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, mode={mode}")
+            ts_print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, mode={mode}")
             adapt_result = run_opencode_adapter({
                 "step_id": step_id,
                 "previous_step_id": previous_step_id,
@@ -224,13 +238,13 @@ class Main2MainFlow(Flow[Main2MainState]):
 
             check_result = run_check(ascend_path, self.state.release_tag)
             if check_result["all_passed"]:
-                print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
+                ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
                 break
             log_path = step_dir / PRE_CI_CHECK_FILE
             log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
 
             error_logs = [str(log_path)]
-            print(f"[ai_analysis] {step_id}: pre_ci failed → {log_path}")
+            ts_print(f"[ai_analysis] {step_id}: pre_ci failed → {log_path}")
 
         self.state.test_errors = []
 
@@ -242,13 +256,17 @@ class Main2MainFlow(Flow[Main2MainState]):
         adaptation_patch = run_git(ascend_path, "diff", "HEAD")
         adaptation_patch_path.write_text(adaptation_patch, encoding="utf-8")
 
+        changed_files = run_git(ascend_path, "diff", "--name-only", "HEAD").strip().splitlines()
+        changed_files = [f for f in changed_files if f]  # filter empty lines
+
         ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
 
         self.state.cur_vllm_commit = step["end_commit"]
         self.state.cur_ascend_commit = ascend_head
         self.state.cur_patch_path = str(adaptation_patch_path)
+        self.state.changed_files = changed_files
 
-        print(f"[ai_analysis] {step_id}: done, "
+        ts_print(f"[ai_analysis] {step_id}: done, "
               f"is_noop={getattr(adapt_result, 'is_noop', False)}, "
               f"modified={getattr(adapt_result, 'modified_files', [])}, "
               f"vllm={step['end_commit'][:8]}, ascend={ascend_head[:8]}")
@@ -256,13 +274,13 @@ class Main2MainFlow(Flow[Main2MainState]):
     def _run_e2e_test(self):
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
-        print(f"run_e2e_test: step-{step_id} round={self.state.retry_count}")
+        ts_print(f"run_e2e_test: {step_id} round={self.state.retry_count}")
 
         if os.getenv("SKIP_E2E_TEST", "false").lower() == "true":
-            print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
+            ts_print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             return True
 
-        print(f"The adaptation patch is at: {self.state.cur_patch_path}")
+        ts_print(f"The adaptation patch is at: {self.state.cur_patch_path}")
         result = run_tests(
             vllm_path=self.state.vllm_path,
             vllm_commit=self.state.cur_vllm_commit,
@@ -270,16 +288,16 @@ class Main2MainFlow(Flow[Main2MainState]):
             ascend_commit=self.state.cur_ascend_commit,
             patch_path=self.state.cur_patch_path or None,
             step_id=step_id,
-            total_cards=8,
-            suites=["e2e-2card-light"],
-            remote="env",
+            select_by_files=self.state.changed_files or None,
+            test_cases=_parse_test_cases_env(),
+            remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
             round_number=self.state.retry_count,
             log_dir=str(WORKSPACE_DIR / STEPS_DIR),
         )
 
         test_passed = result.get("can_commit", False)
         summary_log = str(WORKSPACE_DIR / STEPS_DIR / str(step_id) / "tests" / f"round-{self.state.retry_count}-summary.json")
-        print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
+        ts_print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
 
         if not test_passed:
             self.state.test_errors = [summary_log]
@@ -292,7 +310,16 @@ class Main2MainFlow(Flow[Main2MainState]):
         # successful adaptations. Prefer its cumulative summary, and fall back to
         # concatenating available step summaries if the last one is missing.
         if self.state.current_step == 0:
-            print(f"[generate_final_post] fail to upgrade, no step success")
+            ts_print(f"[generate_final_post] fail to upgrade, no step success")
+            (WORKSPACE_DIR / FINAL_SUMMARY_FILE).write_text(
+                "main2main adaptation failed — no steps completed.\n", encoding="utf-8"
+            )
+            (WORKSPACE_DIR / "final_status.json").write_text(
+                json.dumps({"status": "failed", "steps_completed": 0, "steps_total": self.state.total_steps,
+                            "reached_commit": "", "old_commit": self.state.base_commit,
+                            "new_commit": self.state.target_commit or ""}, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8"
+            )
             return
 
         last_step = self.state.steps[self.state.current_step - 1]
@@ -300,46 +327,114 @@ class Main2MainFlow(Flow[Main2MainState]):
         final_summary_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
         last_summary_path = step_dir / EACH_STEP_SUMMARY_FILE
 
+        step_patch = step_dir / EACH_STEP_TARGET_PATCH_FILE
+        has_patch = step_patch.exists()
+        if has_patch:
+            shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
+
+        # Build factual summary header (changed files, commit range)
+        changed = []
+        if has_patch:
+            patch_text = step_patch.read_text(encoding="utf-8")
+            for line in patch_text.splitlines():
+                if line.startswith("diff --git a/"):
+                    changed.append(line.split()[-1][2:])  # strip "b/" prefix
+        changed = sorted(set(changed))
+
+        header = [
+            f"## Summary",
+            "",
+            f"- Commit range: `{self.state.base_commit[:8]}...{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}`",
+            f"- Steps: {self.state.current_step}/{self.state.total_steps}",
+            f"- Files changed: {len(changed)}",
+            "",
+        ]
+        if changed:
+            header.append("### Files modified in vllm-ascend")
+            header.append("")
+            for f in changed:
+                header.append(f"- `{f}`")
+            header.append("")
+
+        header.append("---")
+        header.append("")
+
+        # Append per-step AI summaries
         if last_summary_path.exists():
-            shutil.copy2(last_summary_path, final_summary_path)
+            ai_summary = last_summary_path.read_text(encoding="utf-8")
         else:
-            summaries = []
+            summaries_list = []
             for index in range(self.state.current_step):
                 current_step = self.state.steps[index]
-                summary_path = WORKSPACE_DIR / STEPS_DIR / current_step["id"] / EACH_STEP_SUMMARY_FILE
-                if summary_path.exists():
-                    summaries.append(summary_path.read_text(encoding="utf-8"))
-            final_summary_path.write_text("\n\n".join(summaries), encoding="utf-8")
+                sp = WORKSPACE_DIR / STEPS_DIR / current_step["id"] / EACH_STEP_SUMMARY_FILE
+                if sp.exists():
+                    summaries_list.append(sp.read_text(encoding="utf-8"))
+            ai_summary = "\n\n".join(summaries_list)
 
-        shutil.copy2(step_dir / EACH_STEP_TARGET_PATCH_FILE, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
+        final_summary_path.write_text("\n".join(header) + "\n" + ai_summary, encoding="utf-8")
+
+        status = "completed" if self.state.final_status == UpgradeCompleted else "failed"
+        status_json = {
+            "status": status,
+            "steps_completed": self.state.current_step,
+            "steps_total": self.state.total_steps,
+            "reached_commit": self.state.cur_vllm_commit,
+            "old_commit": self.state.base_commit,
+            "new_commit": self.state.target_commit or self.state.cur_vllm_commit,
+        }
+        (WORKSPACE_DIR / "final_status.json").write_text(
+            json.dumps(status_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+        # Ensure final_summary.md is non-empty (stub for dry runs)
+        final = WORKSPACE_DIR / FINAL_SUMMARY_FILE
+        if not final.exists() or final.stat().st_size == 0:
+            final.write_text(
+                f"main2main completed: {self.state.final_status}\n"
+                f"Steps: {self.state.current_step}/{self.state.total_steps}\n",
+                encoding="utf-8"
+            )
 
         last_guide_path = step_dir / EACH_STEP_CODE_STRUCTURE_GUIDE_FILE
         if last_guide_path.exists():
             shutil.copy2(last_guide_path, WORKSPACE_DIR / FINAL_CODE_STRUCTURE_GUIDE_FILE)
-            print(f"[generate_final_post] Copied code-structure-guide to workspace.")
+            ts_print(f"[generate_final_post] Copied code-structure-guide to workspace.")
 
-        vllm_path = self.state.vllm_path
-        ascend_path = self.state.vllm_ascend_path
-        run_git(vllm_path, "checkout", self.state.original_vllm_ref)
-        print(f"[generate_final_post] Restored vllm to '{self.state.original_vllm_ref}'.")
-        run_git(ascend_path, "checkout", "-f", self.state.original_ascend_ref)
-        print(f"[generate_final_post] Restored vllm-ascend to '{self.state.original_ascend_ref}'.")
+        if os.getenv("MAIN2MAIN_KEEP_BRANCH", "false").lower() != "true":
+            vllm_path = self.state.vllm_path
+            ascend_path = self.state.vllm_ascend_path
+            run_git(vllm_path, "checkout", self.state.original_vllm_ref)
+            ts_print(f"[generate_final_post] Restored vllm to '{self.state.original_vllm_ref}'.")
+            run_git(ascend_path, "checkout", "-f", self.state.original_ascend_ref)
+            ts_print(f"[generate_final_post] Restored vllm-ascend to '{self.state.original_ascend_ref}'.")
 
     @listen(generate_final_post)
     def push_to_github(self):
         if os.getenv("PUSH_TO_GITHUB", "false").lower() != "true":
-            print("[push] PUSH_TO_GITHUB is not true, skipping.")
+            ts_print("[push] PUSH_TO_GITHUB is not true, skipping.")
             return "SKIP_PUSH"
 
         github_repo = os.getenv("GITHUB_REPO", "")
         if not github_repo:
-            print("[push] GITHUB_REPO is empty, cannot create PR.")
+            ts_print("[push] GITHUB_REPO is empty, cannot create PR.")
             return "SKIP_PUSH"
+
+        head_fork = os.getenv("HEAD_FORK", "")
+        draft = os.getenv("PR_DRAFT", "true").lower() == "true"
+        labels_str = os.getenv("PR_LABELS", "ready,ready-for-test")
+        labels = [lbl.strip() for lbl in labels_str.split(",") if lbl.strip()]
+        branch_name = os.getenv("PR_BRANCH_NAME", "")
 
         return push_and_create_pr(
             ascend_path=Path(self.state.vllm_ascend_path),
             github_repo=github_repo,
             patch_path=WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE,
             summary_path=WORKSPACE_DIR / FINAL_SUMMARY_FILE,
+            old_commit=self.state.base_commit,
+            new_commit=self.state.target_commit or self.state.cur_vllm_commit,
+            head_fork=head_fork,
+            draft=draft,
+            labels=labels,
+            branch_name=branch_name,
         )
 
