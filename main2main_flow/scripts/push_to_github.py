@@ -243,7 +243,10 @@ def push_and_create_pr(
         return ""
 
     # Save current origin URL so we can restore it after push
-    _saved_origin_url = run_git(ascend_path, "remote", "get-url", "origin").strip()
+    # Use `git config --get` (not `git remote get-url`) to read the RAW stored URL
+    # without insteadOf rewrites — otherwise the saved URL becomes a ghfast.top URL
+    # and `gh pr create` later can't recognize the GitHub host.
+    _saved_origin_url = run_git(ascend_path, "config", "--get", "remote.origin.url").strip()
 
     try:
         # Decide branch and apply patch
