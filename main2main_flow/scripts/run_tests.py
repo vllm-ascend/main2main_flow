@@ -222,7 +222,6 @@ def _ensure_repo(path: Path, remote_url: str) -> bool:
 
 _MIRROR_CMDS: list[str] = [
     "pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple",
-    '''git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"''',
 ]
 
 
