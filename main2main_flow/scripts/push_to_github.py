@@ -145,45 +145,31 @@ def _detect_default_branch(repo: Path | str, remote: str = "origin") -> str:
 
 
 def _git_push(ascend_path: Path, branch: str) -> None:
-    """Push branch to origin with token-based auth.
+    """Push branch to origin.
 
-    Uses GH_TOKEN / GITHUB_TOKEN via GIT_ASKPASS when available (bypasses
-    ``gh auth git-credential`` which can fail when git URL rewrites are active).
-    Otherwise falls back to ``gh auth git-credential`` for local / logged-in use.
+    Clears the extraheader that ``actions/checkout`` set (auto GITHUB_TOKEN,
+    141 chars, scoped to upstream only) and replaces it with GH_TOKEN
+    (= PAT_TOKEN, 40 chars classic PAT with fork write access).
     """
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-    if token:
-        askpass = ascend_path / ".git" / "push-askpass.sh"
-        try:
-            askpass.write_text(
-                "#!/bin/sh\n"
-                "case \"$1\" in\n"
-                "    *Username*) echo \"x-access-token\" ;;\n"
-                "    *Password*) echo \"$GIT_PUSH_TOKEN\" ;;\n"
-                "esac\n"
-            )
-            askpass.chmod(0o700)
-            env = os.environ.copy()
-            env["GIT_PUSH_TOKEN"] = token
-            env["GIT_ASKPASS"] = str(askpass)
-            r = subprocess.run(
-                ["git", "push", "--force-with-lease", "origin", branch],
-                cwd=str(ascend_path), capture_output=True, text=True,
-                env=env,
-            )
-            if r.stdout.strip():
-                ts_print(f"[push] git push stdout:\n{r.stdout.strip()}", flush=True)
-            if r.returncode != 0:
-                ts_print(
-                    f"[push] git push FAILED (exit {r.returncode}):\n"
-                    f"{r.stderr.strip() or '(no stderr)'}",
-                    file=sys.stderr, flush=True,
-                )
-                r.check_returncode()
-        finally:
-            askpass.unlink(missing_ok=True)
-    else:
+    token = os.environ.get("GH_TOKEN") or ""
+    if not token:
         run_git(ascend_path, "push", "--force-with-lease", "origin", branch)
+        return
+    r = subprocess.run(
+        ["git", "-c", "http.https://github.com/.extraheader=",
+         "push", "--force-with-lease", "origin", branch],
+        cwd=str(ascend_path), capture_output=True, text=True,
+        env={**os.environ, "GITHUB_TOKEN": token},
+    )
+    if r.stdout.strip():
+        ts_print(f"[push] git push stdout:\n{r.stdout.strip()}", flush=True)
+    if r.returncode != 0:
+        ts_print(
+            f"[push] git push FAILED (exit {r.returncode}):\n"
+            f"{r.stderr.strip() or '(no stderr)'}",
+            flush=True,
+        )
+        r.check_returncode()
 
 
 def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
