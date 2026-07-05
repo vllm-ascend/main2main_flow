@@ -27,7 +27,6 @@ Environment variables:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -178,8 +177,8 @@ def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
     result = subprocess.run(
         ["gh", "api", "--method", "POST",
          "-H", "Accept: application/vnd.github+json",
-         f"/repos/{github_repo}/issues/{pr_number}/labels"],
-        input=json.dumps({"labels": labels}),
+         f"/repos/{github_repo}/issues/{pr_number}/labels",
+         *[f"-flabels[]={lbl}" for lbl in labels]],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
