@@ -54,6 +54,19 @@ previous steps. Before making changes:
 step_summary.md must be cumulative: preserve previous content, append new
 "{step_id}" section. The step_target.patch is cumulative (git diff HEAD).
 
+For each step, write a CONCISE entry following this format:
+
+**No-op steps** (vllm-ascend unchanged) — ONE line only:
+  - {step_id}: No-op — <one-line reason, e.g. "upstream CUDA-only change">
+    Do NOT list checked files, subsystems, or files with zero impact.
+
+**Adapted steps** (vllm-ascend changed) — brief entry:
+  - {step_id}: Adapted — <vllm-ascend files changed>
+    Upstream commit: <vllm commit hash (first 8 chars)>
+    Cause: <what upstream change required this adaptation, 1-2 lines>
+    Change: <what was done in vllm-ascend, 1-2 lines>
+    Do NOT list "files checked but unchanged" unless a reviewer needs it.
+
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   - Only modify vllm-ascend at {ascend_path} (never vLLM at {vllm_path})

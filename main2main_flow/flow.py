@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Literal
 
@@ -271,6 +272,16 @@ class Main2MainFlow(Flow[Main2MainState]):
               f"modified={getattr(adapt_result, 'modified_files', [])}, "
               f"vllm={step['end_commit'][:8]}, ascend={ascend_head[:8]}")
 
+        # Reset any accidental changes to vllm (opencode should only touch
+        # vllm-ascend, but may sometimes modify vllm).  Dirty vllm breaks the
+        # next step's git checkout.
+        reset_r = subprocess.run(
+            ["git", "checkout", "--", "."],
+            cwd=vllm_path, capture_output=True, text=True,
+        )
+        if reset_r.returncode != 0:
+            ts_print(f"[ai_analysis] {step_id}: failed to reset vllm: {reset_r.stderr.strip()}")
+
     def _run_e2e_test(self):
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
@@ -325,53 +336,58 @@ class Main2MainFlow(Flow[Main2MainState]):
         last_step = self.state.steps[self.state.current_step - 1]
         step_dir = WORKSPACE_DIR / STEPS_DIR / last_step["id"]
         final_summary_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
-        last_summary_path = step_dir / EACH_STEP_SUMMARY_FILE
-
         step_patch = step_dir / EACH_STEP_TARGET_PATCH_FILE
         has_patch = step_patch.exists()
         if has_patch:
             shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
 
-        # Build factual summary header (changed files, commit range)
-        changed = []
-        if has_patch:
-            patch_text = step_patch.read_text(encoding="utf-8")
-            for line in patch_text.splitlines():
-                if line.startswith("diff --git a/"):
-                    changed.append(line.split()[-1][2:])  # strip "b/" prefix
-        changed = sorted(set(changed))
+        # Build PR #10454 style summary: per-file, with upstream source links.
+        commit_url = "https://github.com/vllm-project/vllm/commit"
+        file_to_commits: dict[str, list[str]] = {}
+        for i in range(self.state.current_step):
+            s = self.state.steps[i]
+            sp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_TARGET_PATCH_FILE
+            if sp.exists():
+                pt = sp.read_text(encoding="utf-8")
+                for line in pt.splitlines():
+                    if line.startswith("diff --git a/"):
+                        fname = line.split()[-1][2:]
+                        file_to_commits.setdefault(fname, []).append(s["end_commit"][:8])
 
-        header = [
-            f"## Summary",
+        parts = [
+            "### What this PR does / why we need it?",
             "",
-            f"- Commit range: `{self.state.base_commit[:8]}...{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}`",
-            f"- Steps: {self.state.current_step}/{self.state.total_steps}",
-            f"- Files changed: {len(changed)}",
+            f"Auto-adapt to vllm upstream "
+            f"`{self.state.base_commit[:8]}...{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}` "
+            f"({self.state.current_step}/{self.state.total_steps} steps completed).",
             "",
         ]
-        if changed:
-            header.append("### Files modified in vllm-ascend")
-            header.append("")
-            for f in changed:
-                header.append(f"- `{f}`")
-            header.append("")
 
-        header.append("---")
-        header.append("")
-
-        # Append per-step AI summaries
-        if last_summary_path.exists():
-            ai_summary = last_summary_path.read_text(encoding="utf-8")
+        if file_to_commits:
+            for fname in sorted(file_to_commits):
+                parts.append(f"#### {fname}")
+                for vc in file_to_commits[fname]:
+                    parts.append(f"- Upstream source: [{vc}]({commit_url}/{vc})")
+                # Extract brief description from the step's AI summary
+                for i in range(self.state.current_step):
+                    s = self.state.steps[i]
+                    if s["end_commit"][:8] in file_to_commits[fname]:
+                        ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
+                        if ssp.exists():
+                            desc = ssp.read_text(encoding="utf-8").strip()
+                            for dline in desc.splitlines():
+                                dline = dline.strip()
+                                if dline and not dline.startswith("#") and len(dline) > 30:
+                                    parts.append(f"  - {dline[:300]}")
+                                    break
+                parts.append("")
+                parts.append("---")
+                parts.append("")
         else:
-            summaries_list = []
-            for index in range(self.state.current_step):
-                current_step = self.state.steps[index]
-                sp = WORKSPACE_DIR / STEPS_DIR / current_step["id"] / EACH_STEP_SUMMARY_FILE
-                if sp.exists():
-                    summaries_list.append(sp.read_text(encoding="utf-8"))
-            ai_summary = "\n\n".join(summaries_list)
+            parts.append("No vllm-ascend changes needed.")
+            parts.append("")
 
-        final_summary_path.write_text("\n".join(header) + "\n" + ai_summary, encoding="utf-8")
+        final_summary_path.write_text("\n".join(parts), encoding="utf-8")
 
         status = "completed" if self.state.final_status == UpgradeCompleted else "failed"
         status_json = {
