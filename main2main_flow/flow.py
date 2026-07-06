@@ -341,9 +341,13 @@ class Main2MainFlow(Flow[Main2MainState]):
         if has_patch:
             shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
 
-        # Build PR #10454 style summary: per-file, with upstream source links.
+        # Build PR body: per-file list with description + upstream commit links.
+        # Extracts Cause/Change lines from the AI's step_summary, skipping verbose
+        # "files checked but unchanged" lists and step header boilerplate.
+        TRACKING_FILE = ".github/vllm-main-verified.commit"
         commit_url = "https://github.com/vllm-project/vllm/commit"
         file_to_commits: dict[str, list[str]] = {}
+        file_descs: dict[str, list[str]] = {}
         for i in range(self.state.current_step):
             s = self.state.steps[i]
             sp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_TARGET_PATCH_FILE
@@ -352,36 +356,35 @@ class Main2MainFlow(Flow[Main2MainState]):
                 for line in pt.splitlines():
                     if line.startswith("diff --git a/"):
                         fname = line.split()[-1][2:]
-                        file_to_commits.setdefault(fname, []).append(s["end_commit"][:8])
+                        if fname != TRACKING_FILE:
+                            file_to_commits.setdefault(fname, []).append(s["end_commit"][:8])
+                            # Extract Cause/Change lines from the step's AI summary
+                            ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
+                            if ssp.exists() and fname not in file_descs:
+                                desc_lines = []
+                                for dline in ssp.read_text(encoding="utf-8").strip().splitlines():
+                                    dl = dline.strip()
+                                    if dl.startswith("Cause:") or dl.startswith("Change:"):
+                                        desc_lines.append(dl)
+                                if desc_lines:
+                                    file_descs[fname] = desc_lines
 
         parts = [
             "### What this PR does / why we need it?",
             "",
-            f"Auto-adapt to vllm upstream "
-            f"`{self.state.base_commit[:8]}...{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}` "
-            f"({self.state.current_step}/{self.state.total_steps} steps completed).",
+            f"vllm upstream `{self.state.base_commit[:8]}...{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}` "
+            f"({self.state.current_step}/{self.state.total_steps} steps).",
             "",
         ]
-
         if file_to_commits:
             for fname in sorted(file_to_commits):
                 parts.append(f"#### {fname}")
+                parts.append("")
+                descs = file_descs.get(fname, [])
+                for d in descs:
+                    parts.append(f"- {d}")
                 for vc in file_to_commits[fname]:
                     parts.append(f"- Upstream source: [{vc}]({commit_url}/{vc})")
-                # Extract brief description from the step's AI summary
-                for i in range(self.state.current_step):
-                    s = self.state.steps[i]
-                    if s["end_commit"][:8] in file_to_commits[fname]:
-                        ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
-                        if ssp.exists():
-                            desc = ssp.read_text(encoding="utf-8").strip()
-                            for dline in desc.splitlines():
-                                dline = dline.strip()
-                                if dline and not dline.startswith("#") and len(dline) > 30:
-                                    parts.append(f"  - {dline[:300]}")
-                                    break
-                parts.append("")
-                parts.append("---")
                 parts.append("")
         else:
             parts.append("No vllm-ascend changes needed.")
