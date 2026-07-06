@@ -45,9 +45,14 @@ def _build_prompt(inputs: dict[str, Any]) -> str:
     mode = inputs.get("mode", "adapt")
     code_structure = _load_ref("code-structure-guide.md")
     if mode == "fix":
-        ref_content = _load_ref("diagnosis-guide.md") + "\n\n" + _load_ref("error-pattern-examples.md") + "\n\n" + code_structure
+        ref_content = (_load_ref("diagnosis-guide.md") + "\n\n"
+                       + _load_ref("error-pattern-examples.md") + "\n\n"
+                       + _load_ref("review-lessons.md") + "\n\n"
+                       + code_structure)
     else:
-        ref_content = _load_ref("adapt-guide.md") + "\n\n" + code_structure
+        ref_content = (_load_ref("adapt-guide.md") + "\n\n"
+                       + _load_ref("review-lessons.md") + "\n\n"
+                       + code_structure)
 
     ctx["reference_content"] = ref_content
     return template.format_map(ctx)

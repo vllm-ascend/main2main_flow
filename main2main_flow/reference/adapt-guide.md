@@ -154,3 +154,35 @@ Use that file as an on-demand routing reference when changed upstream paths or
 symbols need mapping to vllm-ascend code. It is intentionally separate from this
 workflow guide because it describes relatively stable code structure and can be
 refreshed independently.
+
+---
+
+## Common pitfalls
+
+### Importing modules that don't exist (yet)
+
+**Symptom**: Code adds `from vllm.X import Y` but `X` has been renamed, moved, or
+doesn't exist in the target version. mypy reports `import-not-found`, breaking CI
+lint checks.
+
+**Prevention**: Before writing any `import` from vllm, verify the module exists
+in the upstream tree:
+```bash
+grep -r "class Y\|def y_func" ${VLLM_DIR}/vllm/ | head -5
+find ${VLLM_DIR}/vllm -name "X.py"
+```
+
+If the module doesn't exist at the expected path, search for where the symbol
+was moved to, or use a version guard (`vllm_version_is`) to import conditionally.
+
+### Patching symbols from deleted upstream modules
+
+**Symptom**: A patch file patches `vllm.X.Y` but `vllm.X` was deleted upstream.
+The patch silently fails or raises `ModuleNotFoundError` at runtime.
+
+**Prevention**: Check whether the upstream file still exists before patching:
+```bash
+test -f "${VLLM_DIR}/vllm/X.py" || echo "MODULE DELETED"
+```
+If deleted, remove the corresponding vllm-ascend patch and note the reason in
+`step_summary.md`.
