@@ -21,7 +21,7 @@ Environment variables:
   HEAD_FORK       — fork to push to (optional, e.g. vllm-ascend-ci/vllm-ascend)
   GH_TOKEN        — GitHub Personal Access Token (required in CI;
                     also used by git push via credential helper)
-  PR_LABELS       — comma-separated labels to add (default: "ready,ready-for-test")
+  PR_LABELS       — comma-separated labels to add (default: "ready")
   PR_DRAFT        — "true" (default) or "false"
 """
 from __future__ import annotations
@@ -174,13 +174,11 @@ def _git_push(ascend_path: Path, branch: str) -> None:
 def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
     if not labels:
         return
-    result = subprocess.run(
-        ["gh", "api", "--method", "POST",
-         "-H", "Accept: application/vnd.github+json",
-         f"/repos/{github_repo}/issues/{pr_number}/labels",
-         *[f"-flabels[]={lbl}" for lbl in labels]],
-        capture_output=True, text=True,
-    )
+    url = f"https://github.com/{github_repo}/pull/{pr_number}"
+    cmd = ["gh", "pr", "edit", url]
+    for lbl in labels:
+        cmd += ["--add-label", lbl]
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         ts_print(f"[push] Warning: Failed to add labels {labels}: {result.stderr.strip()}")
     else:
@@ -338,7 +336,7 @@ def push_and_create_pr(
         pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
         if pr_number.isdigit():
             if labels is None:
-                labels = ["ready", "ready-for-test"]
+                labels = ["ready"]
             _add_labels(github_repo, pr_number, labels)
 
         # ---- persist PR URL ----
@@ -393,7 +391,7 @@ def main() -> None:
     parser.add_argument("--draft", action="store_true",
                         default=os.getenv("PR_DRAFT", "true").lower() == "true",
                         help="Create as draft PR (default: true).")
-    parser.add_argument("--labels", default=os.getenv("PR_LABELS", "ready,ready-for-test"),
+    parser.add_argument("--labels", default=os.getenv("PR_LABELS", "ready"),
                         help="Comma-separated labels to add to the PR.")
     parser.add_argument("--branch-name", default="",
                         help="Branch name (auto-generated if empty).")

@@ -439,7 +439,7 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         head_fork = os.getenv("HEAD_FORK", "")
         draft = os.getenv("PR_DRAFT", "true").lower() == "true"
-        labels_str = os.getenv("PR_LABELS", "ready,ready-for-test")
+        labels_str = os.getenv("PR_LABELS", "ready")
         labels = [lbl.strip() for lbl in labels_str.split(",") if lbl.strip()]
         branch_name = os.getenv("PR_BRANCH_NAME", "")
 
