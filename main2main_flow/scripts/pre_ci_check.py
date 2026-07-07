@@ -111,10 +111,54 @@ def _check_temp_files(repo: Path) -> dict:
     return {"violations": violations}
 
 
-def run_check(ascend_path: str | Path, release_tag: str) -> dict:
+def _check_format(repo: Path) -> dict:
+    """Run ``bash format.sh`` to check ruff format/lint."""
+    fmt_script = repo / "format.sh"
+    if not fmt_script.exists():
+        return {"violations": [], "detail": "format.sh not found"}
+    r = subprocess.run(
+        ["bash", str(fmt_script)], cwd=str(repo),
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return {"violations": [r.stderr.strip()[:2000]], "detail": "format.sh failed"}
+    return {"violations": [], "detail": "format.sh OK"}
+
+
+def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
+    """Verify all ``from vllm.X`` imports in changed Python files resolve."""
+    vllm_src = Path(vllm_path) / "vllm"
+    changed = run_git(repo, "diff", "--name-only", "HEAD", "--", "*.py").strip()
+    if not changed:
+        return {"violations": []}
+
+    violations: list[str] = []
+    for fname in changed.splitlines():
+        fp = repo / fname.strip()
+        if not fp.exists():
+            continue
+        for line in fp.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line.startswith("from vllm."):
+                continue
+            parts = line.replace(",", " ").split()
+            if len(parts) < 2:
+                continue
+            mod = parts[1]
+            mod_path = vllm_src / f"{mod.replace('.', '/')}.py"
+            if not mod_path.exists():
+                violations.append(f"{fname}: {line}")
+
+    return {"violations": violations}
+
+
+def run_check(ascend_path: str | Path, release_tag: str,
+              vllm_path: str | Path | None = None) -> dict:
     """Run pre-CI checks on the vllm-ascend working tree.
 
     Returns a dict with 'all_passed' (bool) and 'checks' (list of check results).
+    If `vllm_path` is provided, also verifies that any new ``from vllm.X``
+    imports in changed Python files reference modules that actually exist.
     """
     repo = Path(ascend_path)
 
@@ -122,6 +166,8 @@ def run_check(ascend_path: str | Path, release_tag: str) -> dict:
         added_lines = _get_added_lines(repo)
         versions = _check_version_strings(added_lines, release_tag)
         temps = _check_temp_files(repo)
+        fmt = _check_format(repo)
+        imports = _check_broken_imports(repo, vllm_path) if vllm_path else {"violations": []}
     except subprocess.CalledProcessError as exc:
         return {
             "all_passed": False,
@@ -163,5 +209,31 @@ def run_check(ascend_path: str | Path, release_tag: str) -> dict:
     })
     if not temp_ok:
         all_passed = False
+
+    fmt_ok = len(fmt["violations"]) == 0
+    checks.append({
+        "name": "format",
+        "passed": fmt_ok,
+        "detail": fmt["detail"],
+        "violations": fmt["violations"],
+    })
+    if not fmt_ok:
+        all_passed = False
+
+    if vllm_path:
+        import_ok = len(imports["violations"]) == 0
+        checks.append({
+            "name": "broken_imports",
+            "passed": import_ok,
+            "detail": (
+                "all new vllm imports resolve to existing modules"
+                if import_ok
+                else f"{len(imports['violations'])} broken import(s): "
+                     f"{'; '.join(imports['violations'])}"
+            ),
+            "violations": imports["violations"],
+        })
+        if not import_ok:
+            all_passed = False
 
     return {"all_passed": all_passed, "checks": checks}

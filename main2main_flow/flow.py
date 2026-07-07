@@ -237,13 +237,12 @@ class Main2MainFlow(Flow[Main2MainState]):
                 "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
             })
 
-            check_result = run_check(ascend_path, self.state.release_tag)
+            check_result = run_check(ascend_path, self.state.release_tag, vllm_path=vllm_path)
             if check_result["all_passed"]:
                 ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
                 break
             log_path = step_dir / PRE_CI_CHECK_FILE
             log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
-
             error_logs = [str(log_path)]
             ts_print(f"[ai_analysis] {step_id}: pre_ci failed → {log_path}")
 
