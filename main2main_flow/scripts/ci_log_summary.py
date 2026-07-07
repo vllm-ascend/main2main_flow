@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Lightweight CI log summarizer for main2main_flow.
 
-Parses the structured output of run_suite.py (which wraps pytest) and produces
-JSON summaries suitable for automated classification of test failures.
-
-Replaces the now-deleted vllm-ascend/.github/workflows/scripts/ci_log_summary.py.
+Parses plain pytest output (as produced by run_tests.py) and produces JSON
+summaries suitable for automated classification of test failures into code
+bugs vs environment flakes.
 """
 from __future__ import annotations
 
@@ -21,33 +20,37 @@ from main2main_flow.utils import ts_print
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _GHA_GROUP_RE = re.compile(r"^::(?:group|endgroup)::.*$")
 
-_RUN_SUITE_START_RE = re.compile(r"\[\d+/\d+\]\s+START\s+(tests/\S+)")
-_RUN_SUITE_END_RE = re.compile(r"\[\d+/\d+\]\s+(?:PASSED|FAILED\s+\(exit\s+code\s+\d+\))\s+(tests/\S+)")
-_RUN_SUITE_FAILED_RE = re.compile(r"\[\d+/\d+\]\s+FAILED\s+\(exit\s+code\s+\d+\)\s+(tests/\S+)")
-
 _PYTEST_FAILURE_HEADER_RE = re.compile(r"^_+\s+test_\S+.*_+$")
 _PYTEST_FAILURES_BANNER_RE = re.compile(r"^=+\s+FAILURES\s+=+$")
 _PYTEST_SUMMARY_BANNER_RE = re.compile(r"^=+\s+short test summary info\s+=+$", re.IGNORECASE)
 _PYTEST_SUMMARY_FAILED_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)")
 _PYTEST_SUMMARY_FAILED_PAYLOAD_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)\s+-\s+(.+)")
 
-_ERROR_RE = re.compile(r"((?:[A-Za-z_][\w]*\.)*[A-Za-z_][\w]*(?:Error|Exception|Warning)):\s*(.+)")
+_ERROR_RE = re.compile(r"((?:[A-Za-z_][\w]*\.)*[A-Za-z_][\w]*(?:Error|Exception)):\s*(.+)")
 _TRACEBACK_START_RE = re.compile(
     r"^(Traceback\s+\(most\s+recent\s+call\s+last\):"
     r"|ImportError\s+while\s+loading\s+conftest"
     r"|ERROR\s+collecting)"
 )
 
+# Bare TimeoutError is deliberately absent: a code-caused hang looks the same,
+# so the fix agent judges timeouts with context instead of the classifier.
 _ENV_FLAKE_PATTERNS: list[str] = [
     r"OSError:.*Stale file handle",
     r"ConnectionResetError",
     r"filelock.*Lock",
     r"ConnectionRefusedError",
-    r"TimeoutError",
     r"torch\.cuda\.OutOfMemoryError",
     r"OSError:.*No space left on device",
     r"RuntimeError:.*CUDA error",
     r"RuntimeError:.*NCCL",
+    r"RuntimeError:.*HCCL",
+    r"HcclCommInitRootInfo",
+    r"ACL stream synchronize failed",
+    r"RuntimeError:.*ACL",
+    r"NPU out of memory",
+    r"torch\.npu\..*OutOfMemoryError",
+    r"npuSynchronizeDevice",
 ]
 
 
@@ -63,15 +66,16 @@ def _is_env_flake(error_type: str, error_msg: str) -> bool:
 
 
 def _extract_test_name_from_header(line: str) -> str | None:
-    cleaned = clean_line(line).strip("_ ").strip()
-    return cleaned if cleaned else None
+    cleaned = clean_line(line).strip()
+    if not _PYTEST_FAILURE_HEADER_RE.match(cleaned):
+        return None
+    return cleaned.strip("_ ").strip() or None
 
 
 def _extract_failed_test_cases(log_text: str) -> list[str]:
     failed: set[str] = set()
-    lines = log_text.splitlines()
     in_summary = False
-    for raw_line in lines:
+    for raw_line in log_text.splitlines():
         line = clean_line(raw_line)
         if _PYTEST_SUMMARY_BANNER_RE.match(line):
             in_summary = True
@@ -83,24 +87,11 @@ def _extract_failed_test_cases(log_text: str) -> list[str]:
             match = _PYTEST_SUMMARY_FAILED_RE.match(line)
             if match:
                 failed.add(match.group(1))
-    for raw_line in lines:
-        line = clean_line(raw_line)
-        match = _RUN_SUITE_FAILED_RE.search(line)
-        if match and "::" in match.group(1):
-            failed.add(match.group(1))
     return sorted(failed)
 
 
-def _extract_failed_test_files(log_text: str, test_cases: list[str]) -> list[str]:
-    files: set[str] = {tc.split("::")[0] for tc in test_cases}
-    for raw_line in log_text.splitlines():
-        line = clean_line(raw_line)
-        match = _RUN_SUITE_FAILED_RE.search(line)
-        if not match:
-            continue
-        target = match.group(1)
-        files.add(target.split("::")[0] if "::" in target else target)
-    return sorted(files)
+def _extract_failed_test_files(test_cases: list[str]) -> list[str]:
+    return sorted({tc.split("::")[0] for tc in test_cases})
 
 
 def _extract_errors(log_text: str, failed_test_cases: list[str]) -> list[dict]:
@@ -191,7 +182,7 @@ def _extract_errors(log_text: str, failed_test_cases: list[str]) -> list[dict]:
 def process_local_log(log_text: str) -> dict:
     """Parse a raw test log into a structured summary dict."""
     failed_test_cases = _extract_failed_test_cases(log_text)
-    failed_test_files = _extract_failed_test_files(log_text, failed_test_cases)
+    failed_test_files = _extract_failed_test_files(failed_test_cases)
     all_errors = _extract_errors(log_text, failed_test_cases)
 
     code_bugs = [e for e in all_errors if e["category"] == "Code Bug"]

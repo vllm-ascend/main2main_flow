@@ -201,9 +201,15 @@ no code changes:
 - `ConnectionResetError` — transient network failure
 - `filelock` errors — model download contention
 - `ConnectionRefusedError` — service not ready
-- `TimeoutError` — env flake only when the structured summary classifies it as
-  environmental or the context clearly shows infrastructure/resource delay. If
-  it follows scheduler, worker, model runner, or code-path changes, treat it as a
-  possible code bug.
+- `TimeoutError` — NOT auto-classified by the log summarizer; judge it from
+  context. Infrastructure/resource delay (downloads, service startup, node
+  contention) → env flake. If it follows scheduler, worker, model runner, or
+  code-path changes, treat it as a possible code bug.
+- HCCL/ACL infrastructure errors — `HcclCommInitRootInfo` failures,
+  `RuntimeError: ... HCCL`, `ACL stream synchronize failed`, `NPU out of
+  memory` / `torch.npu` OutOfMemoryError. The summarizer classifies these as
+  env flakes; they are usually multi-card infra or resource issues. Double-check
+  only when the step changed distributed/collective code
+  (`vllm_ascend/distributed/`, `vllm_ascend/patch/*/patch_distributed.py`).
 - `torch.cuda.OutOfMemoryError` — resource exhaustion
 - `OSError: No space left on device` — disk full

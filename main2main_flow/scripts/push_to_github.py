@@ -16,17 +16,24 @@ In local mode (PUSH_TO_GITHUB not set):
   5. Open a regular (non-draft) PR.
 
 Environment variables:
-  PUSH_TO_GITHUB  — must be "true" to do anything
-  GITHUB_REPO     — target repo "owner/name" (required, e.g. vllm-project/vllm-ascend)
-  HEAD_FORK       — fork to push to (optional, e.g. vllm-ascend-ci/vllm-ascend)
-  GH_TOKEN        — GitHub Personal Access Token (required in CI;
-                    also used by git push via credential helper)
-  PR_LABELS       — comma-separated labels to add (default: "ready")
-  PR_DRAFT        — "true" (default) or "false"
+  PUSH_TO_GITHUB       — must be "true" to do anything
+  GITHUB_REPO          — target repo "owner/name" (required, e.g. vllm-project/vllm-ascend)
+  HEAD_FORK            — fork to push to (optional, e.g. vllm-ascend-ci/vllm-ascend)
+  GH_TOKEN             — GitHub Personal Access Token (required in CI;
+                         also used by git push via credential helper)
+  PR_LABELS            — comma-separated labels to add (default: "ready")
+  PR_DRAFT             — "true" (default) or "false"
+  PR_BRANCH_NAME       — explicit branch name (overrides dedup/timestamped naming)
+  MAIN2MAIN_PR_DEDUP   — "true" (default): push to the fixed branch
+                         main2main/auto-sync and update an existing open PR
+                         instead of creating new ones each run
+  MAIN2MAIN_KEEP_BRANCH — "true": commit on the current branch instead of a
+                         fresh one; pushing is refused when the run failed
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -38,6 +45,12 @@ from main2main_flow.utils import run_git, ts_print
 
 DEFAULT_WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
 _PR_URL_FILE = "/tmp/main2main/pr_url.txt"
+_DEDUP_BRANCH = "main2main/auto-sync"
+_DEDUP_TMP_REF = "refs/remotes/m2m-tmp/auto-sync"
+
+
+def _dedup_enabled() -> bool:
+    return os.getenv("MAIN2MAIN_PR_DEDUP", "true").lower() != "false"
 
 
 def _run_format(repo: Path) -> None:
@@ -143,20 +156,41 @@ def _detect_default_branch(repo: Path | str, remote: str = "origin") -> str:
         return "main"
 
 
-def _git_push(ascend_path: Path, branch: str) -> None:
+def _lease_flag(ascend_path: Path, push_target: str, branch: str) -> str:
+    """Fetch the remote branch tip into a temp ref so --force-with-lease
+    compares against the real remote state (the fixed dedup branch is
+    force-pushed across runs and has no remote-tracking ref otherwise)."""
+    token = os.environ.get("GH_TOKEN") or ""
+    cmd = ["git"]
+    if token:
+        cmd += ["-c", "http.https://github.com/.extraheader="]
+    cmd += ["fetch", push_target, f"+refs/heads/{branch}:{_DEDUP_TMP_REF}"]
+    r = subprocess.run(
+        cmd, cwd=str(ascend_path), capture_output=True, text=True,
+        env={**os.environ, "GITHUB_TOKEN": token} if token else None,
+    )
+    if r.returncode != 0:
+        # remote branch doesn't exist yet — bare lease requires absence
+        ts_print(f"[push] No remote ref for '{branch}' yet (fetch failed), using bare lease.")
+        return "--force-with-lease"
+    sha = run_git(ascend_path, "rev-parse", _DEDUP_TMP_REF).strip()
+    return f"--force-with-lease={branch}:{sha}"
+
+
+def _git_push(ascend_path: Path, branch: str, lease: str | None = "--force-with-lease") -> None:
     """Push branch to origin.
 
     Clears the extraheader that ``actions/checkout`` set (auto GITHUB_TOKEN,
     141 chars, scoped to upstream only) and replaces it with GH_TOKEN
     (= PAT_TOKEN, 40 chars classic PAT with fork write access).
     """
+    push_args = ["push"] + ([lease] if lease else []) + ["origin", branch]
     token = os.environ.get("GH_TOKEN") or ""
     if not token:
-        run_git(ascend_path, "push", "--force-with-lease", "origin", branch)
+        run_git(ascend_path, *push_args)
         return
     r = subprocess.run(
-        ["git", "-c", "http.https://github.com/.extraheader=",
-         "push", "--force-with-lease", "origin", branch],
+        ["git", "-c", "http.https://github.com/.extraheader=", *push_args],
         cwd=str(ascend_path), capture_output=True, text=True,
         env={**os.environ, "GITHUB_TOKEN": token},
     )
@@ -169,6 +203,38 @@ def _git_push(ascend_path: Path, branch: str) -> None:
             flush=True,
         )
         r.check_returncode()
+
+
+def _commit_if_needed(ascend_path: Path, commit_msg: str) -> bool:
+    """Commit staged changes; skip (and log) when the tree is clean."""
+    if not run_git(ascend_path, "status", "--porcelain").strip():
+        ts_print("[push] nothing to commit")
+        return False
+    run_git(ascend_path, "commit", "-s", "-m", commit_msg)
+    ts_print(f"[push] Committed as '{commit_msg}'.")
+    return True
+
+
+def _find_existing_pr(github_repo: str, branch: str, fork_owner: str) -> str:
+    """Return the URL of an open PR whose head is this branch (and fork owner)."""
+    r = subprocess.run(
+        ["gh", "pr", "list", "--repo", github_repo, "--state", "open",
+         "--head", branch, "--json", "number,url,headRepositoryOwner"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        ts_print(f"[push] Warning: gh pr list failed: {r.stderr.strip()}")
+        return ""
+    try:
+        prs = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError:
+        ts_print(f"[push] Warning: gh pr list returned non-JSON: {r.stdout[:200]}")
+        return ""
+    for pr in prs:
+        owner = (pr.get("headRepositoryOwner") or {}).get("login", "")
+        if not fork_owner or owner == fork_owner:
+            return pr.get("url", "")
+    return ""
 
 
 def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
@@ -197,14 +263,26 @@ def push_and_create_pr(
     draft: bool = True,
     labels: list[str] | None = None,
     branch_name: str = "",
+    partial: tuple[int, int] | None = None,
+    run_status: str = "completed",
 ) -> str:
     """Create a branch (or reuse current), push to fork, and open a GitHub PR.
 
+    ``partial`` = (steps_completed, steps_total) marks a partial-progress PR
+    in the title. ``run_status`` is "completed" or "failed".
     Returns the PR URL, or "" when preconditions are not met.
     Raises subprocess.CalledProcessError on git/gh failure.
     """
     if not github_repo:
         ts_print("[push] GITHUB_REPO is empty, cannot create PR.", file=sys.stderr)
+        return ""
+
+    keep_branch = os.getenv("MAIN2MAIN_KEEP_BRANCH", "false").lower() == "true"
+    if run_status == "failed" and keep_branch:
+        # With keep_branch the working tree still carries the failed step's
+        # unverified changes — pushing them would diverge from final_target.patch.
+        ts_print("[push] Run failed and MAIN2MAIN_KEEP_BRANCH=true — refusing to push "
+                 "unverified failed-step changes.")
         return ""
 
     summary_file = summary_path or workspace_dir / "final_summary.md"
@@ -233,7 +311,19 @@ def push_and_create_pr(
 
     try:
         # Decide branch and apply patch
-        keep_branch = os.getenv("MAIN2MAIN_KEEP_BRANCH", "false").lower() == "true"
+        dedup = _dedup_enabled()
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Dedup mode reuses one fixed branch across scheduled runs (force-with-lease
+        # push + PR update) instead of piling up timestamped branches/PRs.
+        default_branch = _DEDUP_BRANCH if dedup else f"update/main2main-{ts}"
+
+        def _checkout_push_branch(name: str) -> None:
+            if name == _DEDUP_BRANCH:
+                # flow-owned fixed branch: reset to current HEAD if it exists
+                run_git(ascend_path, "checkout", "-B", name)
+            else:
+                run_git(ascend_path, "checkout", "-b", name)
+
         if has_patch:
             if keep_branch and not is_detached:
                 # Reuse existing branch, but still apply the cumulative patch
@@ -242,25 +332,23 @@ def push_and_create_pr(
                 ts_print(f"[push] Reusing branch '{branch}', committing working tree changes")
                 _run_format(ascend_path)
                 run_git(ascend_path, "add", "-A")
-                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-                commit_msg = _build_commit_msg(old_commit, new_commit, ts)
-                run_git(ascend_path, "commit", "-s", "-m", commit_msg)
-                ts_print(f"[push] Committed as '{commit_msg}'.")
+                _commit_if_needed(ascend_path, _build_commit_msg(old_commit, new_commit, ts))
             else:
                 # Create fresh branch and apply patch
-                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-                branch = branch_name or f"update/main2main-{ts}"
-                run_git(ascend_path, "checkout", "-b", branch)
+                branch = branch_name or default_branch
+                _checkout_push_branch(branch)
                 ts_print(f"[push] Created branch '{branch}', applying patch: {patch_file}")
-                run_git(ascend_path, "apply", str(patch_file))
+                if patch_file.read_text(encoding="utf-8").strip():
+                    run_git(ascend_path, "apply", str(patch_file))
+                else:
+                    # git apply rejects empty input; nothing to apply anyway
+                    ts_print("[push] Patch file is empty, skipping apply.")
                 _run_format(ascend_path)
                 run_git(ascend_path, "add", "-A")
-                commit_msg = _build_commit_msg(old_commit, new_commit, ts)
-                run_git(ascend_path, "commit", "-s", "-m", commit_msg)
-                ts_print(f"[push] Committed as '{commit_msg}'.")
+                _commit_if_needed(ascend_path, _build_commit_msg(old_commit, new_commit, ts))
         elif is_detached:
-            branch = branch_name or f"update/main2main-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-            run_git(ascend_path, "checkout", "-b", branch)
+            branch = branch_name or default_branch
+            _checkout_push_branch(branch)
             ts_print(f"[push] Created branch '{branch}' from detached HEAD.")
         else:
             # Reuse current branch, no patch to apply
@@ -282,12 +370,14 @@ def push_and_create_pr(
             fork_url = f"https://github.com/{head_fork}.git"
             run_git(ascend_path, "remote", "set-url", "origin", fork_url)
             ts_print(f"[push] Set origin to {fork_url}")
-            _git_push(ascend_path, branch)
+            lease = _lease_flag(ascend_path, fork_url, branch) if dedup else "--force-with-lease"
+            _git_push(ascend_path, branch, lease)
             head_ref = f"{head_fork.split('/')[0]}:{branch}"
             ts_print(f"[push] Pushed to {fork_url}")
             run_git(ascend_path, "remote", "set-url", "origin", _saved_origin_url)
         else:
-            run_git(ascend_path, "push", "origin", branch)
+            lease = _lease_flag(ascend_path, "origin", branch) if dedup else None
+            _git_push(ascend_path, branch, lease)
             head_ref = branch
             ts_print(f"[push] Pushed branch '{branch}'.")
 
@@ -306,31 +396,42 @@ def push_and_create_pr(
         if head_fork:
             _wait_for_fork_ref(head_fork, branch, local_head)
 
-        pr_title = _build_pr_title(old_commit, new_commit)
-        gh_cmd = [
-            "gh", "pr", "create",
-            "--title", pr_title,
-            "--body", pr_description,
-            "--head", head_ref,
-            "--base", base_branch,
-            "--repo", github_repo,
-        ]
-        if draft:
-            gh_cmd.append("--draft")
+        pr_title = _build_pr_title(old_commit, new_commit, partial)
+        fork_owner = head_fork.split("/")[0] if head_fork else ""
+        pr_url = _find_existing_pr(github_repo, branch, fork_owner) if dedup else ""
+        if pr_url:
+            r = subprocess.run(
+                ["gh", "pr", "edit", pr_url, "--title", pr_title, "--body-file", "-"],
+                input=pr_description, capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                ts_print(f"[push] Warning: failed to update existing PR: {r.stderr.strip()}")
+            ts_print(f"[push] Updated existing PR: {pr_url}")
+        else:
+            gh_cmd = [
+                "gh", "pr", "create",
+                "--title", pr_title,
+                "--body", pr_description,
+                "--head", head_ref,
+                "--base", base_branch,
+                "--repo", github_repo,
+            ]
+            if draft:
+                gh_cmd.append("--draft")
 
-        result = subprocess.run(
-            gh_cmd, capture_output=True, text=True, cwd=str(ascend_path),
-        )
-        if result.returncode != 0:
-            err = result.stderr.strip()
-            ts_print(f"[push] PR create FAILED: {err}", flush=True)
-            ts_print(f"[push] gh stdout: {result.stdout.strip()}", flush=True)
-            if "No commits between" in err:
-                ts_print("[push] No new commits to create PR for, skipping.")
-                return ""
-            result.check_returncode()
-        pr_url = result.stdout.strip()
-        ts_print(f"[push] PR created: {pr_url}")
+            result = subprocess.run(
+                gh_cmd, capture_output=True, text=True, cwd=str(ascend_path),
+            )
+            if result.returncode != 0:
+                err = result.stderr.strip()
+                ts_print(f"[push] PR create FAILED: {err}", flush=True)
+                ts_print(f"[push] gh stdout: {result.stdout.strip()}", flush=True)
+                if "No commits between" in err:
+                    ts_print("[push] No new commits to create PR for, skipping.")
+                    return ""
+                result.check_returncode()
+            pr_url = result.stdout.strip()
+            ts_print(f"[push] PR created: {pr_url}")
 
         # ---- labels ----
         pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
@@ -361,9 +462,13 @@ def _build_commit_msg(old_commit: str, new_commit: str, ts: str) -> str:
     return f"main2main: sync vllm upstream ({ts})"
 
 
-def _build_pr_title(old_commit: str, new_commit: str) -> str:
+def _build_pr_title(old_commit: str, new_commit: str,
+                    partial: tuple[int, int] | None = None) -> str:
     if new_commit:
-        return f"[Misc]feat: adapt to vLLM main ({new_commit[:8]})"
+        title = f"[Misc]feat: adapt to vLLM main ({new_commit[:8]})"
+        if partial:
+            title += f" [partial {partial[0]}/{partial[1]} steps]"
+        return title
     return "main2main: sync vllm upstream"
 
 

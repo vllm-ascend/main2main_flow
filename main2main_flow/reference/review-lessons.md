@@ -3,6 +3,8 @@
 > Compiled from review interactions across 55 merged main2main PRs.
 > Do not skip rules based on subjective judgment.
 
+Sections 1–8 are rationale; §9 is the operative checklist.
+
 ---
 
 ## 1. Version Compatibility

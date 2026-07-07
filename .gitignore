@@ -7,6 +7,9 @@ uv.lock
 output/
 venv/
 workspace/
+repo_cache/
+runs-ledger.jsonl
+.main2main.lock
 logs.txt
 *.pyc
 .claude/
