@@ -1,7 +1,10 @@
-"""OpenCode team adapter — spawns team lead via `opencode run` subprocess.
+"""OpenCode agent runner — three roles via ``opencode run`` subprocesses:
 
-The team lead uses TeamCreate + Agent tools to build a team of 4 specialists.
-All JSON events are printed to console and logged to step_dir.
+  adapter       — generates adaptations (prompt.md + adapt-guide)
+  adapter-fix   — fixes failures (prompt.md + diagnosis-guide + error-patterns)
+  adapter-qa    — independent critic review (review-lessons checklist)
+
+All JSON events streamed to console and logged under step_dir.
 """
 from __future__ import annotations
 
@@ -42,14 +45,16 @@ def _build_prompt(inputs: dict[str, Any]) -> str:
     template = _PROMPT_PATH.read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
 
-    mode = inputs.get("mode", "adapt")
+    role = inputs.get("role", "adapter")
     code_structure = _load_ref("code-structure-guide.md")
-    if mode == "fix":
+    if role == "adapter-fix":
         ref_content = (_load_ref("diagnosis-guide.md") + "\n\n"
                        + _load_ref("error-pattern-examples.md") + "\n\n"
                        + _load_ref("review-lessons.md") + "\n\n"
                        + code_structure)
-    else:
+    elif role == "adapter-qa":
+        ref_content = _load_ref("review-lessons.md")
+    else:  # adapter
         ref_content = (_load_ref("adapt-guide.md") + "\n\n"
                        + _load_ref("review-lessons.md") + "\n\n"
                        + code_structure)
@@ -98,11 +103,13 @@ class AdaptResult(BaseModel):
     modified_files: list[str] = Field(default_factory=list)
     is_noop: bool = Field(default=False)
     step_summary: str = Field(default="")
+    session_id: str = Field(default="")
 
 
 # ── main entry point ──────────────────────────────────────────────────────────
 
-def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
+def run_opencode_adapter(inputs: dict[str, Any],
+                         session_id: str = "") -> AdaptResult:
     base_prompt = _build_prompt(inputs)
     prompt = base_prompt
     step_dir = inputs.get("step_dir", "")
@@ -110,6 +117,7 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
     log_path = step_path / "opencode.log" if step_path else None
     raw_path = step_path / "opencode_raw.jsonl" if step_path else None
     stderr_path = step_path / "opencode_stderr.log" if step_path else None
+    new_session_id = session_id
 
     if log_path:
         log_path.write_text("")
@@ -126,9 +134,23 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
         if log_path:
             _log_prompt(prompt, attempt, log_path)
 
-        lines, reason = _run_once(prompt, log_path, raw_path, stderr_path)
+        lines, reason, sid, rc = _run_once(prompt, log_path, raw_path, stderr_path, session_id)
         all_lines.extend(lines)
         last_reason = reason
+        if sid:
+            new_session_id = sid
+            session_id = sid  # retries also use the same session
+
+        # Treat opencode exit != 0 or zero JSON events as a hard failure,
+        # not a "no-op" (prevents silent false-success when the agent
+        # crashes on launch, e.g. bad API key or model not available).
+        if rc != 0 or not lines:
+            ts_print(f"\n[opencode] HARD FAILURE: exit={rc}, events={len(lines)}", flush=True)
+            last_reason = last_reason or "hard_failure"
+            if attempt < _MAX_STALE_RETRIES:
+                prompt = _build_continue_prompt(base_prompt, inputs, attempt + 1)
+                continue
+            break
 
         if reason is None:
             break
@@ -146,6 +168,7 @@ def run_opencode_adapter(inputs: dict[str, Any]) -> AdaptResult:
         break
 
     result = _build_result(step_path, inputs.get("ascend_path", ""), "".join(all_lines))
+    result.session_id = new_session_id
     if last_reason and not result.step_summary:
         result.step_summary = f"opencode process stopped due to {last_reason}"
     return result
@@ -155,7 +178,7 @@ _StopReason = Literal["stale_timeout", "total_timeout"]
 
 
 def _print_prompt(prompt: str, attempt: int) -> None:
-    title = "TEAM LEAD PROMPT" if attempt == 0 else f"TEAM LEAD CONTINUE PROMPT #{attempt}"
+    title = "PROMPT" if attempt == 0 else f"CONTINUE PROMPT #{attempt}"
     ts_print(f"\n{'═'*60}")
     ts_print(title)
     ts_print(f"{'═'*60}")
@@ -164,7 +187,7 @@ def _print_prompt(prompt: str, attempt: int) -> None:
 
 
 def _log_prompt(prompt: str, attempt: int, log_path: Path) -> None:
-    title = "TEAM LEAD PROMPT" if attempt == 0 else f"TEAM LEAD CONTINUE PROMPT #{attempt}"
+    title = "PROMPT" if attempt == 0 else f"CONTINUE PROMPT #{attempt}"
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}"
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(f"[{ts}] {'═'*60}\n[{ts}] {title}:\n[{ts}] {'═'*60}\n{prompt}\n[{ts}] {'═'*60}\n\n")
@@ -175,16 +198,20 @@ def _run_once(
     log_path: Path | None,
     raw_path: Path | None,
     stderr_path: Path | None,
-) -> tuple[list[str], _StopReason | None]:
+    session_id: str | None = None,
+) -> tuple[list[str], _StopReason | None, str, int]:
     stderr_fh = stderr_path.open("a", encoding="utf-8") if stderr_path else None
+    cmd = [
+        "opencode", "run",
+        "--format", "json",
+        "--model", _DEFAULT_MODEL,
+        "--dangerously-skip-permissions",
+    ]
+    if session_id:
+        cmd += ["--session", session_id]
+    cmd.append(prompt)
     proc = subprocess.Popen(
-        [
-            "opencode", "run",
-            "--format", "json",
-            "--model", _DEFAULT_MODEL,
-            "--dangerously-skip-permissions",
-            prompt,
-        ],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=stderr_fh or subprocess.DEVNULL,
         text=True,
@@ -209,6 +236,7 @@ def _run_once(
     deadline = time.monotonic() + _TIMEOUT_MINUTES * 60
     last_output_time = time.monotonic()
     stop_reason: _StopReason | None = None
+    extracted_sid = ""
 
     try:
         while True:
@@ -233,6 +261,12 @@ def _run_once(
 
             last_output_time = time.monotonic()
             state.lines.append(line)
+            if not extracted_sid:
+                try:
+                    ev = json.loads(line)
+                    extracted_sid = ev.get("sessionID", "")
+                except json.JSONDecodeError:
+                    pass
             if raw_fh:
                 raw_fh.write(line)
             _print_event(line, state)
@@ -253,7 +287,7 @@ def _run_once(
         stop_reason = stop_reason or "total_timeout"
         proc.wait(timeout=10)
 
-    return state.lines, stop_reason
+    return state.lines, stop_reason, extracted_sid, proc.returncode
 
 
 # ── event state ───────────────────────────────────────────────────────────────
@@ -293,24 +327,24 @@ def _print_event(line: str, state: _EventState) -> None:
             if tool == "Agent":
                 agent_name = inp.get("name", "") or inp.get("subagent_type", "?")
                 ts_print(f"\n{'━'*60}", flush=True)
-                ts_print(f"▶ [Team: {agent_name}] spawning ({tool})", flush=True)
+                ts_print(f"▶ [agent: {agent_name}] spawning ({tool})", flush=True)
                 ts_print(f"{'━'*60}", flush=True)
             elif tool == "TeamCreate":
                 team_name = inp.get("team_name", "?")
-                ts_print(f"\n▶ [TeamLead] creating team '{team_name}'", flush=True)
+                ts_print(f"\n▶ [agent] creating team '{team_name}'", flush=True)
             elif tool == "SendMessage":
                 to = inp.get("to", "?")
                 summary = inp.get("summary", "")
-                ts_print(f"\n▶ [TeamLead] → {to}: {summary}", flush=True)
+                ts_print(f"\n▶ [agent] → {to}: {summary}", flush=True)
             else:
                 brief = json.dumps(inp, ensure_ascii=False)[:200]
-                ts_print(f"\n[TeamLead: {tool}] ← {brief}", flush=True)
+                ts_print(f"\n[agent: {tool}] ← {brief}", flush=True)
 
         elif status == "completed":
             output = st.get("output", "")
             if output:
                 agent = state._tool_by_call.get(call_id, "")
-                label = f"Team: {agent}" if agent else "TeamLead"
+                label = f"agent: {agent}" if agent else "agent"
                 # Truncate very long outputs for display
                 display = output if len(output) <= 3000 else output[:3000] + "\n... [truncated]"
                 ts_print(f"\n{'─'*60}\n[{label}] output:\n{display}\n{'─'*60}", flush=True)
@@ -338,7 +372,7 @@ def _log_event(line: str, state: _EventState, fh: Any) -> None:  # noqa: ARG001
         tool = part.get("tool", "")
         st = part.get("state", {})
         inp = json.dumps(st.get("input", {}), ensure_ascii=False)
-        fh.write(f"\n[{ts}] [TeamLead: {tool}] ← {inp[:500]}\n")
+        fh.write(f"\n[{ts}] [agent: {tool}] ← {inp[:500]}\n")
         output = st.get("output", "")
         if output:
             fh.write(f"[{ts}] {'─'*60}\n[{ts}] [output]\n[{ts}] {output[:4000]}\n[{ts}] {'─'*60}\n")
@@ -382,6 +416,9 @@ def _modified_files(ascend_path: str) -> list[str]:
     if not ascend_path:
         return []
     try:
+        # git diff excludes untracked files — add intent-to-add first
+        subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                       capture_output=True)
         result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
             cwd=ascend_path,

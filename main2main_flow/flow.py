@@ -1,6 +1,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -64,6 +65,99 @@ class Main2MainState(BaseModel):
 
     # Changed files from current adaptation step (for precise test selection)
     changed_files: list[str] = []
+
+    # Persistent opencode session ID for full conversational context
+    session_id: str = ""
+
+    # Last vllm commit that actually passed e2e tests (not just was adapted)
+    last_verified_commit: str = ""
+
+
+def _run_adapter_qa(
+    ascend_path: str, vllm_path: str, step_id: str,
+    step_dir: str, release_tag: str,
+) -> list[str]:
+    """adapter-qa: independent review of the current diff.
+
+    Fresh opencode session (no --session reuse) — the reviewer sees only the
+    diff and the review-lessons checklist, without the generator's context.
+    Generator/critic separation.
+    """
+    diff = subprocess.run(
+        ["git", "diff", "HEAD"], cwd=ascend_path,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if not diff:
+        return []  # no changes to review
+
+    lessons_path = Path(__file__).parent / "reference" / "review-lessons.md"
+    if not lessons_path.exists():
+        return []
+    lessons = lessons_path.read_text(encoding="utf-8")
+
+    # Truncate diff if it's huge (keep the checklist accessible)
+    diff_limit = 8000
+    diff_snippet = diff if len(diff) <= diff_limit else diff[:diff_limit] + "\n... [truncated]"
+
+    model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
+    prompt = f"""You are a code reviewer. Review the following adaptation diff for policy violations.
+Use this checklist:
+
+{lessons}
+
+The release tag for version guards is: {release_tag}
+
+Return ONLY a JSON object:
+{{"verdict": "pass"|"fail", "issues": ["issue 1", "issue 2"]}}
+
+If no violations, return {{"verdict": "pass", "issues": []}}.
+
+DIFF:
+{diff_snippet}
+
+VERDICT (JSON only):"""
+
+    ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
+    r = subprocess.run(
+        ["opencode", "run", "--format", "json", "--model", model,
+         "--dangerously-skip-permissions", prompt],
+        cwd=ascend_path, capture_output=True, text=True,
+        timeout=300,  # 5 min for review
+    )
+    if r.returncode != 0:
+        ts_print(f"[adapter-qa] {step_id}: opencode failed (exit {r.returncode})")
+        return [f"Critic review crashed (exit {r.returncode}): {r.stderr.strip()[:500]}"]
+
+    # Extract text from the last JSON event
+    import json as _json
+    text_parts = []
+    for line in r.stdout.strip().splitlines():
+        try:
+            ev = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if ev.get("type") == "text":
+            text_parts.append(ev.get("part", {}).get("text", ""))
+    output = "\n".join(text_parts).strip()
+    ts_print(f"[adapter-qa] {step_id}: output: {output[:500]}")
+
+    # Try to parse JSON verdict from the output
+    try:
+        # Look for JSON block
+        import re
+        m = re.search(r'\{[^}]*"verdict"[^}]*\}', output)
+        if m:
+            verdict = _json.loads(m.group())
+            if verdict.get("verdict") == "pass":
+                return []
+            return verdict.get("issues", ["critic: review flagged issues"])
+    except _json.JSONDecodeError:
+        pass
+
+    # Fallback: if output mentions "pass" or is empty, assume OK
+    if "pass" in output.lower() and "fail" not in output.lower():
+        return []
+    return ["critic: review output could not be parsed as pass — check critic_review.md"]
 
 
 class Main2MainFlow(Flow[Main2MainState]):
@@ -158,6 +252,7 @@ class Main2MainFlow(Flow[Main2MainState]):
             if test_pass:
                 self.state.current_step += 1
                 self.state.retry_count = 0
+                self.state.last_verified_commit = self.state.cur_vllm_commit
                 continue
             else:
                 self.state.retry_count += 1
@@ -218,8 +313,8 @@ class Main2MainFlow(Flow[Main2MainState]):
         adapt_result: AdaptResult | None = None
 
         for attempt in range(1, 4):
-            mode = "fix" if error_logs else "adapt"
-            ts_print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, mode={mode}")
+            role = "adapter-fix" if error_logs else "adapter"
+            ts_print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, role={role}")
             adapt_result = run_opencode_adapter({
                 "step_id": step_id,
                 "previous_step_id": previous_step_id,
@@ -232,19 +327,39 @@ class Main2MainFlow(Flow[Main2MainState]):
                 "release_tag": self.state.release_tag,
                 "vllm_path": vllm_path,
                 "reference_dir": _REFERENCE_DIR,
-                "mode": mode,
+                "role": role,
                 "error_logs": json.dumps(error_logs, ensure_ascii=False),
                 "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
-            })
+            }, session_id=self.state.session_id)
+            if adapt_result.session_id:
+                self.state.session_id = adapt_result.session_id
 
             check_result = run_check(ascend_path, self.state.release_tag, vllm_path=vllm_path)
-            if check_result["all_passed"]:
-                ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
-                break
-            log_path = step_dir / PRE_CI_CHECK_FILE
-            log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
-            error_logs = [str(log_path)]
-            ts_print(f"[ai_analysis] {step_id}: pre_ci failed → {log_path}")
+            if not check_result["all_passed"]:
+                log_path = step_dir / PRE_CI_CHECK_FILE
+                log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
+                error_logs = [str(log_path)]
+                ts_print(f"[ai_analysis] {step_id}: pre_ci failed → {log_path}")
+                continue
+
+            ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
+
+            # ---- adapter-qa: independent review before e2e ----
+            review_issues = _run_adapter_qa(
+                ascend_path=ascend_path,
+                vllm_path=vllm_path,
+                step_id=step_id,
+                step_dir=str(step_dir),
+                release_tag=self.state.release_tag,
+            )
+            if review_issues:
+                review_path = step_dir / "adapter-qa.md"
+                review_path.write_text("\n".join(review_issues), encoding="utf-8")
+                ts_print(f"[ai_analysis] {step_id}: critic found {len(review_issues)} issue(s) → {review_path}")
+                error_logs = [str(review_path)]
+                continue
+            ts_print(f"[ai_analysis] {step_id}: critic passed")
+            break
 
         self.state.test_errors = []
 
@@ -253,6 +368,10 @@ class Main2MainFlow(Flow[Main2MainState]):
             summary_path.write_text(adapt_result.step_summary, encoding="utf-8")
 
         adaptation_patch_path = step_dir / EACH_STEP_TARGET_PATCH_FILE
+        # git diff HEAD excludes untracked files — run git add -N first
+        # so new files created by the adaptation appear in the patch.
+        subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                       capture_output=True)
         adaptation_patch = run_git(ascend_path, "diff", "HEAD")
         adaptation_patch_path.write_text(adaptation_patch, encoding="utf-8")
 
@@ -306,7 +425,19 @@ class Main2MainFlow(Flow[Main2MainState]):
         )
 
         test_passed = result.get("can_commit", False)
-        summary_log = str(WORKSPACE_DIR / STEPS_DIR / str(step_id) / "tests" / f"round-{self.state.retry_count}-summary.json")
+        # Write the e2e result dict to a known path so fix-mode error_logs
+        # can reference it.  run_tests also writes this file, but the dict
+        # is already returned — write it here so the path is predictable.
+        tests_dir = WORKSPACE_DIR / STEPS_DIR / str(step_id) / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        summary_log = str(tests_dir / f"round-{self.state.retry_count}-result.json")
+        import json as _json
+        summary_log_path = Path(summary_log)
+        if not summary_log_path.exists():
+            summary_log_path.write_text(
+                _json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
         ts_print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
 
         if not test_passed:
@@ -396,7 +527,7 @@ class Main2MainFlow(Flow[Main2MainState]):
             "status": status,
             "steps_completed": self.state.current_step,
             "steps_total": self.state.total_steps,
-            "reached_commit": self.state.cur_vllm_commit,
+            "reached_commit": self.state.last_verified_commit or self.state.cur_vllm_commit,
             "old_commit": self.state.base_commit,
             "new_commit": self.state.target_commit or self.state.cur_vllm_commit,
         }
