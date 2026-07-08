@@ -3,44 +3,33 @@
 
 Splits a range of upstream vLLM commits into ordered steps based on changed
 lines in vllm/ source files. Commits that do not touch vllm/ are skipped.
-Pathspecs listed in MAIN2MAIN_PLAN_EXCLUDES (space-separated) are excluded
-from both line counting and the generated patches.
 
 Algorithm:
   1. git log --reverse base..target → ordered commit list
   2. For each commit, git diff-tree --numstat → vllm/ changed lines
   3. Keep only commits that touch vllm/; skip others
   4. Commits accumulate into a step until vllm_changed_lines > LINE_BUDGET
-     or the step reaches COMMIT_COUNT_BUDGET commits
+     or the step reaches the commit-count budget
   5. A single commit with vllm_changed_lines > LINE_BUDGET becomes its own step
 
 Output:
-  - run_plan returns the machine-readable plan (written to <workspace>/steps.json
-    by the flow). With steps_dir given, per-step upstream.patch and
-    changed_files.txt are written there and the raw text is left out of the
-    returned step dicts.
+  - <workspace>/steps.json  — machine-readable plan
 """
 from __future__ import annotations
 
-import os
+import math
 from pathlib import Path
 from typing import Any
 
-from main2main_flow.utils import (
-    VLLM_GIT_CHANGED_FILES,
-    VLLM_GIT_PATCH_FILE,
-    run_git,
-)
+from main2main_flow.utils import run_git
 
 LINE_BUDGET = 1000
-COMMIT_COUNT_BUDGET = 10
+BASE_LINE_BUDGET = 1000
+BASE_COMMIT_COUNT_BUDGET = 10
 
 
-def _diff_pathspecs() -> list[str]:
-    specs = [":(top)vllm/"]
-    for p in os.getenv("MAIN2MAIN_PLAN_EXCLUDES", "").split():
-        specs.append(":(exclude,top)" + p)
-    return specs
+def _commit_count_budget(line_budget: int = LINE_BUDGET) -> int:
+    return max(1, round(BASE_COMMIT_COUNT_BUDGET * math.sqrt(line_budget / BASE_LINE_BUDGET)))
 
 
 def _list_commits(repo: Path, base: str, target: str) -> list[dict[str, str]]:
@@ -60,10 +49,7 @@ def _list_commits(repo: Path, base: str, target: str) -> list[dict[str, str]]:
 
 
 def _vllm_lines_for_commit(repo: Path, sha: str) -> int:
-    output = run_git(
-        repo, "diff-tree", "--no-commit-id", "-r", "--numstat", sha,
-        "--", *_diff_pathspecs(),
-    )
+    output = run_git(repo, "diff-tree", "--no-commit-id", "-r", "--numstat", sha, "--", ":(top)vllm/")
     total = 0
     for line in output.strip().splitlines():
         if not line.strip():
@@ -86,7 +72,7 @@ def _make_step(index: int, commits: list[dict[str, str]], start: str, lines: int
         "end_commit": commits[-1]["sha"],
         "vllm_changed_lines": lines,
         "line_budget": LINE_BUDGET,
-        "commit_count_budget": COMMIT_COUNT_BUDGET,
+        "commit_count_budget": _commit_count_budget(),
     }
 
 
@@ -115,7 +101,7 @@ def _plan_steps(
             start = steps[-1]["end_commit"]
             continue
 
-        if step_lines + lines > LINE_BUDGET or len(step_commits) >= COMMIT_COUNT_BUDGET:
+        if step_lines + lines > LINE_BUDGET or len(step_commits) >= _commit_count_budget():
             steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines))
             start = steps[-1]["end_commit"]
             step_commits = []
@@ -130,53 +116,28 @@ def _plan_steps(
     return steps
 
 
-def _enrich_steps_with_diff(
-    vllm_path: Path,
-    steps: list[dict[str, Any]],
-    steps_dir: Path | None,
-) -> None:
-    specs = _diff_pathspecs()
+def _enrich_steps_with_diff(vllm_path: Path, steps: list[dict[str, Any]]) -> None:
     for step in steps:
-        patch = run_git(
+        step["upstream_patch"] = run_git(
             vllm_path, "diff",
             f"{step['start_commit']}..{step['end_commit']}",
-            "--", *specs,
+            "--", ":(top)vllm/",
         )
         changed_files = run_git(
             vllm_path, "diff", "--name-only",
             f"{step['start_commit']}..{step['end_commit']}",
-            "--", *specs,
+            "--", ":(top)vllm/",
         )
+        step["changed_files"] = changed_files
         step["files_changed"] = sorted(f for f in changed_files.strip().splitlines() if f)
-        if steps_dir is None:
-            # legacy/standalone mode: embed the raw text in the plan
-            step["upstream_patch"] = patch
-            step["changed_files"] = changed_files
-        else:
-            step_dir = steps_dir / step["id"]
-            step_dir.mkdir(parents=True, exist_ok=True)
-            (step_dir / VLLM_GIT_PATCH_FILE).write_text(patch, encoding="utf-8")
-            (step_dir / VLLM_GIT_CHANGED_FILES).write_text(changed_files, encoding="utf-8")
 
 
-def run_plan(
-    vllm_path: Path,
-    base_commit: str,
-    target_commit: str,
-    steps_dir: Path | None = None,
-) -> dict[str, Any]:
-    """Plan the upgrade steps for base_commit..target_commit.
-
-    With ``steps_dir`` given, per-step upstream.patch and changed_files.txt are
-    written under ``<steps_dir>/<step-id>/`` and the returned step dicts carry
-    no raw patch text (only the ``files_changed`` list). With ``steps_dir=None``
-    the raw ``upstream_patch``/``changed_files`` text is embedded (legacy mode).
-    """
+def run_plan(vllm_path: Path, base_commit: str, target_commit: str) -> dict[str, Any]:
     commits = _list_commits(vllm_path, base_commit, target_commit)
     lines_per_commit = {c["sha"]: _vllm_lines_for_commit(vllm_path, c["sha"]) for c in commits}
 
     steps = _plan_steps(commits, lines_per_commit, base_commit)
-    _enrich_steps_with_diff(vllm_path, steps, steps_dir)
+    _enrich_steps_with_diff(vllm_path, steps)
     return {
         "base_commit": base_commit,
         "target_commit": target_commit,

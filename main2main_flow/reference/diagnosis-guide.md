@@ -1,10 +1,10 @@
 # Diagnosis Guide
 
 Use this guide during fix mode. The goal is not to rerun validation locally; it
-is to read the structured errors provided by the prompt, trace each actionable
-failure back to the upstream change that caused it, and update vllm-ascend
-statically. Operational constraints (no tests, no imports, no git commands,
-never touch the vLLM repo) are in the task prompt.
+is to read the structured `error_logs` provided by the prompt, trace each
+actionable failure back to the upstream change that caused it, and update
+vllm-ascend statically. Never modify the vLLM repository; it is only an upstream
+reference.
 
 Runtime validation is external. The main2main flow runs pre_ci_check after each
 opencode attempt and runs `_run_e2e_test` after `_ai_analysis` completes.
@@ -23,17 +23,16 @@ Before changing code:
 - Inspect existing vllm-ascend changes relevant to the failure
 - Reuse prior version guards, helper functions, imports, and adaptation patterns
 
-The patch is generated externally from `git diff HEAD`.
+The patch is generated externally from `git diff HEAD`, so do not run git add,
+git commit, git reset, or git checkout in vllm-ascend.
 
 ---
 
-## Step 1: Read the structured errors
+## Step 1: Read structured error_logs
 
-Fix mode receives two forms of the same evidence: `error_logs` (structured JSON
-file paths produced by the main2main flow) and a pre-trimmed inlined
-`error content` block directly in the prompt. Start from the inlined content for
-orientation, then open the files for detail; do not read raw CI logs unless a
-structured summary explicitly points to a small relevant section.
+Fix mode receives `error_logs` from the prompt. Each entry is a structured JSON
+file path produced by the main2main flow. Start from these files; do not read raw
+CI logs unless a structured summary explicitly points to a small relevant section.
 
 Possible inputs:
 
@@ -48,20 +47,13 @@ Possible inputs:
    - Fix by reading the JSON and inspecting source; do not rerun pre_ci_check
      manually
 
-2. `round-<N>-result.json`
+2. `tests/round-<N>-summary.json`
    - Produced by `_run_e2e_test` after runtime validation fails
    - The exact schema may vary; prefer fields named `code_bugs` and `env_flakes`
      when present
    - If those fields are absent, inspect the available top-level keys and use the
      most structured error list or summary field before considering raw logs
    - Only actionable code bugs require code changes
-
-3. `review.json`
-   - Written by the independent critic pass after pre-CI succeeded; shape:
-     `{"verdict": "pass"|"fail", "issues": [{"file", "line", "issue", "severity"}]}`
-   - A "fail" verdict means the critic found issues that would break CI or
-     runtime; address each listed issue (or refute it in `analysis.md` with
-     concrete evidence from the source)
 
 If a summary contains only environment flakes or missing local/runtime
 dependencies, record that in `analysis.md` and `step_summary.md`; do not add code
@@ -132,6 +124,9 @@ Apply the smallest vllm-ascend change that restores compatibility:
 - Implement new required platform/interface methods with Ascend-appropriate
   behavior
 - Remove obsolete usages only when the upstream patch proves the API is gone
+
+Do not run tests, import vllm/vllm-ascend, launch models, inspect devices, or run
+pre_ci_check manually. Those checks happen outside the AI step.
 
 ---
 

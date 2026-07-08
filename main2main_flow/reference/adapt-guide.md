@@ -36,6 +36,7 @@ adaptation patterns.
 
 The per-step `step_target.patch` is generated externally from `git diff HEAD` and
 is cumulative from the original vllm-ascend base HEAD through the current step.
+Do not run git add, git commit, git reset, or git checkout in vllm-ascend.
 
 ---
 
@@ -67,19 +68,6 @@ which parts of `upstream.patch` deserve attention.
 The key question: **does vllm-ascend subclass, override, call, import, or read
 anything this patch changed?** Internal implementation changes only need
 adaptation when vllm-ascend directly depends on the behavior.
-
----
-
-## Upstream change type → adaptation
-
-| Upstream change | Action in vllm-ascend | Guard needed? |
-|:---|:---|:---|
-| New abstract `Platform` method | Implement in `vllm_ascend/platform.py` now — missing methods fail at runtime, not import | No — additive method is inert on the release version |
-| Config field moved/renamed | Update every vllm-ascend read site (grep the old name) | Yes, if the same code path runs on both versions |
-| Constructor / dataclass change | Fix call sites to the new shape | Only if both shapes must run |
-| Module moved/renamed | Update imports | Yes — branch the import with `vllm_version_is` |
-| Upstream deletes a module that `vllm_ascend/patch/` patches | Remove or guard the patch (see "Adapting vllm_ascend/patch/") | Guard if the patch is still needed on the release version |
-| Dependency bump | Mirror only if vllm-ascend code requires it | No |
 
 ---
 
@@ -129,46 +117,13 @@ externally.
 
 ---
 
-## Adapting `vllm_ascend/patch/`
-
-`vllm_ascend/patch/` monkey-patches upstream symbols and is the most fragile
-coupling to vLLM. How it works (see the header of `vllm_ascend/patch/__init__.py`):
-
-- Two subpackages: `patch/platform/` (applied before workers start, via
-  `adapt_patch(is_global_patch=True)` in `NPUPlatform.pre_register_and_update()`)
-  and `patch/worker/` (applied in each worker's `__init__` via
-  `adapt_patch(is_global_patch=False)`); `adapt_patch` is in `vllm_ascend/utils.py`.
-- Registration is an import side effect: each `patch_*.py` module imports the
-  upstream `vllm.*` module and reassigns attributes on it at import time. The
-  patch is active only if imported in `patch/platform/__init__.py` or
-  `patch/worker/__init__.py`, and every patch must be described in
-  `vllm_ascend/patch/__init__.py`.
-- When an upstream step touches a module, grep `vllm_ascend/patch/` for imports
-  of that module to check whether a patch target still exists at the new commit
-  (read the vllm tree; a patch of a deleted/renamed symbol fails at import or
-  silently patches nothing).
-- Delete vs guard: if the patch is obsolete on both versions, remove the patch
-  file, its import, and its description entry. If it is still needed on the
-  release version only, guard its import in the subpackage `__init__.py` —
-  existing pattern: `if vllm_version_is("0.23.0"): import ...` in
-  `vllm_ascend/patch/platform/__init__.py`.
-
----
-
-## Guard lifecycle
-
-Guards are added against the current release tag from the prompt. They are
-removed only when the tag advances to a release that contains the new behavior —
-never during a main2main run. Before deleting any guard branch or the helper it
-calls, grep the full call chain: multiple patch files may depend on it
-(review-lessons §1.4 / §1.5).
-
----
-
 ## Step 3: Static Self Review
 
-Operational constraints (no tests, no imports, no git commands) are in the task
-prompt. During this AI step, only do static review:
+Do not run pre_ci_check.py, tests, imports, model launches, or runtime validation
+manually. The main2main flow runs pre_ci_check automatically after each opencode
+attempt, and `_run_e2e_test` handles real validation later.
+
+During this AI step, only do static review:
 - Inspect the vllm-ascend diff and relevant source files
 - Verify version guards use the release tag from the prompt
 - Verify guarded branches keep identical public function signatures

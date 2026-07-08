@@ -13,18 +13,11 @@ Usage:
 
 Output (stdout):
     JSON with files_updated and replacement_count.
-
-Environment:
-    MAIN2MAIN_REF_UPDATE_PATHS — optional comma-separated fnmatch globs
-    (matched against repo-relative paths) restricting which tracked files
-    are eligible for replacement. Unset = all tracked files.
 """
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -41,21 +34,12 @@ def _validate_commit(label: str, value: str) -> str:
     return value.lower()
 
 
-def _ref_update_globs() -> list[str]:
-    raw = os.getenv("MAIN2MAIN_REF_UPDATE_PATHS", "")
-    return [g.strip() for g in raw.split(",") if g.strip()]
-
-
 def _tracked_files(repo: Path) -> list[Path]:
     output = run_git(repo, "ls-files", "-z")
-    globs = _ref_update_globs()
     files: list[Path] = []
     for item in output.split("\0"):
-        if not item:
-            continue
-        if globs and not any(fnmatch.fnmatch(item, g) for g in globs):
-            continue
-        files.append(repo / item)
+        if item:
+            files.append(repo / item)
     return files
 
 

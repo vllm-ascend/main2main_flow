@@ -12,21 +12,15 @@ runner. Each test gets its own ``ASCEND_RT_VISIBLE_DEVICES`` so processes do not
 collide on the same device. Pass ``--sequential`` to force one-test-per-round.
 
 Execution targets:
-  - Local:       run directly (no --remote); --in-place runs against the
-                 flow-managed working trees without fetch/reset/patch
+  - Local:       run directly (no --remote)
   - Remote host: --remote user@host (container from env)
   - Remote env:  --remote env (reads MAIN2MAIN_REMOTE_HOST / _CONTAINER)
-
-When test selection yields nothing, MAIN2MAIN_SMOKE_TESTS (space-separated
-test paths) is used as a floor; if still empty the run is recorded as skipped
-(tests_skipped=True in the result JSON). CN mirror setup only happens when
-MAIN2MAIN_USE_CN_MIRRORS=true.
 
 Usage:
   python3 run_tests.py --vllm-path /workspace/vllm --vllm-commit abc1234 \\
       --ascend-path /workspace/vllm-ascend --ascend-commit def5678 \\
-      --step-id step-0 --select-by-files vllm_ascend/worker/worker.py
-  python3 run_tests.py ... --remote env --dry-run
+      --step-id 0 --total-cards 8 --test tests/e2e/pull_request/light/one_card/test_foo.py
+  python3 run_tests.py ... --test tests/e2e/pull_request/light/ --remote env --dry-run
 """
 from __future__ import annotations
 
@@ -47,9 +41,7 @@ PASS_RESULTS = {"passed", "env_flake_pass"}
 DEFAULT_VLLM_REPO = "https://github.com/vllm-project/vllm.git"
 DEFAULT_ASCEND_REPO = "https://github.com/vllm-project/vllm-ascend.git"
 
-def _ssh_opts() -> list[str]:
-    # computed at call time so the env var can be set after import
-    return ["-o", f"StrictHostKeyChecking={os.getenv('MAIN2MAIN_SSH_STRICT', 'accept-new')}"]
+_SSH_OPTS = ["-o", "StrictHostKeyChecking=no"]
 
 # ---- test path → cards ----
 
@@ -120,13 +112,14 @@ def _resolve_remote(remote: str) -> tuple[str, str]:
     host = remote if "@" in remote else os.getenv("MAIN2MAIN_REMOTE_HOST", "")
     container = os.getenv("MAIN2MAIN_REMOTE_CONTAINER", "")
     if not host or not container:
-        raise RuntimeError("--remote used but MAIN2MAIN_REMOTE_HOST / _CONTAINER not set")
+        ts_print("Error: --remote used but MAIN2MAIN_REMOTE_HOST / _CONTAINER not set", file=sys.stderr)
+        sys.exit(1)
     ts_print(f"  Remote target: {host}  container: {container}")
     return host, container
 
 
 def _ssh(host: str, cmd: str, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(["ssh", *_ssh_opts(), host, cmd], **kwargs)
+    return subprocess.run(["ssh", *_SSH_OPTS, host, cmd], **kwargs)
 
 
 def _ensure_container_running(host: str, container: str) -> None:
@@ -151,6 +144,24 @@ def _ensure_container_running(host: str, container: str) -> None:
             ts_print(f"  Container {container} is now running", flush=True)
             return
     ts_print(f"  [warn] Container {container} did not become running within 60s", flush=True)
+
+
+def _sync_remote_dir(host: str, remote_dir: str, local_dir: Path) -> bool:
+    check = _ssh(host, f"test -d {shlex.quote(remote_dir)} && ls -A {shlex.quote(remote_dir)} 2>/dev/null | head -1",
+                 capture_output=True, text=True)
+    if check.returncode != 0 or not check.stdout.strip():
+        return False
+    local_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.which("rsync"):
+        cmd = ["rsync", "-az", "-e", f"ssh {' '.join(_SSH_OPTS)}",
+               f"{host}:{remote_dir}/", str(local_dir) + "/"]
+    else:
+        cmd = ["scp", "-r", *_SSH_OPTS, f"{host}:{remote_dir}/.", str(local_dir) + "/"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        ts_print(f"  [ERROR] Failed to sync: {result.stderr.strip()}", flush=True)
+        return False
+    return True
 
 
 # =============================================================================
@@ -191,34 +202,22 @@ def _run_checked(cmd: list[str], cwd: Path, label: str) -> None:
     rc = proc.wait()
     if rc != 0:
         ts_print(f"  {label} FAILED (exit {rc})", file=sys.stderr, flush=True)
-        raise RuntimeError(f"{label} failed (exit {rc})")
+        sys.exit(rc)
     ts_print(f"  {label} OK", flush=True)
-
-
-def _git_out(repo: Path, *args: str) -> str:
-    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed in {repo}: {r.stderr.strip()}")
-    return r.stdout.strip()
 
 
 def _ensure_repo(path: Path, remote_url: str) -> bool:
     if path.exists():
-        if (path / ".git").exists():
+        if not (path / ".git").exists():
+            ts_print(f"  {path} exists but is not a git repo, removing ... ", end="", flush=True)
+            shutil.rmtree(path)
+            ts_print("OK")
+        else:
             _run_checked(["git", "fetch", "--tags", "--force"], path, "fetch")
             return False
-        if any(path.iterdir()):
-            raise RuntimeError(
-                f"{path} exists but is not a git repo — refusing to delete it; "
-                "remove it manually or point at a different path")
-        # empty directory: safe to clone into
     path.parent.mkdir(parents=True, exist_ok=True)
-    _run_checked(["git", "clone", remote_url, str(path)], path.parent, "clone")
+    _run_checked(["git", "clone", remote_url, str(path)], path, "clone")
     return True
-
-
-def _use_cn_mirrors() -> bool:
-    return os.getenv("MAIN2MAIN_USE_CN_MIRRORS", "false").lower() == "true"
 
 
 _MIRROR_CMDS: list[str] = [
@@ -227,8 +226,6 @@ _MIRROR_CMDS: list[str] = [
 
 
 def _setup_mirrors() -> None:
-    if not _use_cn_mirrors():
-        return
     for cmd in _MIRROR_CMDS:
         subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
 
@@ -241,8 +238,7 @@ def _pip_install(repo_path: Path, extra_env: dict | None = None,
         return
     # uv reads UV_INDEX_URL / UV_EXTRA_INDEX_URL / UV_INDEX_STRATEGY etc. from the
     # environment (set by schedule_main2main.yaml). pip fallback uses pip.conf set
-    # by _setup_mirrors (only when MAIN2MAIN_USE_CN_MIRRORS=true). Only forward
-    # caller-provided extra_env (e.g. VLLM_TARGET_DEVICE).
+    # by _setup_mirrors. Only forward caller-provided extra_env (e.g. VLLM_TARGET_DEVICE).
     env_prefix = ""
     if extra_env:
         env_prefix = " ".join(f"{k}={v}" for k, v in extra_env.items()) + " "
@@ -269,51 +265,32 @@ def _pip_install(repo_path: Path, extra_env: dict | None = None,
 def setup_env(vllm_path: Path, vllm_commit: str, ascend_path: Path,
               ascend_commit: str, patch_path: Path | None = None,
               vllm_remote: str = DEFAULT_VLLM_REPO,
-              ascend_remote: str = DEFAULT_ASCEND_REPO,
-              in_place: bool = False) -> None:
+              ascend_remote: str = DEFAULT_ASCEND_REPO) -> None:
     _setup_mirrors()
     ts_print("=== Setup vLLM ===")
-    if not in_place:
-        _ensure_repo(vllm_path, vllm_remote)
-    # checkout of a commit detaches HEAD; branch pointers are never moved
+    _ensure_repo(vllm_path, vllm_remote)
     _run_checked(["git", "checkout", vllm_commit], vllm_path, f"checkout {vllm_commit[:8]}")
     ts_print("=== Install vLLM ===")
     _pip_install(vllm_path, extra_env={"VLLM_TARGET_DEVICE": "empty"})
 
-    if in_place:
-        # Flow-managed local checkout: the working tree already carries the
-        # adaptation, so only verify we are on the expected commit.
-        ts_print("=== vllm-ascend (in-place): verify checkout ===")
-        head = _git_out(ascend_path, "rev-parse", "HEAD")
-        expected = _git_out(ascend_path, "rev-parse", f"{ascend_commit}^{{commit}}")
-        if head != expected:
-            raise RuntimeError(
-                f"vllm-ascend at {ascend_path} is at {head[:12]}, expected "
-                f"{expected[:12]} — refusing to run in place")
-        ts_print("=== Install vllm-ascend ===")
-        _pip_install(ascend_path, requirements="requirements-dev.txt", verbose=True, skip_editable=True)
-    elif os.getenv("MAIN2MAIN_KEEP_BRANCH", "false").lower() == "true":
+    if os.getenv("MAIN2MAIN_KEEP_BRANCH", "false").lower() == "true":
         ts_print("=== vllm-ascend: branch kept, no reset needed ===")
     else:
         ts_print("=== Setup vllm-ascend ===")
         _ensure_repo(ascend_path, ascend_remote)
-        status = _git_out(ascend_path, "status", "--porcelain")
-        if status:
-            excerpt = "\n".join(status.splitlines()[:15])
-            raise RuntimeError(
-                f"vllm-ascend tree at {ascend_path} is dirty — commit/stash first:\n{excerpt}")
         _run_checked(["git", "fetch", "origin", "--force"], ascend_path, "fetch origin")
-        _run_checked(["git", "checkout", "--detach", ascend_commit], ascend_path,
-                     f"checkout --detach {ascend_commit[:8]}")
+        _run_checked(["git", "reset", "--hard", "origin/main"], ascend_path, "reset to origin/main")
+        _run_checked(["git", "checkout", ascend_commit], ascend_path, f"checkout {ascend_commit[:8]}")
         if patch_path:
             if not patch_path.exists():
-                raise RuntimeError(f"patch not found: {patch_path}")
+                ts_print(f"Error: patch not found: {patch_path}", file=sys.stderr)
+                sys.exit(1)
             _run_checked(["git", "apply", str(patch_path)], ascend_path, f"git apply {patch_path.name}")
         ts_print("=== Install vllm-ascend ===")
         _pip_install(ascend_path, requirements="requirements-dev.txt", verbose=True, skip_editable=True)
     ts_print(f"\nSetup complete.\n  vLLM: {vllm_path} @ {vllm_commit[:8]}\n"
           f"  vllm-ascend: {ascend_path} @ {ascend_commit[:8]}"
-          + (f" + {patch_path.name}" if patch_path and not in_place else ""))
+          + (f" + {patch_path.name}" if patch_path else ""))
 
 
 # =============================================================================
@@ -338,7 +315,9 @@ fi
 
 _SHELL_SETUP = r'''#!/bin/sh
 set -e
-{mirror_block}
+echo "=== Setup mirrors ==="
+{mirror_cmds}
+
 echo "=== Setup vLLM ==="
 {ensure_vllm}
 echo "  checkout {vllm_commit_short} ..."
@@ -349,21 +328,19 @@ cd {vp} && VLLM_TARGET_DEVICE=empty pip install -e . || exit 1
 
 echo "=== Setup vllm-ascend ==="
 {ensure_ascend}
-echo "  fetch origin && checkout {ascend_commit_short} (detached) ..."
-cd {ap} && git fetch origin --force && git checkout -f --detach {ac} || exit 1
+echo "  fetch origin && reset to origin/main ..."
+cd {ap} && git fetch origin --force && git reset --hard origin/main || exit 1
+echo "  checkout {ascend_commit_short} ..."
+cd {ap} && git checkout {ac} || exit 1
 {patch_block}
 echo "=== Install vllm-ascend ==="
-cd {ap} && {ascend_pip_install} || exit 1
+cd {ap} && pip install --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi -r requirements-dev.txt || exit 1
 
 echo ""
 echo "Setup complete."
 echo "  vLLM:        {vllm_path} @ {vllm_commit_short}"
 echo "  vllm-ascend: {ascend_path} @ {ascend_commit_short}{patch_suffix}"
 '''
-
-_ASCEND_PIP_MIRRORS = ("pip install --extra-index-url https://download.pytorch.org/whl/cpu/ "
-                       "--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "
-                       "-r requirements-dev.txt")
 
 
 def _build_setup_script(vllm_path: Path, vllm_commit: str, ascend_path: Path,
@@ -377,13 +354,6 @@ def _build_setup_script(vllm_path: Path, vllm_commit: str, ascend_path: Path,
         patch_block = f'echo "  Applying patch {patch_path.name} ..."\ncd {shlex.quote(str(ascend_path))} && git apply {pp} || exit 1'
         patch_suffix = f" + {patch_path.name}"
 
-    if _use_cn_mirrors():
-        mirror_block = 'echo "=== Setup mirrors ==="\n' + "\n".join(_MIRROR_CMDS) + "\n"
-        ascend_pip_install = _ASCEND_PIP_MIRRORS
-    else:
-        mirror_block = ""
-        ascend_pip_install = "pip install -r requirements-dev.txt"
-
     return _SHELL_SETUP.format(
         vp=shlex.quote(str(vllm_path)),
         ap=shlex.quote(str(ascend_path)),
@@ -391,8 +361,7 @@ def _build_setup_script(vllm_path: Path, vllm_commit: str, ascend_path: Path,
         ac=shlex.quote(ascend_commit[:8]),
         vllm_path=str(vllm_path), ascend_path=str(ascend_path),
         vllm_commit_short=vllm_commit[:8], ascend_commit_short=ascend_commit[:8],
-        mirror_block=mirror_block,
-        ascend_pip_install=ascend_pip_install,
+        mirror_cmds="\n".join(_MIRROR_CMDS),
         ensure_vllm=_SHELL_ENSURE_REPO.format(name="vllm", path=shlex.quote(str(vllm_path)),
                                                remote=shlex.quote(vllm_remote)),
         ensure_ascend=_SHELL_ENSURE_REPO.format(name="ascend", path=shlex.quote(str(ascend_path)),
@@ -419,7 +388,7 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
 
 
 def _run_summary(ci_log_summary: Path, log_path: Path, summary_path: Path,
-                 step_id: str | int, round_number: int) -> dict:
+                 step_id: int, round_number: int) -> dict:
     if not ci_log_summary.exists():
         return {"summary_exit_code": 1,
                 "summary_error": f"ci_log_summary.py not found: {ci_log_summary}",
@@ -535,7 +504,7 @@ def _build_test_cmd(test: str, devices: str, *,
     if mock:
         duration = int(max(_test_cards(test) * 120, 30) * mock_scale)
         if remote_host:
-            return ["ssh", *_ssh_opts(), remote_host,
+            return ["ssh", *_SSH_OPTS, remote_host,
                     f"docker exec {remote_container} sleep {duration}"]
         return ["sleep", str(duration)]
 
@@ -549,13 +518,13 @@ def _build_test_cmd(test: str, devices: str, *,
             f"env {' '.join(env_vars)} "
             f"pytest -sv --color=yes {shlex.quote(test)}"
         )
-        return ["ssh", *_ssh_opts(), remote_host, inner]
+        return ["ssh", *_SSH_OPTS, remote_host, inner]
     return [sys.executable, "-m", "pytest", "-sv", "--color=yes", test]
 
 
 def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
                   test: str, devices: str, ci_log_summary: Path,
-                  ascend_path: Path, step_id: str | int, round_number: int,
+                  ascend_path: Path, step_id: int, round_number: int,
                   env: dict[str, str], *, is_remote: bool, is_mock: bool) -> dict:
     """Execute one test and return its result dict."""
     cwd = Path("/tmp") if is_remote else ascend_path
@@ -595,11 +564,12 @@ def run_tests(
     ascend_path: str | Path,
     ascend_commit: str,
     patch_path: str | Path | None = None,
-    step_id: str | int = 0,
+    step_id: int = 0,
     select_by_files: list[str] | None = None,
     test_cases: list[str] | None = None,
     remote: str | None = None,
     log_dir: str | Path = "",
+    remote_log_dir: str | Path | None = None,
     remote_vllm_path: str | Path = "/vllm-workspace/vllm",
     remote_ascend_path: str | Path = "/vllm-workspace/vllm-ascend",
     round_number: int = 1,
@@ -607,28 +577,21 @@ def run_tests(
     sequential: bool = False,
     mock: bool = False,
     mock_scale: float = 0.1,
-    in_place: bool = False,
 ) -> dict:
     """Run end-to-end tests for a main2main step.
 
     Args:
         select_by_files: Changed file paths for precise test selection
                          via vllm-ascend's select_tests.py.
-        in_place: Run against the flow-managed local working trees: no
-                  fetch/reset/patch on vllm-ascend, only a commit check.
-
-    Returns a dict that always contains "result_path" (the written
-    round-{n}-result.json) and "tests_skipped".
     """
     vllm_path = Path(vllm_path)
     ascend_path = Path(ascend_path)
     if patch_path:
         patch_path = Path(patch_path)
     log_dir = Path(log_dir)
+    remote_log_dir = Path(remote_log_dir) if remote_log_dir else log_dir
     remote_vllm = Path(remote_vllm_path) if remote_vllm_path else Path("/vllm-workspace/vllm")
     remote_ascend = Path(remote_ascend_path) if remote_ascend_path else Path("/vllm-workspace/vllm-ascend")
-    ci_dir = log_dir / str(step_id) / "tests"
-    result_path = (ci_dir / f"round-{round_number}-result.json").resolve()
 
     # ---- step 1: resolve tests ----
     if test_cases:
@@ -642,26 +605,8 @@ def run_tests(
         test_files = []
 
     if not test_files:
-        smoke = os.getenv("MAIN2MAIN_SMOKE_TESTS", "").split()
-        if smoke:
-            ts_print(f"[WARN] no tests selected — falling back to MAIN2MAIN_SMOKE_TESTS "
-                     f"({len(smoke)} path(s))", flush=True)
-            test_files = _discover_test_files(ascend_path, smoke)
-
-    if not test_files:
-        ts_print("[WARN] no tests selected and no smoke tests available — step passes "
-                 "WITHOUT runtime validation; set MAIN2MAIN_SMOKE_TESTS", flush=True)
-        result = {
-            "step_id": step_id, "round": round_number,
-            "ci_result": "skipped", "passed": True,
-            "can_commit": True, "requires_fix": False,
-            "tests_skipped": True, "tests": [], "suite_results": {},
-            "result_path": str(result_path),
-        }
-        ci_dir.mkdir(parents=True, exist_ok=True)
-        result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n",
-                               encoding="utf-8")
-        return result
+        ts_print("No tests to run.", flush=True)
+        return {"can_commit": True, "ci_result": "passed", "suite_results": {}}
 
     # ---- step 2: resolve remote ----
     remote_host: str | None = None
@@ -682,7 +627,8 @@ def run_tests(
     label = "on remote" if remote_host else "local"
     ts_print(f"  Auto-detected {total_cards} NPU(s) {label} (Phy-IDs: {phy_ids})")
     if total_cards <= 0:
-        raise RuntimeError("could not detect any NPU cards")
+        ts_print("Error: could not detect any NPU cards", file=sys.stderr)
+        sys.exit(1)
     all_phy_ids = [int(x) for x in phy_ids.split(",")]
 
     # ---- step 3: sync patch ----
@@ -704,7 +650,7 @@ def run_tests(
         ts_print("=== Running setup on remote container ===")
         script = _build_setup_script(remote_vllm, vllm_commit, remote_ascend, ascend_commit, patch_path)
         inner = f"docker exec {remote_container} sh -c {shlex.quote(script)}"
-        proc = subprocess.Popen(["ssh", *_ssh_opts(), remote_host, inner],
+        proc = subprocess.Popen(["ssh", *_SSH_OPTS, remote_host, inner],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -712,8 +658,7 @@ def run_tests(
         if proc.wait() != 0:
             raise RuntimeError(f"Remote setup failed with exit code {proc.returncode}")
     else:
-        setup_env(vllm_path, vllm_commit, ascend_path, ascend_commit, patch_path,
-                  in_place=in_place)
+        setup_env(vllm_path, vllm_commit, ascend_path, ascend_commit, patch_path)
 
     # ---- step 5: locate ci_log_summary ----
     ci_log_summary = Path(__file__).parent / "ci_log_summary.py"
@@ -724,6 +669,8 @@ def run_tests(
     env.setdefault("VLLM_USE_MODELSCOPE", "true")
 
     # ---- step 7: schedule ----
+    ci_dir = log_dir / str(step_id) / "tests"
+    result_path = ci_dir / f"round-{round_number}-result.json"
     rounds = [[t] for t in test_files] if sequential else _schedule_rounds(test_files, total_cards)
     device_rounds = _assign_devices(rounds, all_phy_ids)
 
@@ -739,18 +686,7 @@ def run_tests(
 
     if dry_run:
         ts_print("[dry-run] Skipping execution.", flush=True)
-        result = {
-            "step_id": step_id, "round": round_number,
-            "ci_result": "dry_run", "passed": False,
-            "can_commit": False, "requires_fix": False,
-            "tests_skipped": False,
-            "tests": test_files, "suite_results": {},
-            "result_path": str(result_path),
-        }
-        ci_dir.mkdir(parents=True, exist_ok=True)
-        result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n",
-                               encoding="utf-8")
-        return result
+        return {}
 
     # ---- step 8: execute ----
     t0 = time.monotonic()
@@ -801,7 +737,15 @@ def run_tests(
                             "total_cards": total_cards, "elapsed_s": round(round_elapsed, 1)})
         ts_print(f"  Round {round_idx} elapsed: {round_elapsed:.1f}s", flush=True)
 
+        if remote_host:
+            remote_ci = f"{remote_log_dir}/{step_id}/tests"
+            ts_print(f"  Pulling remote logs: {remote_host}:{remote_ci} -> {ci_dir}", flush=True)
+            _sync_remote_dir(remote_host, remote_ci, ci_dir)
+
     total_elapsed = time.monotonic() - t0
+    if remote_host:
+        ts_print(f"\n=== Final log sync ===", flush=True)
+        _sync_remote_dir(remote_host, f"{remote_log_dir}/{step_id}/tests", ci_dir)
 
     # ---- step 9: aggregate ----
     outcomes = {r["ci_result"] for r in all_results}
@@ -820,7 +764,6 @@ def run_tests(
         "tests": [r["test"] for r in all_results],
         "ci_result": overall, "passed": overall == "passed",
         "can_commit": overall in PASS_RESULTS, "requires_fix": overall == "failed",
-        "tests_skipped": False, "result_path": str(result_path),
         "log_path": str(ci_dir), "summary_path": str(ci_dir),
         "total_cards": total_cards, "sequential": sequential, "remote": remote,
         "elapsed_s": round(total_elapsed, 1), "rounds": rounds_info,
@@ -848,7 +791,7 @@ def main() -> None:
     p.add_argument("--ascend-path", type=Path, required=True)
     p.add_argument("--ascend-commit", required=True)
     p.add_argument("--patch", type=Path)
-    p.add_argument("--step-id", type=str, required=True)
+    p.add_argument("--step-id", type=int, required=True)
     p.add_argument("--round", type=int, default=1)
     p.add_argument("--select-by-files", nargs="*", default=None,
                    help="Changed file paths for precise test selection via select_tests.py.")
@@ -857,29 +800,22 @@ def main() -> None:
     p.add_argument("--remote")
     p.add_argument("--remote-vllm-path", type=Path)
     p.add_argument("--remote-ascend-path", type=Path)
-    p.add_argument("--in-place", action="store_true",
-                   help="Run against the local working trees as-is (no fetch/reset/patch).")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--mock", action="store_true")
     p.add_argument("--mock-scale", type=float, default=0.1)
     args = p.parse_args()
 
-    try:
-        result = run_tests(
-            vllm_path=args.vllm_path, vllm_commit=args.vllm_commit,
-            ascend_path=args.ascend_path, ascend_commit=args.ascend_commit,
-            patch_path=args.patch, step_id=args.step_id,
-            select_by_files=args.select_by_files,
-            remote=args.remote, log_dir=args.log_dir,
-            remote_vllm_path=args.remote_vllm_path,
-            remote_ascend_path=args.remote_ascend_path,
-            round_number=args.round, dry_run=args.dry_run,
-            sequential=args.sequential, mock=args.mock, mock_scale=args.mock_scale,
-            in_place=args.in_place,
-        )
-    except (RuntimeError, ValueError) as exc:
-        ts_print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+    result = run_tests(
+        vllm_path=args.vllm_path, vllm_commit=args.vllm_commit,
+        ascend_path=args.ascend_path, ascend_commit=args.ascend_commit,
+        patch_path=args.patch, step_id=args.step_id,
+        select_by_files=args.select_by_files,
+        remote=args.remote, log_dir=args.log_dir,
+        remote_vllm_path=args.remote_vllm_path,
+        remote_ascend_path=args.remote_ascend_path,
+        round_number=args.round, dry_run=args.dry_run,
+        sequential=args.sequential, mock=args.mock, mock_scale=args.mock_scale,
+    )
     sys.exit(0 if result.get("can_commit", False) else 1)
 
 

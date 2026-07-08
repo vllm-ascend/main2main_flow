@@ -1,13 +1,10 @@
 """CLI entry-point for ``kickoff`` console script and ``python main.py``."""
 import argparse
 import json
-import os
 import sys
-import traceback
 from pathlib import Path
 
 from main2main_flow.flow import Main2MainFlow
-from main2main_flow.utils import FlowLock
 
 
 def kickoff():
@@ -29,19 +26,7 @@ def kickoff():
         inputs["target_commit"] = args.target_commit
 
     flow = Main2MainFlow()
-    try:
-        with FlowLock():
-            try:
-                flow.kickoff(inputs=inputs if inputs else None)
-            except Exception as exc:
-                if os.getenv("MAIN2MAIN_DEBUG", "false").lower() == "true":
-                    traceback.print_exc()
-                print(f"[main2main] flow failed: {exc}", file=sys.stderr)
-                sys.exit(1)
-    except RuntimeError as exc:
-        # FlowLock contention (flow errors are handled and exit above)
-        print(f"[main2main] {exc}", file=sys.stderr)
-        sys.exit(2)
+    flow.kickoff(inputs=inputs if inputs else None)
 
 
 def plot():

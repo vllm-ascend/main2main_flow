@@ -42,7 +42,7 @@ require vLLM Ascend adaptation:
    - Router interface changes
    - Activation function changes
 
-5. **Config** (`vllm/config/`)
+5. **Config** (`vllm/config*.py`)
    - Field renames or moves between config classes — vllm-ascend reads config fields
      directly in many places; a rename causes `AttributeError` everywhere it's accessed
    - New required fields
@@ -137,7 +137,7 @@ vllm-ascend locations, not guaranteed locations.
 | `vllm/model_executor/layers/attention/` | `vllm_ascend/attention/`, `vllm_ascend/ops/mm_encoder_attention.py` | Attention wrappers and kernels |
 | `vllm/model_executor/layers/fused_moe/` | `vllm_ascend/ops/fused_moe/` | MoE kernel interface, router, experts |
 | `vllm/distributed/` | `vllm_ascend/distributed/` | Collective ops, TP/PP, KV transfer |
-| `vllm/config/` | `vllm_ascend/ascend_config.py`, plus call sites under `vllm_ascend/` | Config fields and constructor args |
+| `vllm/config*.py` | `vllm_ascend/ascend_config.py`, plus call sites under `vllm_ascend/` | Config fields and constructor args |
 | `vllm/compilation/` | `vllm_ascend/compilation/` | Passes, fusion rules, registration |
 | `vllm/model_executor/models/` | `vllm_ascend/models/` | Model forward signatures and loaders |
 | `vllm/model_executor/layers/quantization/` | `vllm_ascend/quantization/` | Quantization methods and kernels |
@@ -145,43 +145,7 @@ vllm-ascend locations, not guaranteed locations.
 | `vllm/model_executor/custom_op.py` | `vllm_ascend/ops/` | Custom op registration |
 | `vllm/v1/worker/gpu/spec_decode/` | `vllm_ascend/spec_decode/` | MTP/Eagle proposer interfaces |
 | `vllm/lora/` | `vllm_ascend/lora/` | LoRA op interface, punica integration |
-| `vllm/v1/sample/` | `vllm_ascend/sample/` | Sampler, rejection sampler, penalty kernels |
+| `vllm/v1/sample/`, `vllm/model_executor/layers/sampler.py` | `vllm_ascend/sample/` | Sampler, rejection sampler, penalty kernels |
 | `vllm/model_executor/model_loader/` | `vllm_ascend/model_loader/` | Model loading hooks, weight format adapters |
-| `vllm/config/`, `vllm/distributed/`, `vllm/v1/core/` (top monkey-patch targets) | `vllm_ascend/patch/platform/`, `vllm_ascend/patch/worker/` | Patched upstream symbols still exist; patch imports registered in the subpackage `__init__.py` |
 | `requirements*`, `constraints*`, `pyproject.toml`, `setup.py`, `setup.cfg` | Matching dependency files in vllm-ascend | Dependency versions |
 <!-- END REFERENCE: file-mapping -->
-
----
-
-## Test Topology
-
-Maps a failing test path back to the subsystem and the vllm-ascend files most
-likely at fault. Layout: `tests/ut/` (CPU unit tests, mirrors `vllm_ascend/`)
-and `tests/e2e/pull_request/{one_card,two_card,four_card}/` (NPU tests grouped
-by card count). The authoritative test↔source mapping is
-`.github/workflows/scripts/test_config.yaml` in vllm-ascend
-(`source_file_dependencies` per module). Other e2e trees (`nightly/`, `models/`,
-`vllm_interface/`, `doctests/`) are not run by the main2main flow's selection.
-
-<!-- BEGIN REFERENCE: test-topology -->
-| Test path (under `tests/e2e/pull_request/`) | Subsystem | Key vllm-ascend paths |
-|:---|:---|:---|
-| `one_card/spec_decode/`, `two_card/spec_decode/`, `four_card/spec_decode/` | Speculative decoding | `vllm_ascend/spec_decode/` |
-| `one_card/lora/`, `two_card/lora/` | LoRA | `vllm_ascend/lora/` |
-| `one_card/aclgraph/`, `two_card/aclgraph/`, `four_card/test_graph_mode.py` | ACL graph mode | `vllm_ascend/compilation/acl_graph.py`, `vllm_ascend/platform.py` |
-| `one_card/compile/` | Fusion passes | `vllm_ascend/compilation/passes/` |
-| `one_card/test_qwen3_0_6b.py`, `one_card/test_minicpm.py` | Basic ops | `vllm_ascend/ops/` |
-| `one_card/test_multistream_overlap_shared_expert.py`, `two_card/test_deepseek_multistream_moe.py`, `two_card/test_moe_routing_replay.py` | MoE | `vllm_ascend/ops/fused_moe/` |
-| `one_card/test_qwen3_8b_w8a8.py`, `two_card/test_qwen3_5_35b_a3b_w8a8.py` | Quantization | `vllm_ascend/quantization/` |
-| `two_card/test_data_parallel.py`, `four_card/test_data_parallel_tp2.py`, `two_card/test_shared_expert_dp.py`, `two_card/test_disaggregated_encoder.py` | Distributed | `vllm_ascend/distributed/` |
-| `one_card/test_sampler.py` | Sampling | `vllm_ascend/sample/` |
-| `one_card/test_attention_fa3.py`, `four_card/test_deepseek_v4.py` | Attention backends | `vllm_ascend/attention/` |
-| `one_card/model_runner_v2/` | Worker v2 | `vllm_ascend/worker/v2/` |
-| `one_card/pooling/`, `two_card/test_prefix_caching.py`, `four_card/test_pipeline_parallel.py` | Worker / model runner | `vllm_ascend/worker/` |
-| `one_card/test_camem.py` | Device allocator | `vllm_ascend/device_allocator/` |
-| `one_card/test_cpu_offloading.py` | KV offload | `vllm_ascend/kv_offload/` |
-| `two_card/test_qwen3_moe_eplb.py` | EPLB | `vllm_ascend/eplb/` |
-| `one_card/_310p/`, `four_card/_310p/` | 310P device | `vllm_ascend/_310p/` |
-| `one_card/test_xlite.py` | XLite compiler | `vllm_ascend/xlite/` |
-| `one_card/test_vlm.py`, `two_card/test_qwen3_6_27b_fia.py` | Multimodal / VL ops | `vllm_ascend/ops/conv.py`, `vllm_ascend/ops/mm_encoder_attention.py` |
-<!-- END REFERENCE: test-topology -->
