@@ -47,16 +47,19 @@ Possible inputs:
    - Fix by reading the JSON and inspecting source; do not rerun pre_ci_check
      manually
 
-2. `tests/round-<N>-summary.json`
-   - Produced by `_run_e2e_test` after runtime validation fails
-   - The exact schema may vary; prefer fields named `code_bugs` and `env_flakes`
-     when present
-   - If those fields are absent, inspect the available top-level keys and use the
-     most structured error list or summary field before considering raw logs
-   - Only actionable code bugs require code changes
+2. `tests/round-<N>-result.json`
+   - Produced after e2e tests fail.  Contains the overall verdict, per-test
+     results (`suite_results`), and per-test log file paths.
+   - Start from this file, then open the individual test logs
+     (`round-<N>-<slug>.log`) for each failed test case.  A test name alone
+     is not actionable — read the log to get the traceback, assertion, or
+     OOM message.
+   - `code_bugs_count` > 0 → code fix needed.  `env_flakes_count` > 0 with
+     `code_bugs_count` == 0 → no code fix; record the flake in analysis.
+   - Only actionable code bugs require code changes.
 
-If a summary contains only environment flakes or missing local/runtime
-dependencies, record that in `analysis.md` and `step_summary.md`; do not add code
+If the result contains only environment flakes or missing runtime dependencies,
+record that in `analysis.md` and `step_summary.md`; do not add code
 workarounds.
 
 ---

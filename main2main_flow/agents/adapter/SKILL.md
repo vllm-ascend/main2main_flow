@@ -75,10 +75,8 @@ The step_target.patch is cumulative (git diff HEAD).
 
 ### fix mode
 
-The working tree already contains the failed adaptation — do NOT start from scratch.
-1. Read the inlined error content FIRST
-2. Inspect the failing vllm-ascend files
-3. Apply the SMALLEST possible fix — change nothing else
+The working tree already contains the failed adaptation — do NOT start from
+scratch.  See `reference/diagnosis-guide.md` for the full fix workflow.
 
 ## Output
 
