@@ -126,28 +126,32 @@ def _check_format(repo: Path) -> dict:
 
 
 def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
-    """Verify all ``from vllm.X`` imports in changed Python files resolve."""
-    vllm_src = Path(vllm_path) / "vllm"
-    changed = run_git(repo, "diff", "--name-only", "HEAD", "--", "*.py").strip()
-    if not changed:
-        return {"violations": []}
+    """Verify all newly-added ``from vllm.X`` imports resolve to existing files.
 
+    Only checks *added* lines (like the version_strings check), and handles
+    package imports (``from vllm.config import X`` → ``vllm/config/__init__.py``).
+    """
+    vllm_src = Path(vllm_path) / "vllm"
+    added_lines = _get_added_lines(repo)
     violations: list[str] = []
-    for fname in changed.splitlines():
-        fp = repo / fname.strip()
-        if not fp.exists():
+
+    for entry in added_lines:
+        line = entry["text"].strip()
+        if not line.startswith("from vllm."):
             continue
-        for line in fp.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line.startswith("from vllm."):
-                continue
-            parts = line.replace(",", " ").split()
-            if len(parts) < 2:
-                continue
-            mod = parts[1]
-            mod_path = vllm_src / f"{mod.replace('.', '/')}.py"
-            if not mod_path.exists():
-                violations.append(f"{fname}: {line}")
+        if "import " in line and "def " in line:
+            continue
+        parts = line.replace(",", " ").split()
+        if len(parts) < 2:
+            continue
+        mod = parts[1]
+        # mod looks like "vllm.config" — strip the leading "vllm." prefix
+        if mod.startswith("vllm."):
+            mod = mod[len("vllm."):]
+        base = vllm_src / mod.replace(".", "/")
+        # Accept both flat module and package (__init__.py)
+        if not (base.with_suffix(".py").exists() or (base / "__init__.py").exists()):
+            violations.append(f"{entry['file']}:{entry['line_no']}: {line}")
 
     return {"violations": violations}
 
