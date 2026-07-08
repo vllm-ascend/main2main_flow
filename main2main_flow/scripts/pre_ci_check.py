@@ -1,24 +1,35 @@
 """Pre-CI verification for main2main steps.
 
-Runs two mechanical checks before CI to catch common adaptation errors:
+Runs mechanical checks before CI to catch common adaptation errors:
   1. Version string consistency: newly added vllm_version_is() calls use
      the correct release tag (scoped to current diff, not the whole repo).
   2. Temp file cleanliness: no intermediate files in the repository.
+  3. Format: repo's format.sh runs clean (skipped when its tools are missing).
+  4. Broken imports: `from vllm.X import ...` statements on ADDED lines
+     resolve against the target vllm tree.
 
 Design note:
-    The version string check only examines lines ADDED in the current diff
-    (git diff HEAD), not the entire repo. Previous main2main runs leave
-    behind guards like vllm_version_is("0.20.2") that are correct for that
-    version boundary. Scanning the full repo would flag all historical guards
-    as mismatches whenever the release tag advances.
+    The version string and broken-imports checks only examine lines ADDED in
+    the current diff (git diff HEAD), not the entire repo. Previous main2main
+    runs leave behind guards like vllm_version_is("0.20.2") that are correct
+    for that version boundary; likewise pre-existing imports were valid at an
+    older vllm commit. Scanning the full repo would flag historical code
+    whenever the release tag or target commit advances.
+
+    The imports check is AST-based (not line regexes) so multi-line imports
+    parse correctly, and it suppresses imports guarded by a
+    vllm_version_is() branch or a try/except ImportError — those are the
+    legitimate ways to reference an old vllm path. A file that fails
+    ast.parse is itself a violation: a syntax error must fail pre-CI.
 """
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 from pathlib import Path
 
-from main2main_flow.utils import run_git
+from main2main_flow.utils import run_git, ts_print
 
 _TEMP_PATTERNS = [
     ".log",
@@ -91,20 +102,34 @@ def _check_version_strings(added_lines: list[dict[str, str]], release_tag: str) 
 
 
 def _check_temp_files(repo: Path) -> dict:
-    status_output = run_git(repo, "status", "--short")
+    status_output = run_git(repo, "status", "--porcelain=v1", "-z")
     untracked_output = run_git(repo, "ls-files", "--others", "--exclude-standard")
 
     all_files: set[str] = set()
-    for line in (status_output + untracked_output).strip().splitlines():
-        filepath = line.strip().lstrip("MADRCU?! ").strip()
-        if filepath:
-            all_files.add(filepath)
+    # -z records: "XY <path>"; rename/copy records are followed by a second
+    # NUL-separated origin path — the destination comes first, skip the origin.
+    tokens = status_output.split("\0")
+    i = 0
+    while i < len(tokens):
+        record = tokens[i]
+        i += 1
+        if len(record) < 4:
+            continue
+        status, filepath = record[:2], record[3:]
+        all_files.add(filepath)
+        if "R" in status or "C" in status:
+            i += 1
+    for line in untracked_output.splitlines():
+        if line.strip():
+            all_files.add(line.strip())
 
     violations: list[str] = []
     for filepath in sorted(all_files):
         basename = Path(filepath).name
         for pattern in _TEMP_PATTERNS:
-            if pattern in basename or basename.endswith(pattern):
+            # extension-like patterns match only at the end; others as substring
+            if (basename.endswith(pattern) if pattern.startswith(".")
+                    else pattern in basename):
                 violations.append(filepath)
                 break
 
@@ -120,34 +145,90 @@ def _check_format(repo: Path) -> dict:
         ["bash", str(fmt_script)], cwd=str(repo),
         capture_output=True, text=True,
     )
-    if r.returncode != 0:
-        return {"violations": [r.stderr.strip()[:2000]], "detail": "format.sh failed"}
-    return {"violations": [], "detail": "format.sh OK"}
+    if r.returncode == 0:
+        return {"violations": [], "detail": "format.sh OK"}
+    output = (r.stdout + "\n" + r.stderr).strip()[:4000]
+    if "command not found" in output or "No module named" in output:
+        # infra problem, not the adaptation's fault — never ask the agent to fix it
+        ts_print(f"[pre-ci] format.sh could not run (missing tools):\n{output}")
+        return {"violations": [], "detail": "format.sh could not run (missing tools)"}
+    return {"violations": [output], "detail": "format.sh failed"}
 
 
-def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
-    """Verify all ``from vllm.X`` imports in changed Python files resolve."""
-    vllm_src = Path(vllm_path) / "vllm"
-    changed = run_git(repo, "diff", "--name-only", "HEAD", "--", "*.py").strip()
-    if not changed:
-        return {"violations": []}
+def _handles_import_error(handler: ast.ExceptHandler) -> bool:
+    if handler.type is None:
+        return False
+    for node in ast.walk(handler.type):
+        if isinstance(node, ast.Name) and node.id in (
+                "ImportError", "ModuleNotFoundError"):
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in (
+                "ImportError", "ModuleNotFoundError"):
+            return True
+    return False
+
+
+def _is_guarded(node: ast.AST, parents: dict[ast.AST, ast.AST],
+                source: str) -> bool:
+    """True when an ancestor guards the import: a vllm_version_is() branch
+    or a try with an except ImportError/ModuleNotFoundError handler."""
+    cur = parents.get(node)
+    while cur is not None:
+        if isinstance(cur, ast.If):
+            test_src = ast.get_source_segment(source, cur.test) or ""
+            if "vllm_version_is" in test_src:
+                return True
+        elif isinstance(cur, ast.Try):
+            if any(_handles_import_error(h) for h in cur.handlers):
+                return True
+        cur = parents.get(cur)
+    return False
+
+
+def _check_broken_imports(repo: Path, vllm_path: Path,
+                          added: list[dict[str, str]]) -> dict:
+    """Verify ``from vllm.X`` imports on ADDED lines resolve in the vllm tree."""
+    added_by_file: dict[str, set[int]] = {}
+    for entry in added:
+        if entry["file"].endswith(".py"):
+            added_by_file.setdefault(entry["file"], set()).add(
+                int(entry["line_no"]))
 
     violations: list[str] = []
-    for fname in changed.splitlines():
-        fp = repo / fname.strip()
+    for fname, added_lines in sorted(added_by_file.items()):
+        fp = repo / fname
         if not fp.exists():
             continue
-        for line in fp.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line.startswith("from vllm."):
+        source = fp.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            violations.append(f"{fname}: unparseable file: {exc}")
+            continue
+
+        parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
                 continue
-            parts = line.replace(",", " ").split()
-            if len(parts) < 2:
+            module = node.module
+            # ``from vllm import X`` is symbol-level — not checkable here.
+            if node.level or not module or not module.startswith("vllm."):
                 continue
-            mod = parts[1]
-            mod_path = vllm_src / f"{mod.replace('.', '/')}.py"
-            if not mod_path.exists():
-                violations.append(f"{fname}: {line}")
+            if node.lineno not in added_lines:
+                continue
+            if _is_guarded(node, parents, source):
+                continue
+            rel = module.replace(".", "/")
+            if ((vllm_path / f"{rel}.py").exists()
+                    or (vllm_path / rel / "__init__.py").exists()):
+                continue
+            violations.append(
+                f"{fname}:{node.lineno}: from {module} import ... "
+                f"— module not found under {vllm_path}/")
 
     return {"violations": violations}
 
@@ -157,8 +238,8 @@ def run_check(ascend_path: str | Path, release_tag: str,
     """Run pre-CI checks on the vllm-ascend working tree.
 
     Returns a dict with 'all_passed' (bool) and 'checks' (list of check results).
-    If `vllm_path` is provided, also verifies that any new ``from vllm.X``
-    imports in changed Python files reference modules that actually exist.
+    If `vllm_path` is provided, also verifies that ``from vllm.X`` imports on
+    lines added in the current diff reference modules that actually exist.
     """
     repo = Path(ascend_path)
 
@@ -167,7 +248,8 @@ def run_check(ascend_path: str | Path, release_tag: str,
         versions = _check_version_strings(added_lines, release_tag)
         temps = _check_temp_files(repo)
         fmt = _check_format(repo)
-        imports = _check_broken_imports(repo, vllm_path) if vllm_path else {"violations": []}
+        imports = (_check_broken_imports(repo, Path(vllm_path), added_lines)
+                   if vllm_path else {"violations": []})
     except subprocess.CalledProcessError as exc:
         return {
             "all_passed": False,
