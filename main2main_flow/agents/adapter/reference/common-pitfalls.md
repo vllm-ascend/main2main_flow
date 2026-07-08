@@ -61,3 +61,33 @@ conditionals that always take one branch, shim functions that do nothing.
 **Prevention**: When upstream fixes a bug, aggressively remove the workaround
 and simplify any logic gated on it.  See the `_needs_routed_expert_parameter_aliases`
 example: went from 20 lines matching 10+ model types to 1 line.
+
+## Signature mismatch after upstream API change
+
+**Symptom**: `TypeError: got an unexpected keyword argument 'X'` or
+`missing 1 required positional argument` at call sites or overrides.
+
+**Prevention**: Compare the upstream signature (in the patch) with every
+vllm-ascend call site.  For added parameters, add a keyword default.
+For removed parameters, guard with `vllm_version_is()` and pass
+conditionally.  `adaptation-patterns.md` §1–§2 cover this in detail.
+
+## Config/attribute moved between classes
+
+**Symptom**: `AttributeError: 'X' object has no attribute 'Y'` because
+upstream moved a field to a different config object or class.
+
+**Prevention**: Read the upstream patch to see where the field moved.
+Use `vllm_version_is()` to access it from the old or new location.
+Consider a small helper if the same access pattern repeats.
+
+## Registry or plugin contract changed
+
+**Symptom**: Backend not found, factory TypeError, or object from registry
+doesn't match expected protocol.  vllm-ascend integrates through upstream
+extension points (backends, platforms, model loaders).
+
+**Prevention**: Find the changed registry key, factory signature, or
+constructor in the upstream patch.  Update the vllm-ascend registration
+to match.  Use a version guard only if both old and new contracts must
+be supported.

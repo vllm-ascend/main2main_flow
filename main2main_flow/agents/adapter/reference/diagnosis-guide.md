@@ -88,7 +88,7 @@ Common code-bug mechanisms:
   wrapper/downstream symptoms directly unless they are the first actionable root
   cause.
 
-Then look up the matching pattern in `reference/error-pattern-examples.md`.
+Then look up the matching pattern in `reference/common-pitfalls.md`.
 
 ---
 
@@ -142,17 +142,9 @@ Write fix diagnosis into `{step_dir}/analysis.md`. For fix mode, include:
 - Fix plan and implemented fix
 - Version guard decision and release tag used
 
-Write `{step_dir}/review.md` with static review results:
-
-- Diff reviewed
-- Version guards checked
-- Function signatures checked
-- Imports/config accesses checked
-- Remaining risks or no known issues
-
 Update `{step_dir}/step_summary.md` cumulatively. Preserve previous sections and
-append/update the current step section, including a "Carry forward to next step"
-subsection.
+append/update the current step section.  adapter-qa handles the independent
+review pass.
 
 ---
 
@@ -163,7 +155,7 @@ or override the retry policy manually.
 
 During this AI step, stop after:
 - Applying the static fix, or determining there is no actionable code fix
-- Writing `analysis.md`, `review.md`, and `step_summary.md`
+- Writing `analysis.md` and `step_summary.md`
 
 The next pre_ci/e2e round will be triggered by the main2main flow.
 

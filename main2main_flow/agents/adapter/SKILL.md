@@ -52,12 +52,25 @@ The vllm-ascend working tree already contains all successful adaptations from pr
 
 The step_target.patch is cumulative (git diff HEAD).
 
+## Code Exploration
+
+- Start from the upstream patch and changed-file list — these are the signal
+- Use the File Mapping Table in code-structure-guide.md to route changed
+  upstream paths to likely vllm-ascend files
+- Read enough of the vllm-ascend code to understand how the subsystem works —
+  subclass chains, registration patterns, import structure.  Skimming the
+  relevant module is better than making a wrong assumption
+- When an upstream change touches an interface that vllm-ascend implements,
+  read the upstream base class or caller to understand the contract change
+- Use `grep` and `glob` to verify that no other vllm-ascend file depends on
+  the same changed symbol
+
 ## Workflow
 
 ### adapt mode
 
-1. Read the upstream patch and changed file list
-2. Explore impacted vllm-ascend code
+1. Read the upstream patch and changed file list from `{patch_path}` and `{changed_files_path}`
+2. Use targeted search to find the impacted vllm-ascend code (see Code Exploration)
 3. Apply minimal changes — do not refactor unrelated code
 
 ### fix mode
@@ -74,7 +87,6 @@ Write to {step_dir}/:
 | file | content |
 |------|---------|
 | analysis.md | subsystems touched, changes, version guard assessment |
-| review.md | static review verdict, guard/signature/import checks, remaining risks |
 | step_summary.md | cumulative summary (preserve prior, append `{step_id}` section) |
 | result.json | `{{"status": "adapted" \| "noop", "files_touched": [...]}}` — write LAST |
 
@@ -102,7 +114,7 @@ If {is_last_step}: check code-structure-guide.md freshness. If stale, write upda
 
 ## RECAP
 
-- Deliverables: analysis.md, review.md, step_summary.md, result.json → {step_dir}/
+- Deliverables: analysis.md, step_summary.md, result.json → {step_dir}/
 - Never modify vllm ({vllm_path})
 - Only `vllm_version_is("{release_tag}")` guards; identical signatures across branches
 - No git add/commit/reset/checkout

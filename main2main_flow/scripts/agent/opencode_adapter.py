@@ -54,6 +54,8 @@ def _build_prompt(inputs: dict[str, Any]) -> str:
     else:
         code_structure = _load_ref(agent_dir, "code-structure-guide.md")
         ref_content = (_load_ref(agent_dir, "adapt-guide.md") + "\n\n"
+                       + _load_ref(agent_dir, "adaptation-patterns.md") + "\n\n"
+                       + _load_ref(agent_dir, "common-pitfalls.md") + "\n\n"
                        + code_structure)
 
     ctx["reference_content"] = ref_content
