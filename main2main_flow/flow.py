@@ -342,6 +342,7 @@ class Main2MainFlow(Flow[Main2MainState]):
                 "role": role,
                 "error_logs": json.dumps(error_logs, ensure_ascii=False),
                 "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
+                "mode": role,
             }, session_id=self.state.session_id)
             if adapt_result.session_id:
                 self.state.session_id = adapt_result.session_id
