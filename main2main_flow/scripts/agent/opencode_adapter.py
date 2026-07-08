@@ -41,17 +41,18 @@ if not shutil.which("opencode"):
 
 def _build_prompt(inputs: dict[str, Any]) -> str:
     role = inputs.get("role", "adapter")
-    # Both "adapter" and "adapter-fix" use the same agents/adapter/ directory
     agent_dir = "adapter"
     template = (_AGENT_DIR / agent_dir / "SKILL.md").read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
 
-    code_structure = _load_ref(agent_dir, "code-structure-guide.md")
+    # adapter-fix shares the same opencode session (--session) as adapter,
+    # so all reference docs are already in context from the first adapt run.
+    # Only inject reference on the first attempt; fix retries keep it minimal.
     if role == "adapter-fix":
-        ref_content = (_load_ref(agent_dir, "diagnosis-guide.md") + "\n\n"
-                       + _load_ref(agent_dir, "error-pattern-examples.md") + "\n\n"
-                       + code_structure)
-    else:  # adapter
+        ref_content = "(reference docs already in session context — see previous messages)"
+        code_structure = ""
+    else:
+        code_structure = _load_ref(agent_dir, "code-structure-guide.md")
         ref_content = (_load_ref(agent_dir, "adapt-guide.md") + "\n\n"
                        + code_structure)
 

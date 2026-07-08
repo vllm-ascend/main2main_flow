@@ -120,23 +120,25 @@ main.py                               # convenience entry point
 main2main_flow/
 ├── cli.py                            # CLI (kickoff, plot, etc.)
 ├── flow.py                           # Flow: nodes, routing, retry loop
-├── utils.py                          # filename constants + git helpers
-├── agent/
-│   ├── opencode_adapter.py           # spawns `opencode run`, parses JSONL events
-│   └── prompt.md                     # single-agent task prompt
-├── reference/                        # knowledge base the agent reads at runtime
-│   ├── adapt-guide.md
-│   ├── code-structure-guide.md
-│   ├── diagnosis-guide.md
-│   └── error-pattern-examples.md
-└── scripts/                          # deterministic helpers (no AI)
-    ├── detect_commits.py
-    ├── plan_steps.py
-    ├── update_commit_reference.py
-    ├── pre_ci_check.py
-    ├── run_tests.py
-    ├── ci_log_summary.py
-    └── push_to_github.py
+├── agents/                           # opencode agent SKILL.md + per-role reference
+│   ├── adapter/
+│   │   ├── SKILL.md                  #   adapt + fix prompt
+│   │   └── reference/                #   adapt-guide, diagnosis, error-patterns, code-structure
+│   └── adapter-qa/
+│       ├── SKILL.md                  #   independent reviewer prompt
+│       └── reference/                #   review-lessons.md
+└── scripts/
+    ├── agent/
+    │   └── opencode_adapter.py       # spawns `opencode run`, parses JSONL events
+    └── utils/                        # deterministic helpers + shared utilities
+        ├── utils.py                  #   filename constants, git helpers, ts_print
+        ├── detect_commits.py
+        ├── plan_steps.py
+        ├── update_commit_reference.py
+        ├── pre_ci_check.py
+        ├── run_tests.py
+        ├── ci_log_summary.py
+        └── push_to_github.py
 ```
 
 For a step-by-step explanation of every node and the per-step artifacts, see

@@ -1,7 +1,6 @@
 # Adapt Guide
 
-Use this guide during the adapt phase of each main2main step. The goal is not
-to copy upstream vLLM changes into vllm-ascend. The goal is to understand which
+Use this guide during the adapt phase of each main2main step. The goal is to understand which
 upstream contracts changed, then update the Ascend implementation that depends
 on those contracts.
 
@@ -12,11 +11,12 @@ handled externally by the main2main flow.
 
 ---
 
-## Re-orient (every step, not just the first)
+## Re-orient
 
-Re-read this file at the start of every step. For code-structure routing, use
-`reference/code-structure-guide.md` only when you need to map changed upstream
-paths/symbols to likely vllm-ascend files.
+Read this file before writing adaptations. In fix-mode retries (same step,
+same session) this reference is already in context — focus on the inlined error
+content. For code-structure routing, use the File Mapping Table in
+`reference/code-structure-guide.md` on demand — not before every edit.
 
 Before starting, confirm:
 - Current step and upstream range from the prompt
@@ -117,31 +117,18 @@ externally.
 
 ---
 
-## Step 3: Static Self Review
+## Outputs
 
-Do not run pre_ci_check.py, tests, imports, model launches, or runtime validation
-manually. The main2main flow runs pre_ci_check automatically after each opencode
-attempt, and `_run_e2e_test` handles real validation later.
+Write to `{step_dir}/` after completing adaptations:
 
-During this AI step, only do static review:
-- Inspect the vllm-ascend diff and relevant source files
-- Verify version guards use the release tag from the prompt
-- Verify guarded branches keep identical public function signatures
-- Verify imports by reading source, not by importing vllm/vllm-ascend locally
-- Record findings in `analysis.md`, `review.md`, and `step_summary.md`
+| file | content |
+|------|---------|
+| analysis.md | upstream contracts changed, adaptation decisions, version guard rationale |
+| review.md | guard / signature / import checks, remaining risks |
+| step_summary.md | concise entry per the SKILL.md format (no "checked but unchanged" lists) |
 
-For adapt mode, `analysis.md` should include:
-- Upstream files changed and relevant upstream contracts identified
-- vllm-ascend files checked through the File Mapping Table
-- `Checked but unchanged` notes for relevant vllm-ascend files that did not need
-  edits, with the reason they were unaffected
-- Adaptation plan and implemented changes, or no-op rationale
-- Version guard decisions and release tag used
-
-For adapt mode, `review.md` should include:
-- Static diff review result
-- Guard, signature, import, and config-access checks
-- Remaining risks or explicit "no known issues"
+Pre-CI and adapter-qa run automatically after each attempt — do not run checks
+yourself.
 
 ---
 
@@ -159,33 +146,9 @@ refreshed independently.
 
 ## Common pitfalls
 
-### Importing modules that don't exist (yet)
-
-**Symptom**: Code adds `from vllm.X import Y` but `X` has been renamed, moved, or
-doesn't exist in the target version. mypy reports `import-not-found`, breaking CI
-lint checks.
-
-**Prevention**: Before writing any `import` from vllm, verify the module exists
-in the upstream tree:
-```bash
-grep -r "class Y\|def y_func" ${VLLM_DIR}/vllm/ | head -5
-find ${VLLM_DIR}/vllm -name "X.py"
-```
-
-If the module doesn't exist at the expected path, search for where the symbol
-was moved to, or use a version guard (`vllm_version_is`) to import conditionally.
-
-### Patching symbols from deleted upstream modules
-
-**Symptom**: A patch file patches `vllm.X.Y` but `vllm.X` was deleted upstream.
-The patch silently fails or raises `ModuleNotFoundError` at runtime.
-
-**Prevention**: Check whether the upstream file still exists before patching:
-```bash
-test -f "${VLLM_DIR}/vllm/X.py" || echo "MODULE DELETED"
-```
-If deleted, remove the corresponding vllm-ascend patch and note the reason in
-`step_summary.md`.
+See [`reference/common-pitfalls.md`](reference/common-pitfalls.md) for a catalog
+of mistakes that break CI or cause silent failures (import-not-found, deleted-module
+patches, inverted guards, leftover workarounds).
 
 ---
 
