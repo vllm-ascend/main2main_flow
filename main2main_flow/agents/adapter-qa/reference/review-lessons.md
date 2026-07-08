@@ -1,10 +1,5 @@
 # Main2Main Review Best Practices
 
-> Compiled from review interactions across 55 merged main2main PRs.
-> Do not skip rules based on subjective judgment.
-
----
-
 ## 1. Version Compatibility
 
 ### 1.1 Version Guard Direction

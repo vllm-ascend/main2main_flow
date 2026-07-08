@@ -11,23 +11,20 @@ from pydantic import BaseModel
 
 from crewai.flow import Flow, listen, start, router
 
-from main2main_flow.agent.opencode_adapter import AdaptResult, run_opencode_adapter
-from main2main_flow.scripts.detect_commits import detect
-from main2main_flow.scripts.plan_steps import run_plan
-from main2main_flow.scripts.pre_ci_check import run_check
-from main2main_flow.scripts.push_to_github import push_and_create_pr
-from main2main_flow.scripts.run_tests import run_tests
-from main2main_flow.scripts.update_commit_reference import run_update
-from main2main_flow.utils import (
+from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter
+from main2main_flow.scripts.utils.detect_commits import detect
+from main2main_flow.scripts.utils.plan_steps import run_plan
+from main2main_flow.scripts.utils.pre_ci_check import run_check
+from main2main_flow.scripts.utils.push_to_github import push_and_create_pr
+from main2main_flow.scripts.utils.run_tests import run_tests
+from main2main_flow.scripts.utils.update_commit_reference import run_update
+from main2main_flow.scripts.utils.utils import (
     UpgradeCompleted, UpgradeFailed,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
     FINAL_CODE_STRUCTURE_GUIDE_FILE, run_git, ts_print
 )
-
-_REFERENCE_DIR = str(Path(__file__).parent / "reference")
-
 
 def _parse_test_cases_env() -> list[str] | None:
     val = os.getenv("MAIN2MAIN_TEST_CASES", "").strip()
@@ -76,6 +73,7 @@ class Main2MainState(BaseModel):
 def _run_adapter_qa(
     ascend_path: str, vllm_path: str, step_id: str,
     step_dir: str, release_tag: str,
+    upstream_patch_path: str = "",
 ) -> list[str]:
     """adapter-qa: independent review of the current diff.
 
@@ -90,32 +88,47 @@ def _run_adapter_qa(
     if not diff:
         return []  # no changes to review
 
-    lessons_path = Path(__file__).parent / "reference" / "review-lessons.md"
+    lessons_path = Path(__file__).parent / "agents" / "adapter-qa" / "reference" / "review-lessons.md"
     if not lessons_path.exists():
         return []
-    lessons = lessons_path.read_text(encoding="utf-8")
+    # Load adapter-qa prompt template
+    qa_template_path = Path(__file__).parent / "agents" / "adapter-qa" / "SKILL.md"
+    qa_template = ""
+    if qa_template_path.exists():
+        qa_template = qa_template_path.read_text(encoding="utf-8")
 
-    # Truncate diff if it's huge (keep the checklist accessible)
+    # Extract §9 checklist from review-lessons.md
+    lessons = lessons_path.read_text(encoding="utf-8")
+    idx = lessons.find("## 9.")
+    checklist = lessons[idx:] if idx != -1 else lessons
+
+    # Truncate diff if it's huge
     diff_limit = 8000
     diff_snippet = diff if len(diff) <= diff_limit else diff[:diff_limit] + "\n... [truncated]"
 
-    model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
-    prompt = f"""You are a code reviewer. Review the following adaptation diff for policy violations.
-Use this checklist:
+    if qa_template:
+        upstream_patch = ""
+        if upstream_patch_path:
+            pp = Path(upstream_patch_path)
+            if pp.exists():
+                upstream_patch = pp.read_text(encoding="utf-8")[:4000]
 
-{lessons}
+        prompt = qa_template.format(
+            step_id=step_id,
+            release_tag=release_tag,
+            vllm_path=vllm_path,
+            ascend_path=ascend_path,
+            patch_path=upstream_patch,
+            diff_content=diff_snippet,
+            review_checklist=checklist,
+        )
+    else:
+        # Fallback inline prompt
+        prompt = f"""You are a code reviewer. Review the following adaptation diff for policy violations.
+Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
+DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
-The release tag for version guards is: {release_tag}
-
-Return ONLY a JSON object:
-{{"verdict": "pass"|"fail", "issues": ["issue 1", "issue 2"]}}
-
-If no violations, return {{"verdict": "pass", "issues": []}}.
-
-DIFF:
-{diff_snippet}
-
-VERDICT (JSON only):"""
+    model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
 
     ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
     r = subprocess.run(
@@ -326,7 +339,6 @@ class Main2MainFlow(Flow[Main2MainState]):
                 "ascend_path": ascend_path,
                 "release_tag": self.state.release_tag,
                 "vllm_path": vllm_path,
-                "reference_dir": _REFERENCE_DIR,
                 "role": role,
                 "error_logs": json.dumps(error_logs, ensure_ascii=False),
                 "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
@@ -351,6 +363,7 @@ class Main2MainFlow(Flow[Main2MainState]):
                 step_id=step_id,
                 step_dir=str(step_dir),
                 release_tag=self.state.release_tag,
+                upstream_patch_path=str(step_dir / VLLM_GIT_PATCH_FILE),
             )
             if review_issues:
                 review_path = step_dir / "adapter-qa.md"

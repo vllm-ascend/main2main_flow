@@ -35,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-from main2main_flow.utils import ts_print
+from main2main_flow.scripts.utils.utils import ts_print
 
 PASS_RESULTS = {"passed", "env_flake_pass"}
 DEFAULT_VLLM_REPO = "https://github.com/vllm-project/vllm.git"

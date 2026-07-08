@@ -1,8 +1,8 @@
 """OpenCode agent runner — three roles via ``opencode run`` subprocesses:
 
-  adapter       — generates adaptations (prompt.md + adapt-guide)
-  adapter-fix   — fixes failures (prompt.md + diagnosis-guide + error-patterns)
-  adapter-qa    — independent critic review (review-lessons checklist)
+  adapter       — generates adaptations (adapter.md + adapt-guide)
+  adapter-fix   — fixes failures (adapter-fix.md + diagnosis-guide + error-patterns)
+  adapter-qa    — independent critic review (adapter-qa.md + review-lessons checklist)
 
 All JSON events streamed to console and logged under step_dir.
 """
@@ -21,11 +21,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from main2main_flow.utils import ts_print
+from main2main_flow.scripts.utils.utils import ts_print
 
-_PROMPT_PATH = Path(__file__).parent / "prompt.md"
-_REFERENCE_DIR = Path(__file__).parent.parent / "reference"
-
+_AGENT_DIR = Path(__file__).parent.parent.parent / "agents"
 _TIMEOUT_MINUTES = 30
 _STALE_SECONDS = 300
 _MAX_STALE_RETRIES = 3
@@ -42,29 +40,43 @@ if not shutil.which("opencode"):
 # ── prompt builder ─────────────────────────────────────────────────────────────
 
 def _build_prompt(inputs: dict[str, Any]) -> str:
-    template = _PROMPT_PATH.read_text(encoding="utf-8")
+    role = inputs.get("role", "adapter")
+    # Both "adapter" and "adapter-fix" use the same agents/adapter/ directory
+    agent_dir = "adapter"
+    template = (_AGENT_DIR / agent_dir / "SKILL.md").read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
 
-    role = inputs.get("role", "adapter")
-    code_structure = _load_ref("code-structure-guide.md")
+    code_structure = _load_ref(agent_dir, "code-structure-guide.md")
     if role == "adapter-fix":
-        ref_content = (_load_ref("diagnosis-guide.md") + "\n\n"
-                       + _load_ref("error-pattern-examples.md") + "\n\n"
-                       + _load_ref("review-lessons.md") + "\n\n"
+        ref_content = (_load_ref(agent_dir, "diagnosis-guide.md") + "\n\n"
+                       + _load_ref(agent_dir, "error-pattern-examples.md") + "\n\n"
                        + code_structure)
-    elif role == "adapter-qa":
-        ref_content = _load_ref("review-lessons.md")
     else:  # adapter
-        ref_content = (_load_ref("adapt-guide.md") + "\n\n"
-                       + _load_ref("review-lessons.md") + "\n\n"
+        ref_content = (_load_ref(agent_dir, "adapt-guide.md") + "\n\n"
                        + code_structure)
 
     ctx["reference_content"] = ref_content
+
+    # Inline error content from error_logs files (if any)
+    error_content = ""
+    error_logs_val = inputs.get("error_logs", "").strip()
+    if error_logs_val:
+        parts = []
+        for p in error_logs_val.splitlines():
+            p = p.strip()
+            if p and Path(p).exists():
+                try:
+                    parts.append(Path(p).read_text(encoding="utf-8")[:4000])
+                except Exception:
+                    parts.append(f"(could not read {p})")
+        error_content = "\n\n".join(parts)
+    ctx["error_content"] = error_content or "(none)"
+
     return template.format_map(ctx)
 
 
-def _load_ref(filename: str) -> str:
-    path = _REFERENCE_DIR / filename
+def _load_ref(role: str, filename: str) -> str:
+    path = _AGENT_DIR / role / "reference" / filename
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""

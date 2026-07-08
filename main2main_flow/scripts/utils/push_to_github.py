@@ -34,7 +34,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from main2main_flow.utils import run_git, ts_print
+from main2main_flow.scripts.utils.utils import run_git, ts_print
 
 DEFAULT_WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
 _PR_URL_FILE = "/tmp/main2main/pr_url.txt"

@@ -14,7 +14,7 @@ import re
 import sys
 from pathlib import Path
 
-from main2main_flow.utils import ts_print
+from main2main_flow.scripts.utils.utils import ts_print
 
 # ---- patterns ----
 

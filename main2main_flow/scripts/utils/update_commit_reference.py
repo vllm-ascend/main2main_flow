@@ -22,7 +22,7 @@ import re
 import sys
 from pathlib import Path
 
-from main2main_flow.utils import run_git, ts_print
+from main2main_flow.scripts.utils.utils import run_git, ts_print
 
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 

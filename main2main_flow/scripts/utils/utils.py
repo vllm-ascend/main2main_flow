@@ -16,7 +16,7 @@ HasNoCommit = "HasNoCommit"
 
 import os as _os
 _ws_env = _os.environ.get("MAIN2MAIN_WORKSPACE", "")
-WORKSPACE_DIR = Path(_ws_env) if _ws_env else (Path(__file__).parent.parent / "workspace")
+WORKSPACE_DIR = Path(_ws_env) if _ws_env else (Path(__file__).parent.parent.parent / "workspace")
 DETECT_FILE = "detect.json"
 STEPS_FILE = "steps.json"
 STEPS_DIR = "steps"
