@@ -238,10 +238,15 @@ class Main2MainFlow(Flow[Main2MainState]):
         if self.state.total_steps == 0:
             return HasNoCommit
 
-        ts_print(f"[analyze] 规划了 {self.state.total_steps} 个步骤，"
-              f"共 {plan['total_commits']} 个 commit。")
-        ts_print("===========================================")
-        ts_print(json.dumps(plan["steps"], indent=2, ensure_ascii=False))
+        ts_print(f"[analyze] planned {self.state.total_steps} step(s) covering "
+              f"{plan['total_commits']} commit(s).")
+        # Print step plan without upstream_patch (it's verbose and already on disk)
+        steps_preview = []
+        for s in plan["steps"]:
+            sp = dict(s)
+            sp.pop("upstream_patch", None)
+            steps_preview.append(sp)
+        ts_print(json.dumps(steps_preview, indent=2, ensure_ascii=False))
 
         # generate every step folder in workspace
         for index in range(self.state.total_steps):

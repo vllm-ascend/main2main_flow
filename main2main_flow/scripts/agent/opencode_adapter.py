@@ -39,24 +39,25 @@ if not shutil.which("opencode"):
 
 # ── prompt builder ─────────────────────────────────────────────────────────────
 
-def _build_prompt(inputs: dict[str, Any]) -> str:
+def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     role = inputs.get("role", "adapter")
     agent_dir = "adapter"
     template = (_AGENT_DIR / agent_dir / "SKILL.md").read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
 
-    # adapter-fix shares the same opencode session (--session) as adapter,
-    # so all reference docs are already in context from the first adapt run.
-    # Only inject reference on the first attempt; fix retries keep it minimal.
+    refs_loaded: list[str] = []
     if role == "adapter-fix":
         ref_content = "(reference docs already in session context — see previous messages)"
-        code_structure = ""
     else:
-        code_structure = _load_ref(agent_dir, "code-structure-guide.md")
-        ref_content = (_load_ref(agent_dir, "adapt-guide.md") + "\n\n"
-                       + _load_ref(agent_dir, "adaptation-patterns.md") + "\n\n"
-                       + _load_ref(agent_dir, "common-pitfalls.md") + "\n\n"
-                       + code_structure)
+        ref_names = ["adapt-guide.md", "adaptation-patterns.md",
+                     "common-pitfalls.md", "code-structure-guide.md"]
+        parts = []
+        for rf in ref_names:
+            text = _load_ref(agent_dir, rf)
+            if text:
+                parts.append(text)
+                refs_loaded.append(rf)
+        ref_content = "\n\n".join(parts)
 
     ctx["reference_content"] = ref_content
 
@@ -75,7 +76,7 @@ def _build_prompt(inputs: dict[str, Any]) -> str:
         error_content = "\n\n".join(parts)
     ctx["error_content"] = error_content or "(none)"
 
-    return template.format_map(ctx)
+    return template.format_map(ctx), refs_loaded
 
 
 def _load_ref(role: str, filename: str) -> str:
@@ -125,7 +126,7 @@ class AdaptResult(BaseModel):
 
 def run_opencode_adapter(inputs: dict[str, Any],
                          session_id: str = "") -> AdaptResult:
-    base_prompt = _build_prompt(inputs)
+    base_prompt, refs_loaded = _build_prompt(inputs)
     prompt = base_prompt
     step_dir = inputs.get("step_dir", "")
     step_path = Path(step_dir) if step_dir else None
@@ -145,7 +146,7 @@ def run_opencode_adapter(inputs: dict[str, Any],
     last_reason: _StopReason | None = None
 
     for attempt in range(_MAX_STALE_RETRIES + 1):
-        _print_prompt(prompt, attempt)
+        _print_prompt(prompt, attempt, refs_loaded)
         if log_path:
             _log_prompt(prompt, attempt, log_path)
 
@@ -192,12 +193,12 @@ def run_opencode_adapter(inputs: dict[str, Any],
 _StopReason = Literal["stale_timeout", "total_timeout"]
 
 
-def _print_prompt(prompt: str, attempt: int) -> None:
+def _print_prompt(prompt: str, attempt: int, refs: list[str] | None = None) -> None:
     title = "PROMPT" if attempt == 0 else f"CONTINUE PROMPT #{attempt}"
     ts_print(f"\n{'═'*60}")
-    ts_print(title)
-    ts_print(f"{'═'*60}")
-    ts_print(prompt)
+    ts_print(f"{title} ({len(prompt)} chars, ~{len(prompt)//4} tokens)")
+    if refs:
+        ts_print(f"  refs: {', '.join(refs)}")
     ts_print(f"{'═'*60}\n")
 
 

@@ -27,6 +27,7 @@ Environment variables:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -174,11 +175,15 @@ def _git_push(ascend_path: Path, branch: str) -> None:
 def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
     if not labels:
         return
-    url = f"https://github.com/{github_repo}/pull/{pr_number}"
-    cmd = ["gh", "pr", "edit", url]
-    for lbl in labels:
-        cmd += ["--add-label", lbl]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Use REST API (not `gh pr edit` — that hits GraphQL which requires
+    # read:org scope).  POST with a JSON array of label names.
+    result = subprocess.run(
+        ["gh", "api", "--method", "POST",
+         "-H", "Accept: application/vnd.github+json",
+         f"/repos/{github_repo}/issues/{pr_number}/labels"],
+        input=json.dumps(labels),  # ["ready"]
+        capture_output=True, text=True,
+    )
     if result.returncode != 0:
         ts_print(f"[push] Warning: Failed to add labels {labels}: {result.stderr.strip()}")
     else:

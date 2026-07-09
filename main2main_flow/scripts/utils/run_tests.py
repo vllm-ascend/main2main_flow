@@ -67,8 +67,46 @@ def _test_cards(test_path: str) -> int:
 # scheduling
 # =============================================================================
 
-def _schedule_rounds(tests: list[str], total_cards: int) -> list[list[str]]:
-    ordered = sorted(tests, key=lambda t: (-_test_cards(t), t))
+# Default estimated time for tests not listed in test_config.yaml.
+_DEFAULT_ESTIMATED_SECONDS = 600
+
+
+def _load_estimated_times(ascend_path: Path) -> dict[str, int]:
+    """Load ``estimated_times`` from vllm-ascend's test_config.yaml.
+
+    Returns a dict mapping test path → seconds.  Node-level entries
+    (``file::node``) take priority over file-level entries, and unlisted
+    tests default to ``_DEFAULT_ESTIMATED_SECONDS``.
+    """
+    config_path = ascend_path / ".github/workflows/scripts/test_config.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+    except Exception:
+        return {}
+    raw = config.get("estimated_times", {}) if isinstance(config, dict) else {}
+    times: dict[str, int] = {}
+    for k, v in raw.items():
+        if isinstance(v, (int, float)):
+            times[k] = int(v)
+    return times
+
+
+def _lookup_time(test: str, times: dict[str, int]) -> int:
+    """Return the estimated seconds for *test*, with node-level priority."""
+    return times.get(test) or times.get(test.split("::")[0]) or _DEFAULT_ESTIMATED_SECONDS
+
+
+def _schedule_rounds(tests: list[str], total_cards: int,
+                     estimated_times: dict[str, int] | None = None) -> list[list[str]]:
+    # Sort by card count descending, then estimated time descending (longest
+    # first — a greedy bin-packing heuristic that shortens makespan).
+    times = estimated_times or {}
+    ordered = sorted(tests, key=lambda t: (-_test_cards(t),
+                                            -_lookup_time(t, times), t))
     rounds: list[list[str]] = []
     usage: list[int] = []
     for t in ordered:
@@ -671,7 +709,14 @@ def run_tests(
     # ---- step 7: schedule ----
     ci_dir = log_dir / str(step_id) / "tests"
     result_path = ci_dir / f"round-{round_number}-result.json"
-    rounds = [[t] for t in test_files] if sequential else _schedule_rounds(test_files, total_cards)
+    # Load estimated test times for optimal ordering (longest first → shorter makespan)
+    est_times = _load_estimated_times(ascend_path) if not remote_host else {}
+    if est_times:
+        total_est = sum(_lookup_time(t, est_times) for t in test_files)
+        ts_print(f"Estimated test durations loaded ({len(est_times)} entries, "
+              f"total: {total_est // 60} min for {len(test_files)} tests)")
+    rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
+        test_files, total_cards, est_times)
     device_rounds = _assign_devices(rounds, all_phy_ids)
 
     parallel_count = sum(1 for r in rounds if len(r) > 1)
