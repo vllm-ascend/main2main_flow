@@ -221,7 +221,7 @@ def _run_once(
         "opencode", "run",
         "--format", "json",
         "--model", _DEFAULT_MODEL,
-        "--dangerously-skip-permissions",
+        "--auto",
     ]
     if session_id:
         cmd += ["--session", session_id]
