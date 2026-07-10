@@ -4,8 +4,6 @@ description: Adapt vllm-ascend to upstream vLLM changes ({mode} mode).
 ---
 # adapter — mode: {mode}
 
-You are a single agent. Do NOT use TeamCreate or Agent tools.
-
 ## Repositories
 
 | repo | path |

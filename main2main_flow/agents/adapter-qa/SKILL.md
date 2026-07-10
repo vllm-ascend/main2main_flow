@@ -43,7 +43,6 @@ You are an independent reviewer for step {step_id}. You did NOT write this chang
 - You may read any file in both repositories
 - Do NOT edit any file — review only
 - Do NOT run tests, build, or import anything
-- Do NOT use TeamCreate or Agent tools
 
 ## Output
 
