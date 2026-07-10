@@ -162,6 +162,14 @@ def run_opencode_adapter(inputs: dict[str, Any],
         # crashes on launch, e.g. bad API key or model not available).
         if rc != 0 or not lines:
             ts_print(f"\n[opencode] HARD FAILURE: exit={rc}, events={len(lines)}", flush=True)
+            # Print the command that was run (redact prompt content — it's in log)
+            ts_print(f"[opencode] cmd: opencode run --format json --model {_DEFAULT_MODEL} "
+                     f"--auto {'--session ' + (session_id or '') if session_id else ''}"
+                     f" '<prompt {len(prompt)} chars>'", flush=True)
+            if stderr_path and stderr_path.exists():
+                err_text = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+                if err_text.strip():
+                    ts_print(f"[opencode] stderr tail:\n{err_text.strip()}", flush=True)
             last_reason = last_reason or "hard_failure"
             if attempt < _MAX_STALE_RETRIES:
                 prompt = _build_continue_prompt(base_prompt, inputs, attempt + 1)
