@@ -225,11 +225,17 @@ def _run_once(
     session_id: str | None = None,
 ) -> tuple[list[str], _StopReason | None, str, int]:
     stderr_fh = stderr_path.open("a", encoding="utf-8") if stderr_path else None
+    # opencode >=2.x uses --auto, older versions use --dangerously-skip-permissions
+    auto_flag = "--dangerously-skip-permissions"
+    r = subprocess.run(["opencode", "run", "--help"], capture_output=True, text=True)
+    if "--auto" in (r.stdout + r.stderr):
+        auto_flag = "--auto"
+
     cmd = [
         "opencode", "run",
         "--format", "json",
         "--model", _DEFAULT_MODEL,
-        "--auto",
+        auto_flag,
     ]
     if session_id:
         cmd += ["--session", session_id]

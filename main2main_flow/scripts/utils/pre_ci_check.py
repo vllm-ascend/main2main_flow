@@ -15,6 +15,7 @@ Design note:
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -111,11 +112,34 @@ def _check_temp_files(repo: Path) -> dict:
     return {"violations": violations}
 
 
+def _check_mypy(repo: Path) -> dict:
+    """Run ``mypy --follow-imports skip`` on changed Python files."""
+    if not shutil.which("mypy"):
+        return {"violations": [], "detail": "mypy not installed", "skipped": True}
+    changed = run_git(repo, "diff", "--name-only", "HEAD", "--", "*.py").strip()
+    if not changed:
+        return {"violations": [], "detail": "no Python files changed"}
+    files = [f for f in changed.splitlines() if f.strip()]
+    if not files:
+        return {"violations": [], "detail": "no Python files changed"}
+    r = subprocess.run(
+        ["mypy", "--follow-imports", "skip"] + files,
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        combined = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
+        err_count = combined.count("error:")
+        return {"violations": [combined[:3000]], "detail": f"mypy found {err_count} error(s)"}
+    return {"violations": [], "detail": "mypy clean"}
+
+
 def _check_format(repo: Path) -> dict:
     """Run ``bash format.sh`` to check ruff format/lint."""
     fmt_script = repo / "format.sh"
     if not fmt_script.exists():
-        return {"violations": [], "detail": "format.sh not found"}
+        return {"violations": [], "detail": "format.sh not found", "skipped": True}
+    if not shutil.which("pre-commit"):
+        return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
     r = subprocess.run(
         ["bash", str(fmt_script)], cwd=str(repo),
         capture_output=True, text=True,
@@ -171,6 +195,7 @@ def run_check(ascend_path: str | Path, release_tag: str,
         versions = _check_version_strings(added_lines, release_tag)
         temps = _check_temp_files(repo)
         fmt = _check_format(repo)
+        mypy = _check_mypy(repo)
         imports = _check_broken_imports(repo, vllm_path) if vllm_path else {"violations": []}
     except subprocess.CalledProcessError as exc:
         return {
@@ -217,11 +242,23 @@ def run_check(ascend_path: str | Path, release_tag: str,
     fmt_ok = len(fmt["violations"]) == 0
     checks.append({
         "name": "format",
-        "passed": fmt_ok,
+        "passed": fmt_ok or fmt.get("skipped", False),
         "detail": fmt["detail"],
         "violations": fmt["violations"],
+        "skipped": fmt.get("skipped", False),
     })
-    if not fmt_ok:
+    if not fmt_ok and not fmt.get("skipped"):
+        all_passed = False
+
+    mypy_ok = len(mypy["violations"]) == 0
+    checks.append({
+        "name": "mypy",
+        "passed": mypy_ok or mypy.get("skipped", False),
+        "detail": mypy["detail"],
+        "violations": mypy["violations"],
+        "skipped": mypy.get("skipped", False),
+    })
+    if not mypy_ok and not mypy.get("skipped"):
         all_passed = False
 
     if vllm_path:

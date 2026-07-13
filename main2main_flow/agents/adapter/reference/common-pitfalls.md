@@ -4,20 +4,27 @@ Mistakes that break CI or cause silent failures.
 
 ## Importing modules that don't exist (yet)
 
-**Symptom**: Code adds `from vllm.X import Y` but `X` has been renamed, moved, or
-doesn't exist in the target version. mypy reports `import-not-found`, breaking CI
-lint checks.
+**Symptom**: mypy reports `import-not-found` for a `from vllm.X import Y` line.
+This happens even when the import is guarded by `vllm_version_is()` — mypy
+checks all static code paths, not just the runtime branch.
 
-**Prevention**: Before writing any `import` from vllm, verify the module exists
-in the upstream tree:
+**Prevention for version-guarded imports**: Add `# type: ignore[import-not-found]`
+to every import that only exists in some vllm versions:
 
-```bash
-grep -r "class Y\|def y_func" ${VLLM_DIR}/vllm/ | head -5
-find ${VLLM_DIR}/vllm -name "X.py"
+```python
+# Wrong: mypy fails on the version where this module doesn't exist
+from vllm.X import Y
+
+# Right: mypy suppresses the error on versions where the module is absent
+from vllm.X import Y  # type: ignore[import-not-found]
 ```
 
-If the module doesn't exist at the expected path, search for where the symbol
-was moved to, or use a version guard (`vllm_version_is`) to import conditionally.
+**Prevention for new imports**: Before writing any unconditional `from vllm.X import Y`,
+verify the module exists in the upstream tree at the target commit:
+
+```bash
+find ${VLLM_DIR}/vllm -name "X.py"
+```
 
 ## Patching symbols from deleted upstream modules
 

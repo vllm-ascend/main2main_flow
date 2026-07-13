@@ -130,10 +130,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
     model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
 
+    auto_flag = "--dangerously-skip-permissions"
+    help_r = subprocess.run(["opencode", "run", "--help"], capture_output=True, text=True)
+    if "--auto" in (help_r.stdout + help_r.stderr):
+        auto_flag = "--auto"
+
     ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
     r = subprocess.run(
-        ["opencode", "run", "--format", "json", "--model", model,
-         "--auto", prompt],
+        ["opencode", "run", "--format", "json", "--model", model, auto_flag,
+         prompt],
         cwd=ascend_path, capture_output=True, text=True,
         timeout=300,  # 5 min for review
     )
@@ -171,37 +176,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
     if "pass" in output.lower() and "fail" not in output.lower():
         return []
     return ["critic: review output could not be parsed as pass — check critic_review.md"]
-
-
-def _run_mypy_check(ascend_path: str, step_dir: Path, step_id: str) -> None:
-    """Run mypy on changed Python files, write output to step_dir/mypy.log.
-
-    Non-blocking — failures are recorded but do not trigger retries.
-    mypy results per step are aggregated in generate_final_post.
-    """
-    changed = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD", "--", "*.py"],
-        cwd=ascend_path, capture_output=True, text=True,
-    ).stdout.strip()
-    if not changed:
-        return
-
-    files = [f for f in changed.splitlines() if f.strip()]
-    if not files:
-        return
-
-    mypy_log = step_dir / "mypy.log"
-    ts_print(f"[mypy] {step_id}: checking {len(files)} file(s) ...")
-    r = subprocess.run(
-        ["mypy", "--follow-imports", "skip"] + files,
-        cwd=ascend_path, capture_output=True, text=True,
-    )
-    combined = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
-    mypy_log.write_text(combined or "(no output)", encoding="utf-8")
-    if r.returncode != 0:
-        ts_print(f"[mypy] {step_id}: found issues → {mypy_log}")
-    else:
-        ts_print(f"[mypy] {step_id}: clean")
 
 
 class Main2MainFlow(Flow[Main2MainState]):
@@ -393,9 +367,6 @@ class Main2MainFlow(Flow[Main2MainState]):
 
             ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
 
-            # ---- mypy check (non-blocking): run on changed files, record results ----
-            _run_mypy_check(ascend_path, step_dir, step_id)
-
             # ---- adapter-qa: independent review before e2e ----
             review_issues = _run_adapter_qa(
                 ascend_path=ascend_path,
@@ -573,34 +544,35 @@ class Main2MainFlow(Flow[Main2MainState]):
             parts.append("No vllm-ascend changes needed.")
             parts.append("")
 
-        # ---- lint summary: collect format.sh + mypy results per step ----
-        lint_lines = ["### Lint & Format", ""]
-        any_issues = False
+        # ---- lint summary: overall pre-CI status across all steps ----
+        lint_status: dict[str, dict] = {}
         for i in range(self.state.current_step):
-            s = self.state.steps[i]
-            sd = WORKSPACE_DIR / STEPS_DIR / s["id"]
+            sd = WORKSPACE_DIR / STEPS_DIR / self.state.steps[i]["id"]
             pre_ci_path = sd / PRE_CI_CHECK_FILE
-            mypy_path = sd / "mypy.log"
             if pre_ci_path.exists():
                 try:
                     pci = json.loads(pre_ci_path.read_text(encoding="utf-8"))
                     for check in pci.get("checks", []):
-                        if check["name"] == "format" and not check["passed"]:
-                            lint_lines.append(f"- {s['id']}: format.sh **FAILED**")
-                            any_issues = True
+                        name = check["name"]
+                        if name not in lint_status:
+                            lint_status[name] = {"passed": True, "skipped": False}
+                        lint_status[name]["passed"] = lint_status[name]["passed"] and check["passed"]
+                        lint_status[name]["skipped"] = lint_status[name]["skipped"] or check.get("skipped", False)
                 except Exception:
                     pass
-            if mypy_path.exists():
-                mypy_out = mypy_path.read_text(encoding="utf-8").strip()
-                if mypy_out and mypy_out != "(no output)" and "error:" in mypy_out:
-                    error_count = mypy_out.count("error:")
-                    lint_lines.append(f"- {s['id']}: mypy **{error_count} error(s)**")
-                    any_issues = True
-                elif mypy_out and mypy_out != "(no output)":
-                    lint_lines.append(f"- {s['id']}: mypy clean")
-        if any_issues:
-            lint_lines.append("")
-            parts.extend(lint_lines)
+        if lint_status:
+            parts.append("### Pre-CI Checks")
+            parts.append("")
+            for name in sorted(lint_status):
+                s = lint_status[name]
+                if s["skipped"]:
+                    status = "SKIPPED (tool not available)"
+                elif s["passed"]:
+                    status = "OK"
+                else:
+                    status = "FAILED"
+                parts.append(f"- **{name}**: {status}")
+            parts.append("")
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")
 

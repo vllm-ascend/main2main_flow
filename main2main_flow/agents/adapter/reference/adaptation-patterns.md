@@ -54,6 +54,16 @@ from vllm...fused_moe.layer import FusedMoE, MoERunner
 > Verify the import path exists before writing the guard: check the upstream
 > tree at the target commit for both the old and new paths.
 
+When an import is version-guarded and the module only exists in some versions,
+**always** add `# type: ignore[import-not-found]` to the import line.  mypy
+checks all code paths regardless of runtime guards; without the ignore
+comment, it reports a false positive on the version where the module is absent.
+
+```python
+if vllm_version_is("0.23.0"):
+    from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser  # type: ignore[import-not-found]
+```
+
 ## 4. Upstream deletes a long-standing module that vllm-ascend patches
 
 **Rule**: Remove the vllm-ascend patch file entirely.  A patch against a
