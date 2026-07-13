@@ -239,7 +239,7 @@ def _run_once(
     ]
     if session_id:
         cmd += ["--session", session_id]
-    cmd.append(prompt)
+    cmd += ["--", prompt]
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,

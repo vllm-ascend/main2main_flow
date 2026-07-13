@@ -2,7 +2,6 @@
 name: adapter-qa
 description: Independent adversarial review of vllm-ascend adaptation diff before NPU tests.
 ---
-
 # adapter-qa
 
 You are an independent reviewer for step {step_id}. You did NOT write this change — review it **adversarially**, as a vllm-ascend maintainer screening an automated adaptation before it may spend NPU test time.

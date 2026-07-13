@@ -138,7 +138,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
     ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
     r = subprocess.run(
         ["opencode", "run", "--format", "json", "--model", model, auto_flag,
-         prompt],
+         "--", prompt],
         cwd=ascend_path, capture_output=True, text=True,
         timeout=300,  # 5 min for review
     )
