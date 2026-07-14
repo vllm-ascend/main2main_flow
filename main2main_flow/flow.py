@@ -479,7 +479,38 @@ class Main2MainFlow(Flow[Main2MainState]):
         ts_print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
 
         if not test_passed:
-            self.state.test_errors = [summary_log]
+            # Collect per-test error details for fix mode: for each failed
+            # test, read its -summary.json (structured code_bugs/env_flakes)
+            # and the tail of its .log (raw traceback).  Both are inlined
+            # so the agent sees the error directly without extra file ops.
+            test_errors_detail = tests_dir / f"round-{self.state.retry_count}-test-errors.txt"
+            detail_parts = []
+            for test_name, tr in result.get("suite_results", {}).items():
+                if tr.get("ci_result") in ("passed", "env_flake_pass"):
+                    continue
+                parts = [f"=== {test_name} ==="]
+                # Structured summary (code_bugs/env_flakes with traceback)
+                sp = Path(tr.get("summary_path", ""))
+                if sp.exists():
+                    try:
+                        parts.append(f"[summary]\n{sp.read_text(encoding='utf-8')[:4000]}")
+                    except Exception:
+                        parts.append("[summary]\n(could not read)")
+                # Raw log tail (full traceback, assertion details)
+                lp = Path(tr.get("log_path", ""))
+                if lp.exists():
+                    try:
+                        log_tail = lp.read_text(encoding='utf-8', errors='replace')
+                        # Keep last 3000 chars — tracebacks are at the end
+                        parts.append(f"[log tail]\n...\n{log_tail[-3000:]}")
+                    except Exception:
+                        parts.append("[log tail]\n(could not read)")
+                detail_parts.append("\n\n".join(parts))
+            if detail_parts:
+                test_errors_detail.write_text("\n\n---\n\n".join(detail_parts), encoding="utf-8")
+                self.state.test_errors = [str(test_errors_detail), summary_log]
+            else:
+                self.state.test_errors = [summary_log]
 
         return test_passed
 
