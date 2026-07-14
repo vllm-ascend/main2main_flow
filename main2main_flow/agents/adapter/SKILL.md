@@ -81,10 +81,10 @@ failed check has `violations` with exact file:line:col:CODE.  Fix them directly.
 
 **E2E test failures**: the inlined error content is `round-N-result.json`.
 Open it, check `code_bugs_count` > 0 → open failed tests from
-`suite_results[test_name]`.  For each failed test read its `-summary.json`
-file (structured `code_bugs`/`env_flakes` arrays with tracebacks) — not
-the raw `.log` file.  The per-test `.log` and `-summary.json` are in the
-same `tests/` directory.
+`suite_results[test_name]`.  For each failed test, read BOTH files
+referenced by `log_path` and `summary_path`:
+  - `-summary.json` → structured `code_bugs`/`env_flakes` arrays (traceback + classification)
+  - `.log` → raw pytest output (full traceback when the summary is insufficient)
 
 See `reference/common-pitfalls.md` §"Fix mode cheat sheet" for the ruff
 error code table and error-to-upstream trace workflow.
