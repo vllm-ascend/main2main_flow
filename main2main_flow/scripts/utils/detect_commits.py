@@ -43,9 +43,13 @@ def _extract_from_conf_py(ascend_path: Path) -> dict[str, str | None]:
 
     conf_path = ascend_path / "docs" / "source" / "conf.py"
     tag_match = re.search(r'"main_vllm_tag":\s*"([^"]+)"', conf_path.read_text(encoding="utf-8"))
+    raw_tag = tag_match.group(1) if tag_match else None
+    # Strip "v" prefix from git tag (e.g. "v0.23.0" → "0.23.0")
+    # so it matches what vllm_version_is() expects.
+    compat_tag = raw_tag.lstrip("v") if raw_tag else None
     return {
         "base_commit": base_commit,
-        "compat_tag": tag_match.group(1) if tag_match else None,
+        "compat_tag": compat_tag,
     }
 
 

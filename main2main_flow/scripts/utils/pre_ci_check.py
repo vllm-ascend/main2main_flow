@@ -68,6 +68,8 @@ def _check_version_strings(added_lines: list[dict[str, str]], release_tag: str) 
 
     for entry in added_lines:
         text = entry["text"]
+        if text.lstrip().startswith("#"):
+            continue
         if "import " in text or "def " in text:
             continue
         match = _VERSION_IS_RE.search(text)
