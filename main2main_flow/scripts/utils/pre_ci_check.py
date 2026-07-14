@@ -112,26 +112,6 @@ def _check_temp_files(repo: Path) -> dict:
     return {"violations": violations}
 
 
-def _check_mypy(repo: Path) -> dict:
-    """Run ``bash tools/mypy.sh`` — identical to CI's mypy invocation.
-
-    Uses the repo's ``mypy.ini`` config and ``--check-untyped-defs``
-    like CI does.  Checks the entire codebase, not just the current diff.
-    """
-    mypy_script = repo / "tools" / "mypy.sh"
-    if not mypy_script.exists() or not shutil.which("mypy"):
-        return {"violations": [], "detail": "mypy not available", "skipped": True}
-    r = subprocess.run(
-        ["bash", str(mypy_script), "1"],
-        cwd=str(repo), capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        combined = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
-        err_count = combined.count("error:")
-        return {"violations": [combined[:8000]], "detail": f"mypy found {err_count} error(s)"}
-    return {"violations": [], "detail": "mypy clean"}
-
-
 def _check_format(repo: Path) -> dict:
     """Run ``bash format.sh`` to auto-fix ruff format/lint.
 
@@ -222,7 +202,6 @@ def run_check(ascend_path: str | Path, release_tag: str,
         versions = _check_version_strings(added_lines, release_tag)
         temps = _check_temp_files(repo)
         fmt = _check_format(repo)
-        mypy = _check_mypy(repo)
         imports = _check_broken_imports(repo, vllm_path) if vllm_path else {"violations": []}
     except subprocess.CalledProcessError as exc:
         return {
@@ -275,17 +254,6 @@ def run_check(ascend_path: str | Path, release_tag: str,
         "skipped": fmt.get("skipped", False),
     })
     if not fmt_ok and not fmt.get("skipped"):
-        all_passed = False
-
-    mypy_ok = len(mypy["violations"]) == 0
-    checks.append({
-        "name": "mypy",
-        "passed": mypy_ok or mypy.get("skipped", False),
-        "detail": mypy["detail"],
-        "violations": mypy["violations"],
-        "skipped": mypy.get("skipped", False),
-    })
-    if not mypy_ok and not mypy.get("skipped"):
         all_passed = False
 
     if vllm_path:
