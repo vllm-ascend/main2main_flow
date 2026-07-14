@@ -172,6 +172,38 @@ def _git_push(ascend_path: Path, branch: str) -> None:
         r.check_returncode()
 
 
+def _close_old_main2main_prs(github_repo: str, current_pr_number: str) -> None:
+    """Close all open main2main auto-PRs except the current one.
+
+    Identifies main2main PRs by title pattern ``[Misc]feat: adapt to vLLM main``
+    and closes them with a comment pointing to the new PR.
+    """
+    r = subprocess.run(
+        ["gh", "pr", "list", "--repo", github_repo,
+         "--search", "[Misc]feat: adapt to vLLM main in:title",
+         "--state", "open", "--json", "number,title",
+         "--limit", "50"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return
+    try:
+        prs = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return
+    for pr in prs:
+        num = str(pr.get("number", ""))
+        if num == current_pr_number:
+            continue
+        title = pr.get("title", "")
+        ts_print(f"[push] Closing old main2main PR #{num}: {title}")
+        subprocess.run(
+            ["gh", "pr", "close", num, "--repo", github_repo,
+             "-c", f"Superseded by #{current_pr_number}."],
+            capture_output=True, text=True,
+        )
+
+
 def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
     if not labels:
         return
@@ -348,6 +380,9 @@ def push_and_create_pr(
         Path("/tmp/main2main").mkdir(parents=True, exist_ok=True)
         Path(_PR_URL_FILE).write_text(pr_url + "\n")
         ts_print(f"[push] PR URL written to {_PR_URL_FILE}")
+
+        # ---- close old main2main PRs ----
+        _close_old_main2main_prs(github_repo, pr_number)
 
     finally:
         # Only restore if we created a new branch from a different starting point
