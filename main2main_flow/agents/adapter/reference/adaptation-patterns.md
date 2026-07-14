@@ -64,6 +64,16 @@ if vllm_version_is("0.23.0"):
     from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser  # type: ignore[import-not-found]
 ```
 
+**MANDATORY when moving an existing `import` inside a version guard**:
+
+1. Open every file that was moved under the guard.
+2. Find ALL `from vllm.X import Y` lines in those files.
+3. Append `  # type: ignore[import-not-found]` to each one.
+4. Do NOT leave any un-ignored vllm import in a guarded file.
+
+mypy checks every `.py` file regardless of runtime guards.  A single
+un-ignored import in a guarded file breaks CI.  This is not optional.
+
 ## 4. Upstream deletes a long-standing module that vllm-ascend patches
 
 **Rule**: Remove the vllm-ascend patch file entirely.  A patch against a

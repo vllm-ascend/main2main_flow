@@ -113,17 +113,16 @@ def _check_temp_files(repo: Path) -> dict:
 
 
 def _check_mypy(repo: Path) -> dict:
-    """Run ``mypy --follow-imports skip`` on changed Python files."""
+    """Run ``mypy --follow-imports skip`` on all vllm_ascend Python files.
+
+    Matches CI behaviour: mypy checks the entire codebase, not just the
+    current diff.  Import errors in un-changed but version-guarded files
+    are caught here, not after the PR is opened.
+    """
     if not shutil.which("mypy"):
         return {"violations": [], "detail": "mypy not installed", "skipped": True}
-    changed = run_git(repo, "diff", "--name-only", "HEAD", "--", "*.py").strip()
-    if not changed:
-        return {"violations": [], "detail": "no Python files changed"}
-    files = [f for f in changed.splitlines() if f.strip()]
-    if not files:
-        return {"violations": [], "detail": "no Python files changed"}
     r = subprocess.run(
-        ["mypy", "--follow-imports", "skip"] + files,
+        ["mypy", "--follow-imports", "skip", "vllm_ascend"],
         cwd=str(repo), capture_output=True, text=True,
     )
     if r.returncode != 0:
