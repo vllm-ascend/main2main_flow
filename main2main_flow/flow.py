@@ -544,8 +544,8 @@ class Main2MainFlow(Flow[Main2MainState]):
             parts.append("No vllm-ascend changes needed.")
             parts.append("")
 
-        # ---- lint summary: overall pre-CI status across all steps ----
-        lint_status: dict[str, dict] = {}
+        # ---- pre-CI summary: only show non-OK results, with detail ----
+        pre_ci_issues: list[str] = []
         for i in range(self.state.current_step):
             sd = WORKSPACE_DIR / STEPS_DIR / self.state.steps[i]["id"]
             pre_ci_path = sd / PRE_CI_CHECK_FILE
@@ -553,25 +553,25 @@ class Main2MainFlow(Flow[Main2MainState]):
                 try:
                     pci = json.loads(pre_ci_path.read_text(encoding="utf-8"))
                     for check in pci.get("checks", []):
-                        name = check["name"]
-                        if name not in lint_status:
-                            lint_status[name] = {"passed": True, "skipped": False}
-                        lint_status[name]["passed"] = lint_status[name]["passed"] and check["passed"]
-                        lint_status[name]["skipped"] = lint_status[name]["skipped"] or check.get("skipped", False)
+                        if not check["passed"]:
+                            detail = check.get("detail", "")
+                            if check.get("skipped"):
+                                pre_ci_issues.append(f"- **{check['name']}**: skipped — {detail}")
+                            else:
+                                pre_ci_issues.append(f"- **{check['name']}**: FAILED — {detail}")
                 except Exception:
                     pass
-        if lint_status:
+        if pre_ci_issues:
+            # Deduplicate
+            seen = set()
+            unique = []
+            for item in pre_ci_issues:
+                if item not in seen:
+                    seen.add(item)
+                    unique.append(item)
             parts.append("### Pre-CI Checks")
             parts.append("")
-            for name in sorted(lint_status):
-                s = lint_status[name]
-                if s["skipped"]:
-                    status = "SKIPPED (tool not available)"
-                elif s["passed"]:
-                    status = "OK"
-                else:
-                    status = "FAILED"
-                parts.append(f"- **{name}**: {status}")
+            parts.extend(unique)
             parts.append("")
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")
