@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import run_git
+from main2main_flow.scripts.utils.utils import run_git, ts_print
 
 _TEMP_PATTERNS = [
     ".log",
@@ -151,16 +151,22 @@ def _check_format(repo: Path) -> dict:
         capture_output=True, text=True,
     )
     output = (r.stdout + "\n" + r.stderr)
-    # Extract actual check errors (not "files were modified" noise from ruff-format)
+    # Extract ruff-check errors — lines formatted as:
+    #   vllm_ascend/path/file.py:LINE:COL: CODE description
+    # ruff-format "files were modified" and hook status lines are skipped.
+    _RUFF_ERR_RE = re.compile(r"\.py:\d+:\d+:\s+\w")
     real_errors = []
     for line in output.splitlines():
         stripped = line.strip()
-        # ruff-check error lines look like: vllm_ascend/path/file.py:1102:121: E501 ...
-        if "error:" in stripped and (".py:" in stripped):
+        if _RUFF_ERR_RE.search(stripped):
             real_errors.append(stripped)
     if real_errors:
+        ts_print(f"[pre_ci] format: {len(real_errors)} lint error(s) (not auto-fixable):")
+        for e in real_errors:
+            ts_print(f"  {e}")
         return {"violations": real_errors,
                 "detail": f"{len(real_errors)} lint issue(s) (not auto-fixable)"}
+    ts_print("[pre_ci] format: OK")
     return {"violations": [], "detail": "format.sh OK"}
 
 
