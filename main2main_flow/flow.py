@@ -359,20 +359,27 @@ class Main2MainFlow(Flow[Main2MainState]):
 
             check_result = run_check(ascend_path, self.state.release_tag, vllm_path=vllm_path)
             if not check_result["all_passed"]:
-                # Save full pre_ci result
                 log_path = step_dir / PRE_CI_CHECK_FILE
                 log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
                 error_logs = [str(log_path)]
-                # If format failed, also write a standalone format-errors file
-                # so fix mode can focus on it without distraction.
+                # Summarize which checks failed in the console log
+                failures = []
                 for check in check_result.get("checks", []):
-                    if check["name"] == "format" and not check["passed"] and check.get("violations"):
-                        fmt_err_path = step_dir / "format_errors.txt"
-                        fmt_err_path.write_text("\n".join(check["violations"]), encoding="utf-8")
-                        error_logs.insert(0, str(fmt_err_path))
-                        ts_print(f"[ai_analysis] {step_id}: format FAILED ({len(check['violations'])} errors) → {fmt_err_path}")
-                        break
-                ts_print(f"[ai_analysis] {step_id}: pre_ci failed → {log_path}")
+                    name = check["name"]
+                    passed = check["passed"]
+                    skipped = check.get("skipped", False)
+                    detail = check.get("detail", "")
+                    if not passed:
+                        st = "SKIPPED" if skipped else "FAILED"
+                        failures.append(f"{name}: {st} — {detail}")
+                        # Write format violations to a dedicated file for fix mode
+                        if name == "format" and check.get("violations"):
+                            fmt_err_path = step_dir / "format_errors.txt"
+                            fmt_err_path.write_text("\n".join(check["violations"]), encoding="utf-8")
+                            error_logs.insert(0, str(fmt_err_path))
+                ts_print(f"[ai_analysis] {step_id}: pre_ci FAILED ({len(failures)} check(s)):")
+                for f in failures:
+                    ts_print(f"  {f}")
                 continue
 
             ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
