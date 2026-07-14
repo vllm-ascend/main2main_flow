@@ -76,6 +76,10 @@ The step_target.patch is cumulative (git diff HEAD).
 The working tree already contains the failed adaptation — do NOT start from
 scratch.  See `reference/diagnosis-guide.md` for the full fix workflow.
 
+**Format/lint violations (E501, F821, etc.)**: ruff-format CANNOT auto-fix
+these.  You MUST open the file at the reported line number and manually
+edit the code.  Re-running format.sh will NOT resolve them.
+
 ## Output
 
 Write to {step_dir}/:
