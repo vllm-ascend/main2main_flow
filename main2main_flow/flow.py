@@ -416,6 +416,20 @@ class Main2MainFlow(Flow[Main2MainState]):
         changed_files = run_git(ascend_path, "diff", "--name-only", "HEAD").strip().splitlines()
         changed_files = [f for f in changed_files if f]  # filter empty lines
 
+        # Post-patch diagnostic: run ruff-check on changed Python files
+        py_files = [f for f in changed_files if f.endswith(".py")]
+        if py_files:
+            ruff_r = subprocess.run(
+                ["ruff", "check"] + py_files, cwd=ascend_path,
+                capture_output=True, text=True,
+            )
+            if ruff_r.returncode != 0:
+                ts_print(f"[ai_analysis] {step_id}: ⚠ ruff-check found POST-PATCH issues in changed files:")
+                for line in ruff_r.stdout.strip().splitlines()[:10]:
+                    if line.strip():
+                        ts_print(f"  {line.strip()}")
+                ts_print(f"[ai_analysis] {step_id}: ↑ these will fail CI — run format.sh again!")
+
         ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
 
         self.state.cur_vllm_commit = step["end_commit"]
