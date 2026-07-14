@@ -157,32 +157,69 @@ def _check_format(repo: Path) -> dict:
 
 
 def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
-    """Verify all newly-added ``from vllm.X`` imports resolve to existing files.
+    """Verify newly-added ``from vllm.X`` imports.
 
-    Only checks *added* lines (like the version_strings check), and handles
-    package imports (``from vllm.config import X`` → ``vllm/config/__init__.py``).
+    1. Module must exist in the vllm tree (file or package dir).
+    2. If the import is inside a ``vllm_version_is`` guard block, the line
+       MUST carry ``# type: ignore[import-not-found]`` — mypy checks all
+       static paths regardless of runtime guards.  No mypy needed here;
+       this is a pure static check on the source text.
     """
     vllm_src = Path(vllm_path) / "vllm"
     added_lines = _get_added_lines(repo)
     violations: list[str] = []
+    _indent_cache: dict[str, set[int]] = {}
+
+    def _indent_width(line: str) -> int:
+        return len(line) - len(line.lstrip())
+
+    def _guarded_lines(fname: str) -> set[int]:
+        """Return the set of line numbers inside a vllm_version_is guard."""
+        if fname in _indent_cache:
+            return _indent_cache[fname]
+        fp = repo / fname
+        if not fp.exists():
+            _indent_cache[fname] = set()
+            return set()
+        lines = fp.read_text(encoding="utf-8").splitlines()
+        guarded: set[int] = set()
+        guard_stack: list[int] = []  # indent depths of active guards
+        for lineno, raw in enumerate(lines, 1):
+            line = raw.strip()
+            indent = _indent_width(raw)
+            # Pop guards that have ended (same or lower indent than guard start)
+            while guard_stack and indent <= guard_stack[-1]:
+                guard_stack.pop()
+            if line.startswith(("if vllm_version_is(", "if not vllm_version_is(")):
+                guard_stack.append(indent)
+            if guard_stack:
+                guarded.add(lineno)
+        _indent_cache[fname] = guarded
+        return guarded
 
     for entry in added_lines:
         line = entry["text"].strip()
         if not line.startswith("from vllm."):
             continue
-        if "import " in line and "def " in line:
-            continue
         parts = line.replace(",", " ").split()
         if len(parts) < 2:
             continue
         mod = parts[1]
-        # mod looks like "vllm.config" — strip the leading "vllm." prefix
         if mod.startswith("vllm."):
             mod = mod[len("vllm."):]
         base = vllm_src / mod.replace(".", "/")
-        # Accept both flat module and package (__init__.py)
-        if not (base.with_suffix(".py").exists() or (base / "__init__.py").exists()):
-            violations.append(f"{entry['file']}:{entry['line_no']}: {line}")
+        exists = base.with_suffix(".py").exists() or (base / "__init__.py").exists()
+
+        if not exists:
+            violations.append(f"{entry['file']}:{entry['line_no']}: module not found — {line}")
+            continue
+
+        has_ignore = "# type: ignore[import-not-found]" in line
+        if not has_ignore and int(entry["line_no"]) in _guarded_lines(entry["file"]):
+            violations.append(
+                f"{entry['file']}:{entry['line_no']}: guarded import missing "
+                f"'# type: ignore[import-not-found]' — {line}"
+            )
 
     return {"violations": violations}
 
