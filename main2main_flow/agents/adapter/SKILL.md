@@ -74,7 +74,20 @@ The step_target.patch is cumulative (git diff HEAD).
 ### fix mode
 
 The working tree already contains the failed adaptation — do NOT start from
-scratch.  See `reference/diagnosis-guide.md` for the full fix workflow.
+scratch.
+
+**Pre-CI failures**: the inlined error content is `pre_ci_check.json` — each
+failed check has `violations` with exact file:line:col:CODE.  Fix them directly.
+
+**E2E test failures**: the inlined error content is `round-N-result.json`.
+Open it, check `code_bugs_count` > 0 → open failed tests from
+`suite_results[test_name]`.  For each failed test read its `-summary.json`
+file (structured `code_bugs`/`env_flakes` arrays with tracebacks) — not
+the raw `.log` file.  The per-test `.log` and `-summary.json` are in the
+same `tests/` directory.
+
+See `reference/common-pitfalls.md` §"Fix mode cheat sheet" for the ruff
+error code table and error-to-upstream trace workflow.
 
 **Format/lint violations (E501, F821, etc.)** — NON-NEGOTIABLE.  ruff-format
 CANNOT auto-fix these.  Re-running format.sh will NOT resolve them.  You

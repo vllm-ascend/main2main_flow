@@ -1,7 +1,7 @@
 """OpenCode agent runner — three roles via ``opencode run`` subprocesses:
 
   adapter       — generates adaptations (adapter.md + adapt-guide)
-  adapter-fix   — fixes failures (adapter-fix.md + diagnosis-guide + error-patterns)
+  adapter-fix   — fixes failures (SKILL.md fix mode + session context)
   adapter-qa    — independent critic review (adapter-qa.md + review-lessons checklist)
 
 All JSON events streamed to console and logged under step_dir.
@@ -61,19 +61,35 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
 
     ctx["reference_content"] = ref_content
 
-    # Inline error content from error_logs files (if any)
+    # Inline error content from error_logs files (if any).
+    # error_logs is a JSON array of file paths, e.g. ["/path/a.txt", "/path/b.json"].
+    # Fall back to newline-separated for backward compatibility.
     error_content = ""
-    error_logs_val = inputs.get("error_logs", "").strip()
-    if error_logs_val:
-        parts = []
-        for p in error_logs_val.splitlines():
-            p = p.strip()
-            if p and Path(p).exists():
-                try:
-                    parts.append(Path(p).read_text(encoding="utf-8")[:16000])
-                except Exception:
-                    parts.append(f"(could not read {p})")
-        error_content = "\n\n".join(parts)
+    error_logs_raw = inputs.get("error_logs", "").strip()
+    if error_logs_raw:
+        try:
+            paths = json.loads(error_logs_raw)
+            if isinstance(paths, list):
+                parts = []
+                for p in paths:
+                    pp = Path(p)
+                    if pp.exists():
+                        try:
+                            parts.append(pp.read_text(encoding="utf-8")[:16000])
+                        except Exception:
+                            parts.append(f"(could not read {p})")
+                error_content = "\n\n".join(parts)
+        except (json.JSONDecodeError, ValueError):
+            # Legacy: one path per line
+            parts = []
+            for p in error_logs_raw.splitlines():
+                p = p.strip()
+                if p and Path(p).exists():
+                    try:
+                        parts.append(Path(p).read_text(encoding="utf-8")[:16000])
+                    except Exception:
+                        parts.append(f"(could not read {p})")
+            error_content = "\n\n".join(parts)
     ctx["error_content"] = error_content or "(none)"
 
     return template.format_map(ctx), refs_loaded

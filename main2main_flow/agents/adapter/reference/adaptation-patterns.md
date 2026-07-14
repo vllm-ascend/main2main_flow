@@ -161,3 +161,66 @@ layer = next((l for l in model.layers if l.name == target), None)
 
 **Rule**: DO NOT run `git add`.  The flow captures new files automatically via
 `git add -N .` before generating the patch.  Just create the file normally.
+
+## 11. Prevent mypy errors before CI
+
+mypy runs in CI on every file regardless of runtime guards.  The following
+checks prevent the most common mypy failures.  CI runs these automatically;
+apply them proactively so the PR passes first time.
+
+### 11.1 Version-guarded imports → type: ignore[import-not-found]
+
+Every `from vllm.X import Y` inside a `vllm_version_is` guard must have
+`# type: ignore[import-not-found]`.  See §3 for the full rule.
+
+### 11.2 Call-site argument changes → match the new signature
+
+When upstream adds/removes/renames a parameter, every vllm-ascend call site
+that passes arguments to that function must match:
+
+```python
+# Wrong: upstream added `reduce_results: bool = True`
+super().__init__(config, prefix, topk_indices_buffer)
+
+# Right: match the new signature
+super().__init__(config, prefix, topk_indices_buffer, reduce_results=True)
+```
+
+mypy error: `[call-arg]` — unexpected keyword argument / missing argument.
+
+### 11.3 Attribute/method moves → access from the new location
+
+When upstream moves a config field or method to a different class, every
+vllm-ascend access must use the new location.  Use `vllm_version_is()` to
+guard between old and new:
+
+```python
+if vllm_version_is("0.23.0"):
+    value = obj.new_location.field_name
+else:
+    value = obj.old_location.field_name
+```
+
+mypy error: `[attr-defined]` — object has no attribute "X".
+
+### 11.4 Override signature mismatch → keep it identical
+
+When overriding an upstream method, the signature must match exactly.
+All branches of a version guard must have the same public signature.
+
+```python
+# Wrong: branches have different signatures
+if vllm_version_is("0.23.0"):
+    def forward(self, x, y=None): ...    # 2 params
+else:
+    def forward(self, x, y=None, z=None): ...  # 3 params — mypy error
+
+# Right: same signature on every branch
+def forward(self, x, y=None, z=None):
+    if vllm_version_is("0.23.0"):
+        ...  # z is unused in this branch
+    else:
+        ...
+```
+
+mypy error: `[override]` — signature incompatible with superclass.

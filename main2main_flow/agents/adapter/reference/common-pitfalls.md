@@ -59,6 +59,29 @@ upstream type changes in the same direction.
 **Prevention**: Always use `vllm_version_is("{release_tag}")` for version
 boundaries.  `hasattr`/`try-except` silently mask the wrong kind of change.
 
+## Fix mode cheat sheet
+
+### Correlate error to upstream change
+
+1. Extract a search term from the error (method name, config field, class name)
+2. Search the upstream patch (`{patch_path}`) for that term
+3. Identify the upstream intent: rename, removal, new parameter, new method
+4. Map to the vllm-ascend code that depends on it
+5. Decide if a `vllm_version_is` guard is needed
+
+### Ruff lint error codes
+
+| Code | Meaning | Fix |
+|------|---------|-----|
+| E501 | Line too long (>120 chars) | Break the line; use intermediate variables |
+| F821 | Undefined name | Missing import — add it |
+| F841 | Unused variable | Remove or prefix with `_` |
+| I001 | Unsorted imports | Sort manually |
+| B007 | Loop variable not used | Rename to `_` |
+
+Ruff format can auto-fix some issues but NOT E501/F821/F841 — these need
+manual code edits at the exact line reported in the error.
+
 ## Leaving dead code after upstream fixes a bug
 
 **Symptom**: vllm-ascend has a workaround for an upstream bug.  Upstream fixes

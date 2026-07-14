@@ -362,21 +362,11 @@ class Main2MainFlow(Flow[Main2MainState]):
                 log_path = step_dir / PRE_CI_CHECK_FILE
                 log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
                 error_logs = [str(log_path)]
-                # Summarize which checks failed in the console log
                 failures = []
                 for check in check_result.get("checks", []):
-                    name = check["name"]
-                    passed = check["passed"]
-                    skipped = check.get("skipped", False)
-                    detail = check.get("detail", "")
-                    if not passed:
-                        st = "SKIPPED" if skipped else "FAILED"
-                        failures.append(f"{name}: {st} — {detail}")
-                        # Write format violations to a dedicated file for fix mode
-                        if name == "format" and check.get("violations"):
-                            fmt_err_path = step_dir / "format_errors.txt"
-                            fmt_err_path.write_text("\n".join(check["violations"]), encoding="utf-8")
-                            error_logs.insert(0, str(fmt_err_path))
+                    if not check["passed"]:
+                        st = "SKIPPED" if check.get("skipped", False) else "FAILED"
+                        failures.append(f"{check['name']}: {st} — {check.get('detail', '')}")
                 ts_print(f"[ai_analysis] {step_id}: pre_ci FAILED ({len(failures)} check(s)):")
                 for f in failures:
                     ts_print(f"  {f}")
