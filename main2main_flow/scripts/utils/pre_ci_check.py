@@ -124,8 +124,10 @@ def _check_format(repo: Path) -> dict:
     """
     fmt_script = repo / "format.sh"
     if not fmt_script.exists():
+        ts_print("[pre_ci] format: SKIPPED — format.sh not found")
         return {"violations": [], "detail": "format.sh not found", "skipped": True}
     if not shutil.which("pre-commit"):
+        ts_print("[pre_ci] format: SKIPPED — pre-commit not installed, all lint checks bypassed!")
         return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
     # Run format.sh and Dump its full output into the main2main log
     ts_print("[pre_ci] === format.sh output begin ===")
