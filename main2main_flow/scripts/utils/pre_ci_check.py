@@ -113,22 +113,21 @@ def _check_temp_files(repo: Path) -> dict:
 
 
 def _check_mypy(repo: Path) -> dict:
-    """Run ``mypy --follow-imports skip`` on all vllm_ascend Python files.
+    """Run ``bash tools/mypy.sh`` — identical to CI's mypy invocation.
 
-    Matches CI behaviour: mypy checks the entire codebase, not just the
-    current diff.  Import errors in un-changed but version-guarded files
-    are caught here, not after the PR is opened.
+    Uses the repo's ``mypy.ini`` config and ``--check-untyped-defs``
+    like CI does.  Checks the entire codebase, not just the current diff.
     """
-    if not shutil.which("mypy"):
-        return {"violations": [], "detail": "mypy not installed", "skipped": True}
+    mypy_script = repo / "tools" / "mypy.sh"
+    if not mypy_script.exists() or not shutil.which("mypy"):
+        return {"violations": [], "detail": "mypy not available", "skipped": True}
     r = subprocess.run(
-        ["mypy", "--follow-imports", "skip", "vllm_ascend"],
+        ["bash", str(mypy_script), "1"],
         cwd=str(repo), capture_output=True, text=True,
     )
     if r.returncode != 0:
         combined = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
         err_count = combined.count("error:")
-        # Keep the first 8000 chars — all actual errors are at the beginning
         return {"violations": [combined[:8000]], "detail": f"mypy found {err_count} error(s)"}
     return {"violations": [], "detail": "mypy clean"}
 
@@ -146,10 +145,17 @@ def _check_format(repo: Path) -> dict:
         return {"violations": [], "detail": "format.sh not found", "skipped": True}
     if not shutil.which("pre-commit"):
         return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
+    # Run format.sh and capture output
     r = subprocess.run(
         ["bash", str(fmt_script)], cwd=str(repo),
         capture_output=True, text=True,
     )
+    # Check if ruff-format actually modified files in the working tree
+    diff_after = subprocess.run(
+        ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
+    ).stdout.strip()
+    if diff_after:
+        ts_print(f"[pre_ci] format.sh modified files in working tree:\n{diff_after[:500]}")
     output = (r.stdout + "\n" + r.stderr)
     # Extract ruff-check errors — lines formatted as:
     #   vllm_ascend/path/file.py:LINE:COL: CODE description

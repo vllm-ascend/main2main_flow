@@ -406,6 +406,13 @@ class Main2MainFlow(Flow[Main2MainState]):
         # so new files created by the adaptation appear in the patch.
         subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
                        capture_output=True)
+        # Verify the working tree includes format fixes (if any)
+        diff_stat = subprocess.run(
+            ["git", "diff", "--stat", "HEAD"], cwd=ascend_path,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if diff_stat:
+            ts_print(f"[ai_analysis] {step_id}: working tree diff before patch capture:\n{diff_stat[:500]}")
         adaptation_patch = run_git(ascend_path, "diff", "HEAD")
         adaptation_patch_path.write_text(adaptation_patch, encoding="utf-8")
 
