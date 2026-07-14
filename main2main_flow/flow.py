@@ -417,6 +417,13 @@ class Main2MainFlow(Flow[Main2MainState]):
         if adapt_result and adapt_result.step_summary and not summary_path.exists():
             summary_path.write_text(adapt_result.step_summary, encoding="utf-8")
 
+        # Clean up review artifacts (e.g. .archive/review.json) that opencode
+        # may have left behind during adapter-qa — these should not be committed.
+        archive_dir = Path(ascend_path) / ".archive"
+        if archive_dir.exists():
+            shutil.rmtree(archive_dir)
+            ts_print(f"[ai_analysis] {step_id}: removed .archive/ (review artifact)")
+
         adaptation_patch_path = step_dir / EACH_STEP_TARGET_PATCH_FILE
         # git diff HEAD excludes untracked files — run git add -N first
         # so new files created by the adaptation appear in the patch.
@@ -435,19 +442,6 @@ class Main2MainFlow(Flow[Main2MainState]):
         changed_files = run_git(ascend_path, "diff", "--name-only", "HEAD").strip().splitlines()
         changed_files = [f for f in changed_files if f]  # filter empty lines
 
-        # Post-patch diagnostic: run ruff-check on changed Python files
-        py_files = [f for f in changed_files if f.endswith(".py")]
-        if py_files:
-            ruff_r = subprocess.run(
-                ["ruff", "check"] + py_files, cwd=ascend_path,
-                capture_output=True, text=True,
-            )
-            if ruff_r.returncode != 0:
-                ts_print(f"[ai_analysis] {step_id}: ⚠ ruff-check found POST-PATCH issues in changed files:")
-                for line in ruff_r.stdout.strip().splitlines()[:10]:
-                    if line.strip():
-                        ts_print(f"  {line.strip()}")
-                ts_print(f"[ai_analysis] {step_id}: ↑ these will fail CI — run format.sh again!")
 
         ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
 
@@ -720,4 +714,3 @@ class Main2MainFlow(Flow[Main2MainState]):
             labels=labels,
             branch_name=branch_name,
         )
-
