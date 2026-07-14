@@ -47,6 +47,21 @@ Possible inputs:
    - Fix by reading the JSON and inspecting source; do not rerun pre_ci_check
      manually
 
+3. Format/lint errors (``ruff check`` output in pre_ci_check.json ``format`` violations)
+   - Each violation line is: ``path/file.py:LINE:COL: CODE description``
+   - Common codes and fixes:
+
+   | Code | Meaning | Fix |
+   |------|---------|-----|
+   | E501 | Line too long (>120 chars) | Break the line; use intermediate variables |
+   | F821 | Undefined name | Missing import — add it |
+   | F841 | Unused variable | Remove or prefix with ``_`` |
+   | I001 | Unsorted imports | Run ``ruff check --fix`` or manually sort |
+   | B007 | Loop variable not used | Rename to ``_`` |
+
+   - Read the file at the reported line, apply the fix, then run format.sh again
+     to confirm it passes.
+
 2. `tests/round-<N>-result.json`
    - Produced after e2e tests fail.  Contains the overall verdict, per-test
      results (`suite_results`), and per-test log file paths.

@@ -70,7 +70,7 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
             p = p.strip()
             if p and Path(p).exists():
                 try:
-                    parts.append(Path(p).read_text(encoding="utf-8")[:4000])
+                    parts.append(Path(p).read_text(encoding="utf-8")[:16000])
                 except Exception:
                     parts.append(f"(could not read {p})")
         error_content = "\n\n".join(parts)

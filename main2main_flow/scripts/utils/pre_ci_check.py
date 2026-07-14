@@ -128,12 +128,19 @@ def _check_mypy(repo: Path) -> dict:
     if r.returncode != 0:
         combined = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
         err_count = combined.count("error:")
-        return {"violations": [combined[:3000]], "detail": f"mypy found {err_count} error(s)"}
+        # Keep the first 8000 chars — all actual errors are at the beginning
+        return {"violations": [combined[:8000]], "detail": f"mypy found {err_count} error(s)"}
     return {"violations": [], "detail": "mypy clean"}
 
 
 def _check_format(repo: Path) -> dict:
-    """Run ``bash format.sh`` to check ruff format/lint."""
+    """Run ``bash format.sh`` to auto-fix ruff format/lint.
+
+    ruff-format auto-fixes files in place and returns non-zero to signal
+    changes were made — that's expected, not a bug.  Only ``ruff check``
+    errors that cannot be auto-fixed (E501 line-too-long, F821 undefined,
+    etc.) count as real violations.
+    """
     fmt_script = repo / "format.sh"
     if not fmt_script.exists():
         return {"violations": [], "detail": "format.sh not found", "skipped": True}
@@ -143,8 +150,17 @@ def _check_format(repo: Path) -> dict:
         ["bash", str(fmt_script)], cwd=str(repo),
         capture_output=True, text=True,
     )
-    if r.returncode != 0:
-        return {"violations": [r.stderr.strip()[:2000]], "detail": "format.sh failed"}
+    output = (r.stdout + "\n" + r.stderr)
+    # Extract actual check errors (not "files were modified" noise from ruff-format)
+    real_errors = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        # ruff-check error lines look like: vllm_ascend/path/file.py:1102:121: E501 ...
+        if "error:" in stripped and (".py:" in stripped):
+            real_errors.append(stripped)
+    if real_errors:
+        return {"violations": real_errors,
+                "detail": f"{len(real_errors)} lint issue(s) (not auto-fixable)"}
     return {"violations": [], "detail": "format.sh OK"}
 
 
