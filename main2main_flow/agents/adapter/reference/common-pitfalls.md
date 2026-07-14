@@ -82,6 +82,13 @@ boundaries.  `hasattr`/`try-except` silently mask the wrong kind of change.
 Ruff format can auto-fix some issues but NOT E501/F821/F841 — these need
 manual code edits at the exact line reported in the error.
 
+**Fix workflow for format failures**: (1) open pre_ci_check.json → find the
+format check → read every violation line → (2) for each file:line:col:CODE,
+open the file at that line → (3) apply the fix from the table above → (4) run
+`bash format.sh` → (5) if still fails, repeat from step 2 until clean.
+This is a hard blocker — do not proceed to any other task until every format
+violation is resolved.
+
 ## Leaving dead code after upstream fixes a bug
 
 **Symptom**: vllm-ascend has a workaround for an upstream bug.  Upstream fixes

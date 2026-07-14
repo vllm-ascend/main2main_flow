@@ -77,7 +77,15 @@ The working tree already contains the failed adaptation — do NOT start from
 scratch.
 
 **Pre-CI failures**: the inlined error content is `pre_ci_check.json` — each
-failed check has `violations` with exact file:line:col:CODE.  Fix them directly.
+failed check has `violations` with exact file:line:col:CODE.
+
+  - **format violations (E501/F821/etc.)**: Open the file, go to the reported
+    line number, and manually edit the code.  ruff-format CANNOT auto-fix these.
+    After fixing, re-run `bash format.sh` to verify.  Repeat until format.sh
+    exits clean.  This is a hard blocker — do not skip.
+
+  - **version_strings / broken_imports**: violations tell you exactly what's
+    wrong (wrong release tag, missing import).  Fix those specific lines.
 
 **E2E test failures**: the inlined error content is `round-N-result.json`.
 Open it, check `code_bugs_count` > 0 → open failed tests from
