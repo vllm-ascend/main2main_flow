@@ -14,6 +14,7 @@ Design note:
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -129,11 +130,16 @@ def _check_format(repo: Path) -> dict:
     if not shutil.which("pre-commit"):
         ts_print("[pre_ci] format: SKIPPED — pre-commit not installed, all lint checks bypassed!")
         return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
-    # Run format.sh and Dump its full output into the main2main log
+    # Run format.sh with a clean pre-commit cache to avoid stale/arch-mismatched
+    # hook binaries (e.g. x86_64 binaries cached on an aarch64 runner via shared
+    # storage or actions/cache).  Use a separate cache dir under ~/.cache so
+    # the correct-architecture binaries persist across runs.
     ts_print("[pre_ci] === format.sh output begin ===")
+    env = os.environ.copy()
+    env["PRE_COMMIT_HOME"] = "/root/.cache/main2main-pre-commit"
     r = subprocess.run(
         ["bash", str(fmt_script)], cwd=str(repo),
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=env,
     )
     output = (r.stdout + "\n" + r.stderr)
     ts_print(output.strip())

@@ -270,7 +270,10 @@ class Main2MainFlow(Flow[Main2MainState]):
     @listen(HasCommit)
     def process_steps(self):
         while self.state.current_step < self.state.total_steps:
-            self._ai_analysis()
+            if not self._ai_analysis():
+                ts_print("[process_steps] ai_analysis exhausted retries, aborting")
+                self.state.final_status = UpgradeFailed
+                return
             test_pass = self._run_e2e_test()
             if test_pass:
                 self.state.current_step += 1
@@ -285,7 +288,7 @@ class Main2MainFlow(Flow[Main2MainState]):
                 continue
         self.state.final_status = UpgradeCompleted
 
-    def _ai_analysis(self):
+    def _ai_analysis(self) -> bool:
         if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
             step = self.state.steps[self.state.current_step]
             step_id = step["id"]
@@ -295,7 +298,7 @@ class Main2MainFlow(Flow[Main2MainState]):
             self.state.cur_vllm_commit = step["end_commit"]
             self.state.cur_ascend_commit = ascend_head
             self.state.cur_patch_path = str(step_dir / EACH_STEP_TARGET_PATCH_FILE)
-            return
+            return True
 
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
@@ -335,6 +338,9 @@ class Main2MainFlow(Flow[Main2MainState]):
         changed_files_path = step_dir / VLLM_GIT_CHANGED_FILES
         adapt_result: AdaptResult | None = None
 
+        pre_ci_passed = False
+        review_passed = False
+
         for attempt in range(1, 4):
             role = "adapter-fix" if error_logs else "adapter"
             ts_print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, role={role}")
@@ -357,8 +363,10 @@ class Main2MainFlow(Flow[Main2MainState]):
             if adapt_result.session_id:
                 self.state.session_id = adapt_result.session_id
 
+            # pre_ci: mechanical checks (version, format, imports, temp files)
             check_result = run_check(ascend_path, self.state.release_tag, vllm_path=vllm_path)
-            if not check_result["all_passed"]:
+            pre_ci_passed = check_result["all_passed"]
+            if not pre_ci_passed:
                 log_path = step_dir / PRE_CI_CHECK_FILE
                 log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
                 error_logs = [str(log_path)]
@@ -370,11 +378,11 @@ class Main2MainFlow(Flow[Main2MainState]):
                 ts_print(f"[ai_analysis] {step_id}: pre_ci FAILED ({len(failures)} check(s)):")
                 for f in failures:
                     ts_print(f"  {f}")
-                continue
+            else:
+                error_logs = []
+                ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
 
-            ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
-
-            # ---- adapter-qa: independent review before e2e ----
+            # adapter-qa: logic review — runs regardless of pre_ci result
             review_issues = _run_adapter_qa(
                 ascend_path=ascend_path,
                 vllm_path=vllm_path,
@@ -383,14 +391,25 @@ class Main2MainFlow(Flow[Main2MainState]):
                 release_tag=self.state.release_tag,
                 upstream_patch_path=str(step_dir / VLLM_GIT_PATCH_FILE),
             )
+            review_passed = not review_issues
             if review_issues:
                 review_path = step_dir / "adapter-qa.md"
                 review_path.write_text("\n".join(review_issues), encoding="utf-8")
                 ts_print(f"[ai_analysis] {step_id}: critic found {len(review_issues)} issue(s) → {review_path}")
-                error_logs = [str(review_path)]
-                continue
-            ts_print(f"[ai_analysis] {step_id}: critic passed")
-            break
+                if error_logs:
+                    error_logs.append(str(review_path))
+                else:
+                    error_logs = [str(review_path)]
+            else:
+                ts_print(f"[ai_analysis] {step_id}: critic passed")
+
+            if pre_ci_passed and review_passed:
+                break
+
+        if not (pre_ci_passed and review_passed):
+            ts_print(f"[ai_analysis] {step_id}: FAILED after 3 attempts — skipping e2e")
+            self.state.test_errors = error_logs if error_logs else []
+            return False
 
         self.state.test_errors = []
 
@@ -451,6 +470,8 @@ class Main2MainFlow(Flow[Main2MainState]):
         )
         if reset_r.returncode != 0:
             ts_print(f"[ai_analysis] {step_id}: failed to reset vllm: {reset_r.stderr.strip()}")
+
+        return True
 
     def _run_e2e_test(self):
         step = self.state.steps[self.state.current_step]

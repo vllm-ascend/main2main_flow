@@ -51,8 +51,10 @@ def _run_format(repo: Path) -> None:
         ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
     ).stdout.strip()
     ts_print("[push] === format.sh output begin ===")
+    env = os.environ.copy()
+    env["PRE_COMMIT_HOME"] = "/root/.cache/main2main-pre-commit"
     r = subprocess.run(
-        ["bash", str(fmt_script)], cwd=str(repo), capture_output=True, text=True,
+        ["bash", str(fmt_script)], cwd=str(repo), capture_output=True, text=True, env=env,
     )
     ts_print((r.stdout + "\n" + r.stderr).strip())
     ts_print(f"[push] === format.sh output end (exit={r.returncode}) ===")
