@@ -127,18 +127,21 @@ def _check_format(repo: Path) -> dict:
         return {"violations": [], "detail": "format.sh not found", "skipped": True}
     if not shutil.which("pre-commit"):
         return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
-    # Run format.sh and capture output
+    # Run format.sh and Dump its full output into the main2main log
+    ts_print("[pre_ci] === format.sh output begin ===")
     r = subprocess.run(
         ["bash", str(fmt_script)], cwd=str(repo),
         capture_output=True, text=True,
     )
+    output = (r.stdout + "\n" + r.stderr)
+    ts_print(output.strip())
+    ts_print(f"[pre_ci] === format.sh output end (exit={r.returncode}) ===")
     # Check if ruff-format actually modified files in the working tree
     diff_after = subprocess.run(
         ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
     ).stdout.strip()
     if diff_after:
-        ts_print(f"[pre_ci] format.sh modified files in working tree:\n{diff_after[:500]}")
-    output = (r.stdout + "\n" + r.stderr)
+        ts_print(f"[pre_ci] format.sh modified files in working tree:\n{diff_after}")
     # Extract ruff-check errors — lines formatted as:
     #   vllm_ascend/path/file.py:LINE:COL: CODE description
     # ruff-format "files were modified" and hook status lines are skipped.

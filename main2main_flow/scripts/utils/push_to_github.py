@@ -50,17 +50,15 @@ def _run_format(repo: Path) -> None:
     before = subprocess.run(
         ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
     ).stdout.strip()
+    ts_print("[push] === format.sh output begin ===")
     r = subprocess.run(
         ["bash", str(fmt_script)], cwd=str(repo), capture_output=True, text=True,
     )
+    ts_print((r.stdout + "\n" + r.stderr).strip())
+    ts_print(f"[push] === format.sh output end (exit={r.returncode}) ===")
     after = subprocess.run(
         ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
     ).stdout.strip()
-    if r.returncode != 0:
-        ts_print(f"[push] format.sh exit={r.returncode}")
-        err = (r.stdout + "\n" + r.stderr).strip()[-500:]
-        if err:
-            ts_print(f"[push] format.sh output:\n{err}")
     if after != before:
         ts_print(f"[push] format.sh fixed files (before → after commit)")
     else:
