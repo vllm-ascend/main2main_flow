@@ -76,9 +76,11 @@ The step_target.patch is cumulative (git diff HEAD).
 The working tree already contains the failed adaptation — do NOT start from
 scratch.  See `reference/diagnosis-guide.md` for the full fix workflow.
 
-**Format/lint violations (E501, F821, etc.)**: ruff-format CANNOT auto-fix
-these.  You MUST open the file at the reported line number and manually
-edit the code.  Re-running format.sh will NOT resolve them.
+**Format/lint violations (E501, F821, etc.)** — NON-NEGOTIABLE.  ruff-format
+CANNOT auto-fix these.  Re-running format.sh will NOT resolve them.  You
+MUST open the file, go to the exact line number reported in the error, and
+manually edit the code.  After fixing, run format.sh again to verify.
+Do NOT proceed to any other task until every format error is resolved.
 
 ## Output
 

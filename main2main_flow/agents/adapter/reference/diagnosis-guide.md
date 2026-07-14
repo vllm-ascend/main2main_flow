@@ -59,8 +59,10 @@ Possible inputs:
    | I001 | Unsorted imports | Run ``ruff check --fix`` or manually sort |
    | B007 | Loop variable not used | Rename to ``_`` |
 
-   - Read the file at the reported line, apply the fix, then run format.sh again
-     to confirm it passes.
+   - **This is a hard blocker.**  Read the file at the reported line, manually
+     edit the code (break long line, add import, rename variable), then run
+     format.sh again.  Repeat until format.sh exits clean.  Do not move on to
+     any other fix until all format errors are resolved.
 
 2. `tests/round-<N>-result.json`
    - Produced after e2e tests fail.  Contains the overall verdict, per-test
