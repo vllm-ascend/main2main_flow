@@ -106,6 +106,7 @@ def _run_adapter_qa(
     diff_limit = 8000
     diff_snippet = diff if len(diff) <= diff_limit else diff[:diff_limit] + "\n... [truncated]"
 
+    review_path = str(Path(step_dir) / "review.json")
     if qa_template:
         upstream_patch = ""
         if upstream_patch_path:
@@ -119,6 +120,7 @@ def _run_adapter_qa(
             vllm_path=vllm_path,
             ascend_path=ascend_path,
             patch_path=upstream_patch,
+            review_path=review_path,
             diff_content=diff_snippet,
             review_checklist=checklist,
         )
@@ -146,36 +148,25 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ts_print(f"[adapter-qa] {step_id}: opencode failed (exit {r.returncode})")
         return [f"Critic review crashed (exit {r.returncode}): {r.stderr.strip()[:500]}"]
 
-    # Extract text from the last JSON event
+    # Read the verdict from review.json (written by the model per SKILL.md to the step dir)
     import json as _json
-    text_parts = []
-    for line in r.stdout.strip().splitlines():
+    review_json = Path(review_path)
+    if review_json.exists():
         try:
-            ev = _json.loads(line)
-        except _json.JSONDecodeError:
-            continue
-        if ev.get("type") == "text":
-            text_parts.append(ev.get("part", {}).get("text", ""))
-    output = "\n".join(text_parts).strip()
-    ts_print(f"[adapter-qa] {step_id}: output: {output[:500]}")
-
-    # Try to parse JSON verdict from the output
-    try:
-        # Look for JSON block
-        import re
-        m = re.search(r'\{[^}]*"verdict"[^}]*\}', output)
-        if m:
-            verdict = _json.loads(m.group())
-            if verdict.get("verdict") == "pass":
+            review = _json.loads(review_json.read_text(encoding="utf-8"))
+            verdict = review.get("verdict", "")
+            issues = review.get("issues", [])
+            if verdict == "pass":
+                ts_print(f"[adapter-qa] {step_id}: pass")
                 return []
-            return verdict.get("issues", ["critic: review flagged issues"])
-    except _json.JSONDecodeError:
-        pass
+            ts_print(f"[adapter-qa] {step_id}: fail — {len(issues)} issue(s)")
+            return [f"{i.get('file', '?')}:{i.get('line', '?')}: {i.get('issue', '?')}" for i in issues]
+        except (_json.JSONDecodeError, KeyError):
+            ts_print(f"[adapter-qa] {step_id}: fail (review.json unparseable)")
+            return ["critic: review.json could not be parsed"]
 
-    # Fallback: if output mentions "pass" or is empty, assume OK
-    if "pass" in output.lower() and "fail" not in output.lower():
-        return []
-    return ["critic: review output could not be parsed as pass — check critic_review.md"]
+    ts_print(f"[adapter-qa] {step_id}: fail (no review.json found)")
+    return ["critic: no review.json found — opencode did not produce expected output"]
 
 
 class Main2MainFlow(Flow[Main2MainState]):
@@ -441,7 +432,6 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         changed_files = run_git(ascend_path, "diff", "--name-only", "HEAD").strip().splitlines()
         changed_files = [f for f in changed_files if f]  # filter empty lines
-
 
         ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
 

@@ -45,7 +45,7 @@ You are an independent reviewer for step {step_id}. You did NOT write this chang
 
 ## Output
 
-Write ONE file: review.json to the archive directory, exactly this shape:
+Write ONE file to `{review_path}`, exactly this shape:
 
 ```json
 {{
