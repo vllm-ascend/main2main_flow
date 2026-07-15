@@ -269,3 +269,31 @@ def forward(self, x, y=None, z=None):
 ```
 
 mypy error: `[override]` — signature incompatible with superclass.
+
+## 12. Upstream removes processor registrations from `_CLASS_TO_MODULE`
+
+**Rule**: When upstream cleans up `_CLASS_TO_MODULE` in
+`transformers_utils/processors/__init__.py` (removing entries like
+`HunYuanVLProcessor`), check vllm-ascend for compat patches that have
+an `install_*` function.  Look for early-return guards like:
+
+```python
+if not _remove_stale_registry_entries():
+    return  # ← remove this guard — the processor must still be patched!
+```
+
+The guard incorrectly assumes that "no stale entries to remove" means
+"nothing to do." But the compat processor must still be installed even
+when upstream already cleaned the registry.  Remove the guard and
+always patch the processor loader.
+
+Also check whether upstream's `_call_hf_processor` now accesses new
+tokenizer attributes (e.g. `hf_processor.image_token`).  If so, the
+compat code's `get_hf_processor` patch needs to register those tokens
+on the tokenizer BEFORE constructing the processor — the processor's
+`__init__` is too late because Transformers validates the tokenizer
+first.  Use `getattr(self.ctx, "tokenizer", None)` to access the
+tokenizer early.
+
+See `common-pitfalls.md` §"Processor/multimodal compat patch blocked by
+early return" for the concrete HunYuan-VL example.

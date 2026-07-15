@@ -126,7 +126,47 @@ with proper version guards, proving that a single-line fix can look
 "clean" but be wrong.  `adaptation-patterns.md` §1b has the
 before/after code example.
 
-## Config/attribute moved between classes
+## Processor/multimodal compat patch blocked by early return
+
+**Symptom**: After upstream removes processor registrations from
+`_CLASS_TO_MODULE` (e.g. `HunYuanVLProcessor` deleted from
+`processors/__init__.py`), a model test fails with
+`Tokenizer is missing required attribute 'image_token'`.
+
+**Root cause**: vllm-ascend has a compat patch (e.g.
+`hunyuan_vl_processor_compat.py`) that has an `install_*` function
+with an early-return guard:
+
+```python
+if not _remove_stale_registry_entries():
+    return   # ← BUG: returns even when processor still needs patching!
+```
+
+Upstream already removed the stale entries, so `_remove_stale_registry_entries`
+returns `False` (nothing to remove), and the entire else-branch is skipped.
+The compat processor never gets installed, the tokenizer never gets its
+special tokens registered, and the upstream processor construction fails.
+
+**Fix**: Remove the `if not ...: return` guard.  The processor patch
+must always run, even when the stale-registry cleanup is a no-op:
+
+```python
+_remove_stale_registry_entries()  # no-op if already clean, but we must continue
+from vllm.model_executor.models import hunyuan_vision as main_hunyuan_vision
+_patch_hunyuan_processor_loader(main_hunyuan_vision)
+```
+
+**Also**: When upstream adds new tokenizer attribute accesses (e.g.
+`hf_processor.image_token` in `_call_hf_processor`), register the
+special tokens on the tokenizer BEFORE calling
+`ctx.get_hf_processor()` — Transformers may validate the tokenizer
+before the processor's `__init__` runs, so putting the setup in
+`__init__` is too late.  Use `getattr(self.ctx, "tokenizer", None)`
+to access the tokenizer early.
+
+This trap caused a real CI failure on PR #12070: the HunYuan-VL test
+broke because the compat patch's else-branch was skipped, and the
+tokenizer image tokens were never registered.
 
 **Symptom**: `AttributeError: 'X' object has no attribute 'Y'` because
 upstream moved a field to a different config object or class.
