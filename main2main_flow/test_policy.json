@@ -1,0 +1,6 @@
+{
+  "allowlist": [
+    "tests/e2e/pull_request/four_card/test_qwen3_next.py::test_qwen3_next_distributed_mp_full_decode_only_tp4"
+  ],
+  "blocklist": []
+}

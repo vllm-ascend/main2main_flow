@@ -19,6 +19,51 @@ def _deepseek_v2_mla_attention_init(
 > Anti-pattern: wrapping the entire function body in a version guard just for
 > a new parameter.
 
+## 1b. Upstream removes a parameter AND changes return semantics
+
+**Rule**: Make the removed parameter optional (`= None`), then guard the
+*both* the call path and the return path with `vllm_version_is()`.
+
+This is the inverse of §1 and is easy to get wrong.  The trap: it looks
+like a simple signature change, but the upstream also changed how results
+are returned (write-to-output-buffer → return-value).
+
+```python
+# Upstream removed `output` parameter and now returns the result:
+#   Old call: self.linear_attn(hidden_states=hidden_states, output=buf)
+#   New call: hidden_states = self.linear_attn(hidden_states=hidden_states)
+
+# Wrong: just redirect a forward method without touching the call pattern.
+# This misses the signature change at the call site.
+_GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
+
+# Right: make the parameter optional, guard both input and output.
+def forward(self, positions, hidden_states, output=None):
+    qkv, _ = self.qkv_proj(hidden_states)
+    ...
+    if vllm_version_is("{release_tag}"):
+        output[:], _ = self.o_proj(attn_output)      # old: write to buffer
+    else:
+        out, _ = self.o_proj(attn_output)            # new: return value
+        return out
+```
+
+Then at every call site, guard the calling pattern too:
+```python
+if vllm_version_is("{release_tag}"):
+    self.linear_attn(hidden_states=hidden_states, output=self_attention_output)
+    hidden_states = self_attention_output
+else:
+    hidden_states = self.linear_attn(hidden_states=hidden_states)
+```
+
+> Anti-pattern: adding only `_GDN_PATCH_TARGET.forward = ...` without touching
+> the method signature or the call sites.  This works for 310P-only paths but
+> silently breaks the regular path where the upstream now calls differently.
+
+> If the removed parameter was a mutable output buffer (`output[:] = result` →
+> `return result`), the return-type semantics changed too — guard that.
+
 ## 2. Upstream changes a constructor / factory signature
 
 **Rule**: Guard with `vllm_version_is()`, pass the new parameter shape in the

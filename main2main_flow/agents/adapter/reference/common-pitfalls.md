@@ -107,7 +107,24 @@ example: went from 20 lines matching 10+ model types to 1 line.
 **Prevention**: Compare the upstream signature (in the patch) with every
 vllm-ascend call site.  For added parameters, add a keyword default.
 For removed parameters, guard with `vllm_version_is()` and pass
-conditionally.  `adaptation-patterns.md` §1–§2 cover this in detail.
+conditionally.  `adaptation-patterns.md` §1–§1b cover this in detail.
+
+**The output-buffer trap**: When upstream changes from `output[:] = result`
+pattern to `return result`, merely redirecting a forward method (e.g.
+`_GDN_PATCH_TARGET.forward = ...`) is NOT enough.  You must also:
+
+1. Make the removed parameter optional: `output: torch.Tensor = None`
+2. Guard the return path: old branch writes to `output[:]`, new branch
+   does `return out`
+3. Guard every call site that passes `output=...`
+4. Run ALL tests — errors may only surface in specific model paths
+
+This trap caused a real CI failure (PR #12039, step-1): the adapter
+added only a forward redirect, missing the `output` parameter change.
+The same upstream commit was previously adapted correctly (PR #12020)
+with proper version guards, proving that a single-line fix can look
+"clean" but be wrong.  `adaptation-patterns.md` §1b has the
+before/after code example.
 
 ## Config/attribute moved between classes
 

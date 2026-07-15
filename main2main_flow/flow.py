@@ -26,11 +26,43 @@ from main2main_flow.scripts.utils.utils import (
     FINAL_CODE_STRUCTURE_GUIDE_FILE, run_git, ts_print
 )
 
-def _parse_test_cases_env() -> list[str] | None:
-    val = os.getenv("MAIN2MAIN_TEST_CASES", "").strip()
-    if not val:
-        return None
-    return [t.strip() for t in val.replace("\n", " ").split() if t.strip()]
+def _resolve_test_cases() -> list[str] | None:
+    """Merge test cases from env, allowlist, and blocklist.
+
+    Returns the final deduplicated list, or None to fall back to
+    file-based auto-selection.
+    """
+    tests: list[str] = []
+    # Env-provided test cases (MAIN2MAIN_TEST_CASES in CI workflow)
+    env_val = os.getenv("MAIN2MAIN_TEST_CASES", "").strip()
+    if env_val:
+        tests.extend(t.strip() for t in env_val.replace("\n", " ").split() if t.strip())
+
+    # Test policy: allowlist (always include) and blocklist (always exclude)
+    policy_path = Path(__file__).parent / "test_policy.json"
+    blocked: set[str] = set()
+    if policy_path.exists():
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            for t in policy.get("allowlist", []):
+                if isinstance(t, str) and t.strip():
+                    tests.append(t.strip())
+            for t in policy.get("blocklist", []):
+                if isinstance(t, str) and t.strip():
+                    blocked.add(t.strip())
+        except (json.JSONDecodeError, KeyError):
+            ts_print("[test_policy] failed to parse test_policy.json, ignoring")
+
+    # Deduplicate and apply blocklist
+    seen: set[str] = set()
+    result: list[str] = []
+    for t in tests:
+        if t in seen or t in blocked:
+            continue
+        seen.add(t)
+        result.append(t)
+
+    return result or None
 
 
 class Main2MainState(BaseModel):
@@ -475,7 +507,7 @@ class Main2MainFlow(Flow[Main2MainState]):
             patch_path=self.state.cur_patch_path or None,
             step_id=step_id,
             select_by_files=self.state.changed_files or None,
-            test_cases=_parse_test_cases_env(),
+            test_cases=_resolve_test_cases(),
             remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
             round_number=self.state.retry_count,
             log_dir=str(WORKSPACE_DIR / STEPS_DIR),
@@ -559,54 +591,57 @@ class Main2MainFlow(Flow[Main2MainState]):
         if has_patch:
             shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
 
-        # Build PR body: per-file list with description + upstream commit links.
-        # Extracts Cause/Change lines from the AI's step_summary, skipping verbose
-        # "files checked but unchanged" lists and step header boilerplate.
+        # Build PR body: concise numbered list grouped by Change description.
+        # Reads final_target.patch to get all changed files, then looks up
+        # each file's Change from its step_summary.  Files sharing the same
+        # Change are grouped; no-op steps are omitted.
         TRACKING_FILE = ".github/vllm-main-verified.commit"
         commit_url = "https://github.com/vllm-project/vllm/commit"
-        file_to_commits: dict[str, list[str]] = {}
-        file_descs: dict[str, list[str]] = {}
+        final_patch = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
+
+        # Collect files and their Change descriptions, plus all upstream commits
+        file_changes: dict[str, str] = {}  # fname -> Change line
+        all_upstream: list[str] = []
         for i in range(self.state.current_step):
             s = self.state.steps[i]
+            ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
+            change_text = ""
+            if ssp.exists():
+                for dline in ssp.read_text(encoding="utf-8").strip().splitlines():
+                    dl = dline.strip()
+                    if dl.startswith("Change:"):
+                        change_text = dl.removeprefix("Change:").strip()
+                        break
+            all_upstream.append(f"[{s['end_commit'][:8]}]({commit_url}/{s['end_commit']})")
+            if not final_patch.exists():
+                continue
             sp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_TARGET_PATCH_FILE
-            if sp.exists():
-                pt = sp.read_text(encoding="utf-8")
-                for line in pt.splitlines():
-                    if line.startswith("diff --git a/"):
-                        fname = line.split()[-1][2:]
-                        if fname != TRACKING_FILE:
-                            file_to_commits.setdefault(fname, []).append(s["end_commit"][:8])
-                            # Extract Cause/Change lines from the step's AI summary
-                            ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
-                            if ssp.exists() and fname not in file_descs:
-                                desc_lines = []
-                                for dline in ssp.read_text(encoding="utf-8").strip().splitlines():
-                                    dl = dline.strip()
-                                    if dl.startswith("Cause:") or dl.startswith("Change:"):
-                                        desc_lines.append(dl)
-                                if desc_lines:
-                                    file_descs[fname] = desc_lines
+            if not sp.exists():
+                continue
+            for line in sp.read_text(encoding="utf-8").splitlines():
+                if line.startswith("diff --git a/"):
+                    fname = line.split()[-1][2:]
+                    if fname != TRACKING_FILE and change_text:
+                        file_changes.setdefault(fname, change_text)
+
+        # Group files by Change description
+        change_groups: dict[str, list[str]] = {}
+        for fname, change in file_changes.items():
+            change_groups.setdefault(change, []).append(fname)
 
         parts = [
             "### What this PR does / why we need it?",
             "",
-            f"vllm upstream `{self.state.base_commit[:8]}...{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}` "
-            f"({self.state.current_step}/{self.state.total_steps} steps).",
+            f"vllm upstream `{self.state.base_commit[:8]}...{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}`",
             "",
         ]
-        if file_to_commits:
-            for fname in sorted(file_to_commits):
-                parts.append(f"#### {fname}")
-                parts.append("")
-                descs = file_descs.get(fname, [])
-                for d in descs:
-                    parts.append(f"- {d}")
-                for vc in file_to_commits[fname]:
-                    parts.append(f"- Upstream source: [{vc}]({commit_url}/{vc})")
-                parts.append("")
-        else:
-            parts.append("No vllm-ascend changes needed.")
+        for idx, (change, files) in enumerate(sorted(change_groups.items()), 1):
+            files_str = ", ".join(f"`{f}`" for f in sorted(files))
+            parts.append(f"{idx}. {change} ({files_str})")
+        if all_upstream:
             parts.append("")
+            parts.append(f"Upstream: {' · '.join(sorted(set(all_upstream)))}")
+        parts.append("")
 
         # ---- pre-CI summary: only show non-OK results, with detail ----
         pre_ci_issues: list[str] = []
