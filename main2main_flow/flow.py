@@ -591,87 +591,53 @@ class Main2MainFlow(Flow[Main2MainState]):
         if has_patch:
             shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
 
-        # Build PR body: concise numbered list grouped by Change description.
-        # Reads final_target.patch to get all changed files, then looks up
-        # each file's Change from its step_summary.  Files sharing the same
-        # Change are grouped; no-op steps are omitted.
+        # Build PR body: concise numbered list matching PR #5595 style.
+        # Each item: "Adapt <files> due to [commit](link) — <cause>"
         TRACKING_FILE = ".github/vllm-main-verified.commit"
         commit_url = "https://github.com/vllm-project/vllm/commit"
-        final_patch = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
 
-        # Collect files and their Change descriptions, plus all upstream commits
-        file_changes: dict[str, str] = {}  # fname -> Change line
-        all_upstream: list[str] = []
+        # Collect per-step: adapted files, cause, and triggering commit
+        step_items: list[dict] = []
         for i in range(self.state.current_step):
             s = self.state.steps[i]
-            ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
-            change_text = ""
-            if ssp.exists():
-                for dline in ssp.read_text(encoding="utf-8").strip().splitlines():
-                    dl = dline.strip()
-                    if dl.startswith("Change:"):
-                        change_text = dl.removeprefix("Change:").strip()
-                        break
-            all_upstream.append(f"[{s['end_commit'][:8]}]({commit_url}/{s['end_commit']})")
-            if not final_patch.exists():
-                continue
             sp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_TARGET_PATCH_FILE
             if not sp.exists():
                 continue
+            files = []
             for line in sp.read_text(encoding="utf-8").splitlines():
                 if line.startswith("diff --git a/"):
                     fname = line.split()[-1][2:]
-                    if fname != TRACKING_FILE and change_text:
-                        file_changes.setdefault(fname, change_text)
-
-        # Group files by Change description
-        change_groups: dict[str, list[str]] = {}
-        for fname, change in file_changes.items():
-            change_groups.setdefault(change, []).append(fname)
+                    if fname != TRACKING_FILE:
+                        files.append(fname)
+            if not files:
+                continue
+            cause = ""
+            ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
+            if ssp.exists():
+                for dline in ssp.read_text(encoding="utf-8").strip().splitlines():
+                    dl = dline.strip()
+                    if dl.startswith("Cause:"):
+                        cause = dl.removeprefix("Cause:").strip()
+                        break
+            step_items.append({
+                "files": files,
+                "commit": s["end_commit"][:8],
+                "cause": cause,
+            })
 
         parts = [
             "### What this PR does / why we need it?",
             "",
-            f"vllm upstream `{self.state.base_commit[:8]}...{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}`",
+            f"Upgrade vLLM commit to `{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}`",
             "",
         ]
-        for idx, (change, files) in enumerate(sorted(change_groups.items()), 1):
-            files_str = ", ".join(f"`{f}`" for f in sorted(files))
-            parts.append(f"{idx}. {change} ({files_str})")
-        if all_upstream:
-            parts.append("")
-            parts.append(f"Upstream: {' · '.join(sorted(set(all_upstream)))}")
+        for idx, item in enumerate(step_items, 1):
+            files_str = ", ".join(f"`{f}`" for f in item["files"])
+            commit_link = f"[{item['commit']}]({commit_url}/{item['commit']})"
+            parts.append(f"{idx}. Adapt {files_str} due to {commit_link}")
+            if item["cause"]:
+                parts.append(f"   - {item['cause']}")
         parts.append("")
-
-        # ---- pre-CI summary: only show non-OK results, with detail ----
-        pre_ci_issues: list[str] = []
-        for i in range(self.state.current_step):
-            sd = WORKSPACE_DIR / STEPS_DIR / self.state.steps[i]["id"]
-            pre_ci_path = sd / PRE_CI_CHECK_FILE
-            if pre_ci_path.exists():
-                try:
-                    pci = json.loads(pre_ci_path.read_text(encoding="utf-8"))
-                    for check in pci.get("checks", []):
-                        if not check["passed"]:
-                            detail = check.get("detail", "")
-                            if check.get("skipped"):
-                                pre_ci_issues.append(f"- **{check['name']}**: skipped — {detail}")
-                            else:
-                                pre_ci_issues.append(f"- **{check['name']}**: FAILED — {detail}")
-                except Exception:
-                    pass
-        if pre_ci_issues:
-            # Deduplicate
-            seen = set()
-            unique = []
-            for item in pre_ci_issues:
-                if item not in seen:
-                    seen.add(item)
-                    unique.append(item)
-            parts.append("### Pre-CI Checks")
-            parts.append("")
-            parts.extend(unique)
-            parts.append("")
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")
 
