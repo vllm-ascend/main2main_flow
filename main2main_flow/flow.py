@@ -174,7 +174,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ["opencode", "run", "--format", "json", "--model", model, auto_flag,
          "--", prompt],
         cwd=ascend_path, capture_output=True, text=True,
-        timeout=300,  # 5 min for review
+        timeout=600,  # 10 min for review
     )
     if r.returncode != 0:
         ts_print(f"[adapter-qa] {step_id}: opencode failed (exit {r.returncode})")

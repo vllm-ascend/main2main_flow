@@ -79,6 +79,15 @@ If the upstream changes don't affect vllm-ascend, write `analysis.md`
 explaining why and a one-line `step_summary.md` entry. No `review.md` — the
 adapter-qa handles review independently.
 
+**Processor/multimodal exception**: when `changed_files.txt` includes
+`vllm/transformers_utils/processors/__init__.py` or `vllm/multimodal/`,
+this is NOT a no-op. The upstream change may remove processor registry
+entries or change tokenizer attribute requirements. Search vllm-ascend
+for `*processor*compat*.py` and verify the compat patch still works with
+the new upstream code. See `reference/adaptation-patterns.md` §12 and
+`reference/common-pitfalls.md` §"Processor/multimodal compat patch blocked
+by early return".
+
 ---
 
 ## Outputs
