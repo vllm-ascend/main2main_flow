@@ -214,6 +214,27 @@ def run_opencode_adapter(inputs: dict[str, Any],
     return result
 
 
+def run_opencode_review(
+    prompt: str,
+    log_path: Path | None = None,
+    raw_path: Path | None = None,
+    stderr_path: Path | None = None,
+    session_id: str = "",
+    model: str | None = None,
+) -> tuple[str, str]:
+    """Run opencode as an independent reviewer.
+
+    Uses the same streaming pattern as run_opencode_adapter (Popen, streaming
+    output, stale_timeout + total_timeout + retry) but for review-only use.
+    Returns (output_text, session_id).
+    """
+    lines, _reason, sid, _rc = _run_once(
+        prompt, log_path, raw_path, stderr_path, session_id or None,
+        model=model,
+    )
+    return "".join(lines), sid or ""
+
+
 _StopReason = Literal["stale_timeout", "total_timeout"]
 
 
@@ -239,6 +260,7 @@ def _run_once(
     raw_path: Path | None,
     stderr_path: Path | None,
     session_id: str | None = None,
+    model: str | None = None,
 ) -> tuple[list[str], _StopReason | None, str, int]:
     stderr_fh = stderr_path.open("a", encoding="utf-8") if stderr_path else None
     # opencode >=2.x uses --auto, older versions use --dangerously-skip-permissions
@@ -250,7 +272,7 @@ def _run_once(
     cmd = [
         "opencode", "run",
         "--format", "json",
-        "--model", _DEFAULT_MODEL,
+        "--model", model or _DEFAULT_MODEL,
         auto_flag,
     ]
     if session_id:

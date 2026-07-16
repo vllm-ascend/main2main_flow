@@ -39,11 +39,22 @@ For each step, the prompt provides:
 ### 1. Analyze
 
 1. Read `changed_files.txt` first — it tells you which parts of the
-   upstream patch matter
-2. Find relevant chunks in the upstream patch: new/removed methods, signature
-   changes, renamed config fields, moved imports, constructor arg changes
-3. Use the File Mapping Table in `reference/code-structure-guide.md` to
-   route changed upstream paths to likely vllm-ascend locations
+   upstream patch matter.
+
+2. **CRITICAL — check for processor/multimodal compat files first**: if
+   `changed_files.txt` contains ANY of these paths, it is NEVER a no-op —
+   you MUST grep vllm-ascend for `*processor*compat*.py` and verify every
+   compat patch still works with the new upstream code:
+   - `vllm/transformers_utils/processors/__init__.py`
+   - `vllm/multimodal/`
+   - `vllm/model_executor/models/<model>_vision.py`
+   See `reference/adaptation-patterns.md` §12 for the concrete fix pattern.
+
+3. Find relevant chunks in the upstream patch: new/removed methods, signature
+   changes, renamed config fields, moved imports, constructor arg changes.
+
+4. Use the File Mapping Table in `reference/code-structure-guide.md` to
+   route changed upstream paths to likely vllm-ascend locations.
 
 **Key question**: does vllm-ascend subclass, override, call, import, or
 read anything this patch changed? Internal upstream changes only need

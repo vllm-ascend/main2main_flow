@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from crewai.flow import Flow, listen, start, router
 
-from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter
+from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter, run_opencode_review
 from main2main_flow.scripts.utils.detect_commits import detect
 from main2main_flow.scripts.utils.plan_steps import run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
@@ -164,21 +164,17 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
     model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
 
-    auto_flag = "--dangerously-skip-permissions"
-    help_r = subprocess.run(["opencode", "run", "--help"], capture_output=True, text=True)
-    if "--auto" in (help_r.stdout + help_r.stderr):
-        auto_flag = "--auto"
-
     ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
-    r = subprocess.run(
-        ["opencode", "run", "--format", "json", "--model", model, auto_flag,
-         "--", prompt],
-        cwd=ascend_path, capture_output=True, text=True,
-        timeout=600,  # 10 min for review
+    qa_log = Path(step_dir) / "opencode_qa.log"
+    qa_raw = Path(step_dir) / "opencode_qa_raw.jsonl"
+    qa_stderr = Path(step_dir) / "opencode_qa_stderr.log"
+    output_text, qa_session_id = run_opencode_review(
+        prompt, log_path=qa_log, raw_path=qa_raw, stderr_path=qa_stderr,
+        session_id="", model=model,
     )
-    if r.returncode != 0:
-        ts_print(f"[adapter-qa] {step_id}: opencode failed (exit {r.returncode})")
-        return [f"Critic review crashed (exit {r.returncode}): {r.stderr.strip()[:500]}"]
+    if not output_text.strip():
+        ts_print(f"[adapter-qa] {step_id}: opencode produced no output")
+        return ["critic: opencode produced no output"]
 
     # Read the verdict from review.json (written by the model per SKILL.md to the step dir)
     import json as _json

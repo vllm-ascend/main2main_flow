@@ -147,7 +147,8 @@ vllm-ascend locations, not guaranteed locations.
 | `vllm/lora/` | `vllm_ascend/lora/` | LoRA op interface, punica integration |
 | `vllm/v1/sample/`, `vllm/model_executor/layers/sampler.py` | `vllm_ascend/sample/` | Sampler, rejection sampler, penalty kernels |
 | `vllm/model_executor/model_loader/` | `vllm_ascend/model_loader/` | Model loading hooks, weight format adapters |
-| `vllm/transformers_utils/processors/` | `vllm_ascend/patch/*processor*compat*.py` | Processor registry entries, tokenizer schema, `get_hf_processor` |
-| `vllm/multimodal/` | `vllm_ascend/patch/*processor*compat*.py` | Multimodal processor interface changes |
+| `vllm/transformers_utils/processors/__init__.py` | `vllm_ascend/patch/*processor*compat*.py` | **NEVER a no-op** — check every compat patch for early-return guards and tokenizer timing |
+| `vllm/model_executor/models/*_vision.py` | `vllm_ascend/patch/*processor*compat*.py` | Upstream VLM processor change — verify compat patch matches new `_call_hf_processor` |
+| `vllm/multimodal/` | `vllm_ascend/patch/*processor*compat*.py` | Multimodal processor interface change — compat patch may need update |
 | `requirements*`, `constraints*`, `pyproject.toml`, `setup.py`, `setup.cfg` | Matching dependency files in vllm-ascend | Dependency versions |
 <!-- END REFERENCE: file-mapping -->
