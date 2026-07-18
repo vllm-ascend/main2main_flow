@@ -650,6 +650,23 @@ class Main2MainFlow(Flow[Main2MainState]):
             json.dumps(status_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
+        # Roll back .github/vllm-main-verified.commit to last_verified_commit
+        # so the baseline ref (pushed by push_to_github.py) carries the
+        # "verified up to here" marker, not the target commit.  Without this,
+        # a failed run would leave the baseline pointing at an unverified
+        # commit, and the next day's incremental run would skip adapting it.
+        ascend_path = Path(self.state.vllm_ascend_path)
+        verified_path = ascend_path / ".github" / "vllm-main-verified.commit"
+        target = self.state.target_commit or self.state.cur_vllm_commit
+        if (self.state.last_verified_commit
+                and self.state.last_verified_commit != target
+                and verified_path.exists()):
+            verified_path.write_text(
+                self.state.last_verified_commit + "\n", encoding="utf-8"
+            )
+            ts_print(f"[generate_final_post] Rolled back verified.commit to "
+                     f"last_verified_commit={self.state.last_verified_commit[:8]}")
+
         # Ensure final_summary.md is non-empty (stub for dry runs)
         final = WORKSPACE_DIR / FINAL_SUMMARY_FILE
         if not final.exists() or final.stat().st_size == 0:

@@ -205,22 +205,88 @@ def _close_old_main2main_prs(github_repo: str, current_pr_number: str) -> None:
         capture_output=True, text=True,
     )
     if r.returncode != 0:
+        ts_print(f"[push] gh pr list failed: {r.stderr.strip()[:300]}")
         return
     try:
         prs = json.loads(r.stdout)
     except json.JSONDecodeError:
+        ts_print(f"[push] gh pr list returned non-JSON: {r.stdout[:200]}")
         return
+    ts_print(f"[push] Found {len(prs)} open main2main PR(s) to evaluate for closure")
     for pr in prs:
         num = str(pr.get("number", ""))
         if num == current_pr_number:
             continue
         title = pr.get("title", "")
         ts_print(f"[push] Closing old main2main PR #{num}: {title}")
-        subprocess.run(
+        cr = subprocess.run(
             ["gh", "pr", "close", num, "--repo", github_repo,
              "-c", f"Superseded by #{current_pr_number}."],
             capture_output=True, text=True,
         )
+        if cr.returncode != 0:
+            ts_print(f"[push]   failed to close #{num}: {cr.stderr.strip()[:300]}")
+
+
+def _update_baseline_ref(ascend_path: Path, head_fork: str,
+                         source_branch: str) -> None:
+    """Push the current vllm-ascend HEAD to refs/heads/main2main_baseline.
+
+    The baseline ref marks "the vllm-ascend state corresponding to the last
+    vllm commit that passed e2e".  Next day's run starts from this ref to
+    do incremental adaptation instead of re-adapting from upstream/main.
+    """
+    if not head_fork:
+        ts_print("[push] No HEAD_FORK configured, skipping baseline ref update")
+        return
+    fork_url = f"https://github.com/{head_fork}.git"
+    r = subprocess.run(
+        ["git", "push", fork_url,
+         f"{source_branch}:refs/heads/main2main_baseline", "--force"],
+        cwd=str(ascend_path), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        ts_print(f"[push] Warning: failed to update main2main_baseline: {r.stderr.strip()[:300]}")
+    else:
+        ts_print(f"[push] Updated main2main_baseline -> {source_branch}")
+
+
+def _delete_old_main2main_branches(head_fork: str, keep_n: int = 3) -> None:
+    """Delete old main2main_auto_* branches from the fork, keeping newest N."""
+    if not head_fork:
+        return
+    # List all branches in the fork
+    r = subprocess.run(
+        ["gh", "api", f"repos/{head_fork}/branches", "--paginate",
+         "-q", ".[].name"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        ts_print(f"[push] Warning: failed to list branches: {r.stderr.strip()[:200]}")
+        return
+    branches = [b.strip() for b in r.stdout.splitlines() if b.strip()]
+    # Filter main2main_auto_* timestamped branches (NEVER touch main2main_baseline)
+    auto_branches = sorted(
+        [b for b in branches if b.startswith("main2main_auto_")],
+        reverse=True,  # newest first by timestamp string
+    )
+    to_delete = auto_branches[keep_n:]
+    if not to_delete:
+        return
+    ts_print(f"[push] Deleting {len(to_delete)} old main2main_auto_* branches (keeping newest {keep_n})")
+    fork_url = f"https://github.com/{head_fork}.git"
+    for b in to_delete:
+        # Never delete baseline (defensive - shouldn't match the filter, but check anyway)
+        if b == "main2main_baseline":
+            continue
+        dr = subprocess.run(
+            ["git", "push", fork_url, "--delete", b],
+            cwd=None, capture_output=True, text=True,
+        )
+        if dr.returncode != 0:
+            ts_print(f"[push]   failed to delete {b}: {dr.stderr.strip()[:150]}")
+        else:
+            ts_print(f"[push]   deleted {b}")
 
 
 def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
@@ -402,6 +468,17 @@ def push_and_create_pr(
 
         # ---- close old main2main PRs ----
         _close_old_main2main_prs(github_repo, pr_number)
+
+        # ---- update baseline ref for next day's incremental run ----
+        # The branch we just pushed contains the cumulative adaptation
+        # state; mark it as the baseline so tomorrow's run can rebase on
+        # top instead of starting from upstream/main.
+        if branch_name:
+            _update_baseline_ref(ascend_path, head_fork, branch_name)
+
+        # ---- delete old main2main_auto_* timestamped branches ----
+        keep_n = int(os.getenv("MAIN2MAIN_KEEP_BRANCHES", "3"))
+        _delete_old_main2main_branches(head_fork, keep_n=keep_n)
 
     finally:
         # Only restore if we created a new branch from a different starting point
