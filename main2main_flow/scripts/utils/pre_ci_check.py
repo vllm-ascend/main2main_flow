@@ -116,12 +116,15 @@ def _check_temp_files(repo: Path) -> dict:
 
 
 def _check_format(repo: Path) -> dict:
-    """Run ``bash format.sh`` to auto-fix ruff format/lint.
+    """Run ``bash format.sh`` and detect real (non-auto-fixable) errors.
 
-    ruff-format auto-fixes files in place and returns non-zero to signal
-    changes were made — that's expected, not a bug.  Only ``ruff check``
-    errors that cannot be auto-fixed (E501 line-too-long, F821 undefined,
-    etc.) count as real violations.
+    Auto-fix hooks (ruff-format, ruff-check --fix) report "Failed" when they
+    modify files — that's expected, not an error.  Environment-level failures
+    (shellcheck not installed, Exec format error) are also ignored.
+
+    Real errors come from hooks that CANNOT auto-fix: ruff E501/F821,
+    codespell typos, typos, etc.  These are detected by checking each
+    failed hook's output for actual violation lines.
     """
     fmt_script = repo / "format.sh"
     if not fmt_script.exists():
@@ -130,13 +133,11 @@ def _check_format(repo: Path) -> dict:
     if not shutil.which("pre-commit"):
         ts_print("[pre_ci] format: SKIPPED — pre-commit not installed, all lint checks bypassed!")
         return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
-    # Run format.sh with a clean pre-commit cache to avoid stale/arch-mismatched
-    # hook binaries (e.g. x86_64 binaries cached on an aarch64 runner via shared
-    # storage or actions/cache).  Use a separate cache dir under ~/.cache so
-    # the correct-architecture binaries persist across runs.
-    ts_print("[pre_ci] === format.sh output begin ===")
+
     env = os.environ.copy()
     env["PRE_COMMIT_HOME"] = "/root/.cache/main2main-pre-commit"
+
+    ts_print("[pre_ci] === format.sh output begin ===")
     r = subprocess.run(
         ["bash", str(fmt_script)], cwd=str(repo),
         capture_output=True, text=True, env=env,
@@ -144,29 +145,77 @@ def _check_format(repo: Path) -> dict:
     output = (r.stdout + "\n" + r.stderr)
     ts_print(output.strip())
     ts_print(f"[pre_ci] === format.sh output end (exit={r.returncode}) ===")
-    # Check if ruff-format actually modified files in the working tree
+
     diff_after = subprocess.run(
         ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
     ).stdout.strip()
     if diff_after:
         ts_print(f"[pre_ci] format.sh modified files in working tree:\n{diff_after}")
-    # Extract ruff-check errors — lines formatted as:
-    #   vllm_ascend/path/file.py:LINE:COL: CODE description
-    # ruff-format "files were modified" and hook status lines are skipped.
-    _RUFF_ERR_RE = re.compile(r"\.py:\d+:\d+:\s+\w")
-    real_errors = []
-    for line in output.splitlines():
-        stripped = line.strip()
-        if _RUFF_ERR_RE.search(stripped):
-            real_errors.append(stripped)
+
+    # Extract real errors — hook-level, not regex-based line parsing.
+    # For each FAILED hook, skip auto-fix noise and env-related failures;
+    # everything else is a real violation.
+    real_errors: list[str] = []
+    for hook_name, hook_lines in _iter_failed_hooks(output):
+        real_lines = [l for l in hook_lines if _is_real_error(l)]
+        if real_lines:
+            real_errors.extend(real_lines)
+
     if real_errors:
-        ts_print(f"[pre_ci] format: {len(real_errors)} lint error(s) (not auto-fixable):")
-        for e in real_errors:
+        ts_print(f"[pre_ci] format: {len(real_errors)} non-auto-fixable issue(s):")
+        for e in real_errors[:20]:
             ts_print(f"  {e}")
         return {"violations": real_errors,
                 "detail": f"{len(real_errors)} lint issue(s) (not auto-fixable)"}
     ts_print("[pre_ci] format: OK")
     return {"violations": [], "detail": "format.sh OK"}
+
+
+def _iter_failed_hooks(output: str):
+    """Yield (hook_name, lines) for each failed hook in pre-commit output."""
+    lines = output.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        # Hook status line: "ruff check.....................................................Failed"
+        if line.endswith("Failed") and "..." in line.replace(".", ""):
+            hook_name = line.rstrip(".").rstrip()
+            hook_lines: list[str] = []
+            i += 1
+            # Collect lines until next hook or end
+            while i < len(lines):
+                nl = lines[i].strip()
+                # Next hook status line (either Passed or Failed)
+                if nl.endswith("Passed") and "..." in nl.replace(".", ""):
+                    break
+                if nl.endswith("Failed") and "..." in nl.replace(".", ""):
+                    break
+                hook_lines.append(lines[i])
+                i += 1
+            yield hook_name, hook_lines
+        else:
+            i += 1
+
+
+def _is_real_error(line: str) -> bool:
+    """Check if a hook output line represents a real (non-auto-fixable) error."""
+    s = line.strip()
+    if not s:
+        return False
+    # Auto-fix noise
+    if "files were modified" in s or "file reformatted" in s or "files reformatted" in s:
+        return False
+    if "files left unchanged" in s:
+        return False
+    # pre-commit metadata
+    if s.startswith("- hook id:") or s.startswith("- exit code:") or s.startswith("- duration:"):
+        return False
+    # Environment issues
+    if "Please install shellcheck" in s or "Exec format error" in s:
+        return False
+    if "To bypass pre-commit hooks" in s:
+        return False
+    return True
 
 
 def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:

@@ -75,6 +75,20 @@ boundaries.  `hasattr`/`try-except` silently mask the wrong kind of change.
 |------|---------|-----|
 | E501 | Line too long (>120 chars) | Break the line; use intermediate variables |
 | F821 | Undefined name | Missing import — add it |
+
+### Common typos that break codespell / typos
+
+These words are frequently misspelled by AI code generation.  codespell and
+typos run in CI and will block the PR.  Check every added comment and string
+against this list:
+
+| Wrong | Right |
+|-------|-------|
+| `unparseable` | `unparsable` |
+
+> If you add a new word to a comment or docstring, ask yourself: "is this
+> spelled correctly?"  A single codespell/typos violation fails the entire
+> lint CI job.
 | F841 | Unused variable | Remove or prefix with `_` |
 | I001 | Unsorted imports | Sort manually |
 | B007 | Loop variable not used | Rename to `_` |
