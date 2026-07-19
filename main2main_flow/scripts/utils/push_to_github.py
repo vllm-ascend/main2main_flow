@@ -165,43 +165,64 @@ def _detect_default_branch(repo: Path | str, remote: str = "origin") -> str:
 
 
 
-def _git_push(ascend_path: Path, branch: str) -> None:
-    """Push branch to origin.
+_PROXY_HOST = "gh-proxy.test.osinfra.cn"
 
-    Uses ``GIT_CONFIG_NOSYSTEM=1`` to skip ``/etc/gitconfig`` which contains
-    ``url.<proxy>.insteadOf = https://github.com/`` rewrites that route pushes
-    through a domestic proxy.  The proxy doesn't accept the GitHub credential
-    helper's token, so the push fails with "could not read Username".  Skipping
-    system config entirely is the cleanest fix - global and local config still
-    apply (including the credential helper and SSH-to-HTTPS rewrites from
-    actions/checkout).
 
-    Also clears ``http.https://github.com/.extraheader`` (auto GITHUB_TOKEN
-    from actions/checkout, scoped to upstream only) and uses GH_TOKEN
-    (= PAT_TOKEN, 40 chars classic PAT with fork write access) instead.
+def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
+                    *extra_args: str) -> None:
+    """Push a refspec through the CI proxy with token embedded in the URL.
+
+    The CI runner has ``url.*.insteadOf`` rewrites that route
+    ``https://github.com/`` through ``gh-proxy.test.osinfra.cn``.  The proxy
+    allows anonymous fetch but needs a PAT token in the URL for push.
+    Retries up to 5 times with linear backoff.
     """
     token = os.environ.get("GH_TOKEN") or ""
-    push_env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
-    if token:
-        push_env["GITHUB_TOKEN"] = token
     if not token:
-        run_git(ascend_path, "push", "--force-with-lease", "origin", branch)
+        run_git(ascend_path, "push", *extra_args, "origin", refspec)
         return
-    r = subprocess.run(
-        ["git", "-c", "http.https://github.com/.extraheader=",
-         "push", "--force-with-lease", "origin", branch],
-        cwd=str(ascend_path), capture_output=True, text=True,
-        env=push_env,
+
+    push_remote = "m2m-push"
+    proxy_url = (
+        f"https://x-access-token:{token}@"
+        f"{_PROXY_HOST}/"
+        f"https://github.com/{head_fork}.git"
     )
-    if r.stdout.strip():
-        ts_print(f"[push] git push stdout:\n{r.stdout.strip()}", flush=True)
-    if r.returncode != 0:
+    cwd = str(ascend_path) if ascend_path else None
+
+    last_error = ""
+    for attempt in range(1, 6):
+        subprocess.run(["git", "remote", "remove", push_remote],
+                       cwd=cwd, capture_output=True, text=True)
+        subprocess.run(["git", "remote", "add", push_remote, proxy_url],
+                       cwd=cwd, capture_output=True, text=True)
+        r = subprocess.run(
+            ["git", "-c", "http.https://github.com/.extraheader=",
+             "push", *extra_args, push_remote, refspec],
+            cwd=cwd, capture_output=True, text=True,
+        )
+        subprocess.run(["git", "remote", "remove", push_remote],
+                       cwd=cwd, capture_output=True, text=True)
+        if r.returncode == 0:
+            if r.stdout.strip():
+                ts_print(f"[push] git push stdout:\n{r.stdout.strip()}", flush=True)
+            return
+        last_error = r.stderr.strip() or "(no stderr)"
         ts_print(
-            f"[push] git push FAILED (exit {r.returncode}):\n"
-            f"{r.stderr.strip() or '(no stderr)'}",
+            f"[push] git push attempt {attempt}/5 FAILED "
+            f"(exit {r.returncode}):\n{last_error}",
             flush=True,
         )
-        r.check_returncode()
+        if attempt < 5:
+            time.sleep(10 * attempt)
+
+    raise subprocess.CalledProcessError(128, ["git", "push", "..."],
+                                        output="", stderr=last_error)
+
+
+def _git_push(ascend_path: Path, branch: str) -> None:
+    _push_via_proxy(ascend_path, os.environ.get("HEAD_FORK", ""),
+                    branch, "--force-with-lease")
 
 
 def _close_old_main2main_prs(github_repo: str, current_pr_number: str) -> None:
@@ -252,20 +273,14 @@ def _update_baseline_ref(ascend_path: Path, head_fork: str,
     if not head_fork:
         ts_print("[push] No HEAD_FORK configured, skipping baseline ref update")
         return
-    fork_url = f"https://github.com/{head_fork}.git"
-    r = subprocess.run(
-        ["git", "push", fork_url,
-         f"{source_branch}:refs/heads/main2main_baseline", "--force"],
-        cwd=str(ascend_path), capture_output=True, text=True,
-        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
-    )
-    if r.returncode != 0:
-        ts_print(f"[push] Warning: failed to update main2main_baseline: {r.stderr.strip()[:300]}")
-    else:
-        ts_print(f"[push] Updated main2main_baseline -> {source_branch}")
+    _push_via_proxy(ascend_path, head_fork,
+                    f"{source_branch}:refs/heads/main2main_baseline",
+                    "--force")
+    ts_print(f"[push] Updated main2main_baseline -> {source_branch}")
 
 
-def _delete_old_main2main_branches(head_fork: str, keep_n: int = 3) -> None:
+def _delete_old_main2main_branches(ascend_path: Path, head_fork: str,
+                                   keep_n: int = 3) -> None:
     """Delete old main2main_auto_* branches from the fork, keeping newest N."""
     if not head_fork:
         return
@@ -288,20 +303,14 @@ def _delete_old_main2main_branches(head_fork: str, keep_n: int = 3) -> None:
     if not to_delete:
         return
     ts_print(f"[push] Deleting {len(to_delete)} old main2main_auto_* branches (keeping newest {keep_n})")
-    fork_url = f"https://github.com/{head_fork}.git"
-    delete_env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
     for b in to_delete:
-        # Never delete baseline (defensive - shouldn't match the filter, but check anyway)
         if b == "main2main_baseline":
             continue
-        dr = subprocess.run(
-            ["git", "push", fork_url, "--delete", b],
-            cwd=None, capture_output=True, text=True, env=delete_env,
-        )
-        if dr.returncode != 0:
-            ts_print(f"[push]   failed to delete {b}: {dr.stderr.strip()[:150]}")
-        else:
+        try:
+            _push_via_proxy(ascend_path, head_fork, f":refs/heads/{b}")
             ts_print(f"[push]   deleted {b}")
+        except subprocess.CalledProcessError:
+            ts_print(f"[push]   failed to delete {b}, continuing")
 
 
 def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
@@ -493,7 +502,7 @@ def push_and_create_pr(
 
         # ---- delete old main2main_auto_* timestamped branches ----
         keep_n = int(os.getenv("MAIN2MAIN_KEEP_BRANCHES", "3"))
-        _delete_old_main2main_branches(head_fork, keep_n=keep_n)
+        _delete_old_main2main_branches(ascend_path, head_fork, keep_n=keep_n)
 
     finally:
         # Only restore if we created a new branch from a different starting point
