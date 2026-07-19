@@ -542,7 +542,7 @@ class Main2MainFlow(Flow[Main2MainState]):
         step_id = step["id"]
         ts_print(f"run_e2e_test: {step_id} round={self.state.retry_count}")
 
-        if os.getenv("SKIP_E2E_TEST", "true").lower() == "true":
+        if os.getenv("SKIP_E2E_TEST", "false").lower() == "true":
             ts_print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             return True
 
