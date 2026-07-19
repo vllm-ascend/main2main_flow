@@ -71,6 +71,34 @@ The step_target.patch is cumulative (git diff HEAD).
 2. Use targeted search to find the impacted vllm-ascend code (see Code Exploration)
 3. Apply minimal changes — do not refactor unrelated code
 
+**Format rules — apply WHILE editing, not after:**
+
+- Every line **must** be ≤ 120 characters.  When replacing `== "X"` with
+  `in ("X", "Y")`, the line WILL exceed 120 — break it BEFORE committing
+  the edit.  Use intermediate variables or split across lines.
+- No unused imports (F401).  If you `import X`, use X.  If you remove the
+  last use, remove the import.
+- No unused local variables (F841).  Every assigned variable is either
+  used or prefixed with `_`.
+- Imports sorted per `ruff` rules (stdlib → third-party → first-party).
+- If unsure, run `bash format.sh` to auto-fix what it can, then fix any
+  remaining violations before marking the adaptation complete.
+
+**The output-buffer trap — check EVERY removed parameter:**
+
+When the upstream patch removes a parameter from a method signature
+and the old code used it as a mutable output buffer (e.g. `output[:] =
+result`), this is a **dual change**: both the parameter AND the return
+semantics changed.  Do NOT just redirect the method — you MUST:
+
+1. Make the removed parameter optional (`= None`)
+2. Guard the return path: old branch writes to `output[:]`, new branch returns the result
+3. Guard EVERY call site that passes `output=...` — the upstream now calls WITHOUT it
+
+A single-line redirect like `_PATCH_TARGET.forward = AscendVersion.forward`
+is NEVER the right answer for this pattern.  See `reference/adaptation-patterns.md` §1b
+for the correct before/after code.
+
 ### fix mode
 
 The working tree already contains the failed adaptation — do NOT start from

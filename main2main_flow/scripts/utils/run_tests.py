@@ -417,7 +417,8 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as f:
         proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                close_fds=True)
         assert proc.stdout is not None
         for line in proc.stdout:
             f.write(line)

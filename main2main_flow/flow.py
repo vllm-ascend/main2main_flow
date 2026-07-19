@@ -98,6 +98,10 @@ class Main2MainState(BaseModel):
     # Persistent opencode session ID for full conversational context
     session_id: str = ""
 
+    # Persistent QA session — reused across retries so the reviewer doesn't
+    # re-read the entire codebase from scratch on every attempt.
+    qa_session_id: str = ""
+
     # Last vllm commit that actually passed e2e tests (not just was adapted)
     last_verified_commit: str = ""
 
@@ -106,7 +110,8 @@ def _run_adapter_qa(
     ascend_path: str, vllm_path: str, step_id: str,
     step_dir: str, release_tag: str,
     upstream_patch_path: str = "",
-) -> list[str]:
+    qa_session_id: str = "",
+) -> tuple[list[str], str]:
     """adapter-qa: independent review of the current diff.
 
     Fresh opencode session (no --session reuse) — the reviewer sees only the
@@ -118,11 +123,11 @@ def _run_adapter_qa(
         capture_output=True, text=True,
     ).stdout.strip()
     if not diff:
-        return []  # no changes to review
+        return [], qa_session_id  # no changes to review
 
     lessons_path = Path(__file__).parent / "agents" / "adapter-qa" / "reference" / "review-lessons.md"
     if not lessons_path.exists():
-        return []
+        return [], qa_session_id
     # Load adapter-qa prompt template
     qa_template_path = Path(__file__).parent / "agents" / "adapter-qa" / "SKILL.md"
     qa_template = ""
@@ -168,13 +173,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
     qa_log = Path(step_dir) / "opencode_qa.log"
     qa_raw = Path(step_dir) / "opencode_qa_raw.jsonl"
     qa_stderr = Path(step_dir) / "opencode_qa_stderr.log"
-    output_text, qa_session_id = run_opencode_review(
+    output_text, new_session_id = run_opencode_review(
         prompt, log_path=qa_log, raw_path=qa_raw, stderr_path=qa_stderr,
-        session_id="", model=model,
+        session_id=qa_session_id, model=model,
     )
     if not output_text.strip():
         ts_print(f"[adapter-qa] {step_id}: opencode produced no output")
-        return ["critic: opencode produced no output"]
+        return ["critic: opencode produced no output"], new_session_id
 
     # Read the verdict from review.json (written by the model per SKILL.md to the step dir)
     import json as _json
@@ -186,15 +191,16 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             issues = review.get("issues", [])
             if verdict == "pass":
                 ts_print(f"[adapter-qa] {step_id}: pass")
-                return []
+                return [], new_session_id
             ts_print(f"[adapter-qa] {step_id}: fail — {len(issues)} issue(s)")
-            return [f"{i.get('file', '?')}:{i.get('line', '?')}: {i.get('issue', '?')}" for i in issues]
+            return ([f"{i.get('file', '?')}:{i.get('line', '?')}: {i.get('issue', '?')}" for i in issues],
+                    new_session_id)
         except (_json.JSONDecodeError, KeyError):
             ts_print(f"[adapter-qa] {step_id}: fail (review.json unparseable)")
-            return ["critic: review.json could not be parsed"]
+            return ["critic: review.json could not be parsed"], new_session_id
 
     ts_print(f"[adapter-qa] {step_id}: fail (no review.json found)")
-    return ["critic: no review.json found — opencode did not produce expected output"]
+    return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
 
 
 class Main2MainFlow(Flow[Main2MainState]):
@@ -453,16 +459,26 @@ class Main2MainFlow(Flow[Main2MainState]):
                 error_logs = []
                 ts_print(f"[ai_analysis] {step_id}: pre_ci passed on attempt {attempt}")
 
-            # adapter-qa: logic review — runs regardless of pre_ci result
-            review_issues = _run_adapter_qa(
-                ascend_path=ascend_path,
-                vllm_path=vllm_path,
-                step_id=step_id,
-                step_dir=str(step_dir),
-                release_tag=self.state.release_tag,
-                upstream_patch_path=str(step_dir / VLLM_GIT_PATCH_FILE),
-            )
-            review_passed = not review_issues
+            # adapter-qa: logic review — only when pre_ci passed.
+            # If pre_ci found mechanical issues the attempt will retry anyway,
+            # so reviewing broken code is wasted time.
+            if pre_ci_passed:
+                review_issues, new_qa_sid = _run_adapter_qa(
+                    ascend_path=ascend_path,
+                    vllm_path=vllm_path,
+                    step_id=step_id,
+                    step_dir=str(step_dir),
+                    release_tag=self.state.release_tag,
+                    upstream_patch_path=str(step_dir / VLLM_GIT_PATCH_FILE),
+                    qa_session_id=self.state.qa_session_id,
+                )
+                if new_qa_sid:
+                    self.state.qa_session_id = new_qa_sid
+                review_passed = not review_issues
+            else:
+                review_issues = []
+                review_passed = False
+                ts_print(f"[ai_analysis] {step_id}: critic skipped (pre_ci failed)")
             if review_issues:
                 review_path = step_dir / "adapter-qa.md"
                 review_path.write_text("\n".join(review_issues), encoding="utf-8")
