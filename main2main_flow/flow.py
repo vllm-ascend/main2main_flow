@@ -340,6 +340,35 @@ class Main2MainFlow(Flow[Main2MainState]):
                 except ValueError:
                     ts_print(f"[ai_analysis] {step_id}: commit ref already updated, skipping")
 
+            # Capture working tree changes (verified.commit update) as patch
+            subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                           capture_output=True)
+            adaptation_patch = run_git(ascend_path, "diff", "HEAD")
+            (step_dir / EACH_STEP_TARGET_PATCH_FILE).write_text(
+                adaptation_patch, encoding="utf-8")
+
+            # Write minimal step summary
+            summary_path = step_dir / EACH_STEP_SUMMARY_FILE
+            if not summary_path.exists():
+                summary_path.write_text(
+                    f"- {step_id}: No vllm/ code changes, advanced verified.commit to "
+                    f"{step['end_commit'][:8]}\n",
+                    encoding="utf-8",
+                )
+
+            # Clean up review artifacts
+            archive_dir = Path(ascend_path) / ".archive"
+            if archive_dir.exists():
+                shutil.rmtree(archive_dir)
+
+            # Reset vllm working tree
+            reset_r = subprocess.run(
+                ["git", "checkout", "--", "."],
+                cwd=vllm_path, capture_output=True, text=True,
+            )
+            if reset_r.returncode != 0:
+                ts_print(f"[ai_analysis] {step_id}: failed to reset vllm: {reset_r.stderr.strip()}")
+
             ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
             self.state.cur_vllm_commit = step["end_commit"]
             self.state.cur_ascend_commit = ascend_head

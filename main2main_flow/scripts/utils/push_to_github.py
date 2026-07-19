@@ -163,42 +163,27 @@ def _detect_default_branch(repo: Path | str, remote: str = "origin") -> str:
         return "main"
 
 
-def _clear_git_url_rewrites() -> None:
-    """Unset all url.*.insteadOf/pushInsteadOf rewrites that route github.com
-    through a domestic proxy.
-
-    ``-c key=`` doesn't work for multi-valued config like insteadOf - it
-    appends an empty value instead of overriding the existing one.  The only
-    reliable way is ``git config --unset-all``.  This modifies global/system
-    config, which is fine in a CI container that gets destroyed after the run.
-    """
-    r = subprocess.run(
-        ["git", "config", "--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        return
-    for line in r.stdout.splitlines():
-        parts = line.split(None, 1)
-        if not parts:
-            continue
-        key = parts[0]
-        ts_print(f"[push] unsetting git rewrite: {key}")
-        subprocess.run(
-            ["git", "config", "--unset-all", key],
-            capture_output=True, text=True,
-        )
 
 
 def _git_push(ascend_path: Path, branch: str) -> None:
     """Push branch to origin.
 
-    Clears the extraheader that ``actions/checkout`` set (auto GITHUB_TOKEN,
-    141 chars, scoped to upstream only) and replaces it with GH_TOKEN
-    (= PAT_TOKEN, 40 chars classic PAT with fork write access).
+    Uses ``GIT_CONFIG_NOSYSTEM=1`` to skip ``/etc/gitconfig`` which contains
+    ``url.<proxy>.insteadOf = https://github.com/`` rewrites that route pushes
+    through a domestic proxy.  The proxy doesn't accept the GitHub credential
+    helper's token, so the push fails with "could not read Username".  Skipping
+    system config entirely is the cleanest fix - global and local config still
+    apply (including the credential helper and SSH-to-HTTPS rewrites from
+    actions/checkout).
+
+    Also clears ``http.https://github.com/.extraheader`` (auto GITHUB_TOKEN
+    from actions/checkout, scoped to upstream only) and uses GH_TOKEN
+    (= PAT_TOKEN, 40 chars classic PAT with fork write access) instead.
     """
     token = os.environ.get("GH_TOKEN") or ""
-    _clear_git_url_rewrites()
+    push_env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
+    if token:
+        push_env["GITHUB_TOKEN"] = token
     if not token:
         run_git(ascend_path, "push", "--force-with-lease", "origin", branch)
         return
@@ -206,7 +191,7 @@ def _git_push(ascend_path: Path, branch: str) -> None:
         ["git", "-c", "http.https://github.com/.extraheader=",
          "push", "--force-with-lease", "origin", branch],
         cwd=str(ascend_path), capture_output=True, text=True,
-        env={**os.environ, "GITHUB_TOKEN": token},
+        env=push_env,
     )
     if r.stdout.strip():
         ts_print(f"[push] git push stdout:\n{r.stdout.strip()}", flush=True)
@@ -268,11 +253,11 @@ def _update_baseline_ref(ascend_path: Path, head_fork: str,
         ts_print("[push] No HEAD_FORK configured, skipping baseline ref update")
         return
     fork_url = f"https://github.com/{head_fork}.git"
-    _clear_git_url_rewrites()
     r = subprocess.run(
         ["git", "push", fork_url,
          f"{source_branch}:refs/heads/main2main_baseline", "--force"],
         cwd=str(ascend_path), capture_output=True, text=True,
+        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
     )
     if r.returncode != 0:
         ts_print(f"[push] Warning: failed to update main2main_baseline: {r.stderr.strip()[:300]}")
@@ -304,14 +289,14 @@ def _delete_old_main2main_branches(head_fork: str, keep_n: int = 3) -> None:
         return
     ts_print(f"[push] Deleting {len(to_delete)} old main2main_auto_* branches (keeping newest {keep_n})")
     fork_url = f"https://github.com/{head_fork}.git"
-    _clear_git_url_rewrites()
+    delete_env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
     for b in to_delete:
         # Never delete baseline (defensive - shouldn't match the filter, but check anyway)
         if b == "main2main_baseline":
             continue
         dr = subprocess.run(
             ["git", "push", fork_url, "--delete", b],
-            cwd=None, capture_output=True, text=True,
+            cwd=None, capture_output=True, text=True, env=delete_env,
         )
         if dr.returncode != 0:
             ts_print(f"[push]   failed to delete {b}: {dr.stderr.strip()[:150]}")
