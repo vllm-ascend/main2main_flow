@@ -164,27 +164,30 @@ def _detect_default_branch(repo: Path | str, remote: str = "origin") -> str:
 
 
 def _git_no_rewrite_prefix() -> list[str]:
-    """Build a git command prefix that clears all url.*.insteadOf rewrites.
+    """Build a git command prefix that clears all url.*.insteadOf/pushInsteadOf rewrites.
 
     Some CI runner images configure ``url.<proxy>.insteadOf = https://github.com/``
-    to route GitHub through a domestic proxy.  This breaks ``git push`` because
-    the credential helper (``gh auth git-credential``) is registered for
-    github.com, not for the proxy host - git then prompts for username
-    interactively and fails in non-interactive CI.  Enumerate every
-    ``url.*.insteadof`` entry and pass ``-c <key>=`` to clear it for this
-    single command.  ``gh`` CLI commands are unaffected (they use their own
-    HTTP client), so only ``git push`` / ``git push --delete`` need this.
+    (or ``pushInsteadOf``) to route GitHub through a domestic proxy.  This breaks
+    ``git push`` because the credential helper (``gh auth git-credential``) is
+    registered for github.com, not for the proxy host - git then prompts for
+    username interactively and fails in non-interactive CI.  Enumerate every
+    ``url.*.insteadof`` and ``url.*.pushinsteadof`` entry and pass ``-c <key>=``
+    to clear it for this single command.  ``gh`` CLI commands are unaffected
+    (they use their own HTTP client), so only ``git push`` / ``git push --delete``
+    need this.
     """
     prefix = ["git"]
     r = subprocess.run(
-        ["git", "config", "--get-regexp", r"^url\..*\.insteadof$"],
+        ["git", "config", "--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
+        ts_print("[push] no url.*.insteadOf rewrites found")
         return prefix
     for line in r.stdout.splitlines():
         parts = line.split(None, 1)
         if parts:
+            ts_print(f"[push] clearing git rewrite: {parts[0]}")
             prefix += ["-c", f"{parts[0]}="]  # empty value clears the rewrite
     return prefix
 
