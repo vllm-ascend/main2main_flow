@@ -163,6 +163,32 @@ def _detect_default_branch(repo: Path | str, remote: str = "origin") -> str:
         return "main"
 
 
+def _git_no_rewrite_prefix() -> list[str]:
+    """Build a git command prefix that clears all url.*.insteadOf rewrites.
+
+    Some CI runner images configure ``url.<proxy>.insteadOf = https://github.com/``
+    to route GitHub through a domestic proxy.  This breaks ``git push`` because
+    the credential helper (``gh auth git-credential``) is registered for
+    github.com, not for the proxy host - git then prompts for username
+    interactively and fails in non-interactive CI.  Enumerate every
+    ``url.*.insteadof`` entry and pass ``-c <key>=`` to clear it for this
+    single command.  ``gh`` CLI commands are unaffected (they use their own
+    HTTP client), so only ``git push`` / ``git push --delete`` need this.
+    """
+    prefix = ["git"]
+    r = subprocess.run(
+        ["git", "config", "--get-regexp", r"^url\..*\.insteadof$"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return prefix
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 1)
+        if parts:
+            prefix += ["-c", f"{parts[0]}="]  # empty value clears the rewrite
+    return prefix
+
+
 def _git_push(ascend_path: Path, branch: str) -> None:
     """Push branch to origin.
 
@@ -172,10 +198,11 @@ def _git_push(ascend_path: Path, branch: str) -> None:
     """
     token = os.environ.get("GH_TOKEN") or ""
     if not token:
-        run_git(ascend_path, "push", "--force-with-lease", "origin", branch)
+        cmd = _git_no_rewrite_prefix() + ["push", "--force-with-lease", "origin", branch]
+        run_git(ascend_path, *cmd[1:])
         return
     r = subprocess.run(
-        ["git", "-c", "http.https://github.com/.extraheader=",
+        _git_no_rewrite_prefix() + ["-c", "http.https://github.com/.extraheader=",
          "push", "--force-with-lease", "origin", branch],
         cwd=str(ascend_path), capture_output=True, text=True,
         env={**os.environ, "GITHUB_TOKEN": token},
@@ -241,7 +268,7 @@ def _update_baseline_ref(ascend_path: Path, head_fork: str,
         return
     fork_url = f"https://github.com/{head_fork}.git"
     r = subprocess.run(
-        ["git", "push", fork_url,
+        _git_no_rewrite_prefix() + ["push", fork_url,
          f"{source_branch}:refs/heads/main2main_baseline", "--force"],
         cwd=str(ascend_path), capture_output=True, text=True,
     )
@@ -280,7 +307,7 @@ def _delete_old_main2main_branches(head_fork: str, keep_n: int = 3) -> None:
         if b == "main2main_baseline":
             continue
         dr = subprocess.run(
-            ["git", "push", fork_url, "--delete", b],
+            _git_no_rewrite_prefix() + ["push", fork_url, "--delete", b],
             cwd=None, capture_output=True, text=True,
         )
         if dr.returncode != 0:
