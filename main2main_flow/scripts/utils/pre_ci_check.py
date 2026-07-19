@@ -178,7 +178,7 @@ def _iter_failed_hooks(output: str):
     while i < len(lines):
         line = lines[i].strip()
         # Hook status line: "ruff check.....................................................Failed"
-        if line.endswith("Failed") and "..." in line.replace(".", ""):
+        if line.endswith("Failed") and "..." in line:
             hook_name = line.rstrip(".").rstrip()
             hook_lines: list[str] = []
             i += 1
@@ -186,9 +186,9 @@ def _iter_failed_hooks(output: str):
             while i < len(lines):
                 nl = lines[i].strip()
                 # Next hook status line (either Passed or Failed)
-                if nl.endswith("Passed") and "..." in nl.replace(".", ""):
+                if nl.endswith("Passed") and "..." in nl:
                     break
-                if nl.endswith("Failed") and "..." in nl.replace(".", ""):
+                if nl.endswith("Failed") and "..." in nl:
                     break
                 hook_lines.append(lines[i])
                 i += 1
