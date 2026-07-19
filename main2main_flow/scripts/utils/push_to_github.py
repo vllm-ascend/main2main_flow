@@ -475,29 +475,44 @@ def push_and_create_pr(
         if draft:
             gh_cmd.append("--draft")
 
+        # gh pr create inspects git remotes to detect the GitHub host.
+        # In proxy CI environments the origin URL points to the proxy,
+        # so we temporarily swap it to the real github.com URL.  Pattern
+        # from the verified triton-ascend push_to_github.py.
+        pr_token = os.environ.get("GH_TOKEN") or ""
+        saved_origin = run_git(ascend_path, "config", "--get", "remote.origin.url").strip()
+        if pr_token and head_fork:
+            pr_origin = f"https://x-access-token:{pr_token}@github.com/{head_fork}.git"
+        else:
+            pr_origin = saved_origin
+        run_git(ascend_path, "remote", "set-url", "origin", pr_origin)
+
         last_pr_error = ""
         pr_url = ""
-        for attempt in range(1, 6):
-            result = subprocess.run(
-                gh_cmd, capture_output=True, text=True, cwd=str(ascend_path),
-                env={**os.environ, "GH_HOST": "github.com"},
-            )
-            if result.returncode == 0:
-                pr_url = result.stdout.strip()
-                break
-            last_pr_error = result.stderr.strip()
-            ts_print(
-                f"[push] PR create attempt {attempt}/5 FAILED: {last_pr_error}",
-                flush=True,
-            )
-            if "No commits between" in last_pr_error:
-                ts_print("[push] No new commits to create PR for, skipping.")
-                return ""
-            if attempt < 5:
-                time.sleep(10 * attempt)
-        if not pr_url:
-            raise subprocess.CalledProcessError(
-                1, gh_cmd, output="", stderr=last_pr_error)
+        try:
+            for attempt in range(1, 6):
+                result = subprocess.run(
+                    gh_cmd, capture_output=True, text=True, cwd=str(ascend_path),
+                    env={**os.environ, "GITHUB_TOKEN": pr_token, "GH_TOKEN": pr_token},
+                )
+                if result.returncode == 0:
+                    pr_url = result.stdout.strip()
+                    break
+                last_pr_error = result.stderr.strip()
+                ts_print(
+                    f"[push] PR create attempt {attempt}/5 FAILED: {last_pr_error}",
+                    flush=True,
+                )
+                if "No commits between" in last_pr_error:
+                    ts_print("[push] No new commits to create PR for, skipping.")
+                    return ""
+                if attempt < 5:
+                    time.sleep(10 * attempt)
+            if not pr_url:
+                raise subprocess.CalledProcessError(
+                    1, gh_cmd, output="", stderr=last_pr_error)
+        finally:
+            run_git(ascend_path, "remote", "set-url", "origin", saved_origin)
         ts_print(f"[push] PR created: {pr_url}")
 
         # ---- labels ----
