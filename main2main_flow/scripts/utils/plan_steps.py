@@ -113,6 +113,13 @@ def _plan_steps(
     if step_commits:
         steps.append(_make_step(len(steps) + 1, step_commits, start, step_lines))
 
+    # If all commits were filtered out (0 vllm/ lines) but there WERE commits,
+    # create a no-op step covering the full range.  This ensures verified.commit
+    # advances and e2e tests run even when the upstream change is docs/CI-only.
+    if not steps and commits:
+        noop_step = _make_step(1, commits, base_commit, 0)
+        steps.append(noop_step)
+
     return steps
 
 

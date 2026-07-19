@@ -308,20 +308,43 @@ class Main2MainFlow(Flow[Main2MainState]):
         self.state.final_status = UpgradeCompleted
 
     def _ai_analysis(self) -> bool:
-        if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true":
-            step = self.state.steps[self.state.current_step]
-            step_id = step["id"]
-            step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
-            ts_print(f"[ai_analysis] SKIP_AI_ANALYSIS=true, skipping for step {step_id}")
-            ascend_head = run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
+        step = self.state.steps[self.state.current_step]
+        step_id = step["id"]
+        step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
+
+        # Skip opencode adaptation when upstream_patch is empty (no vllm/ code
+        # changes in this step).  Still advance verified.commit and set state
+        # so e2e tests can verify the new vllm commit doesn't break anything.
+        upstream_patch = step.get("upstream_patch", "")
+        if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true" or not upstream_patch.strip():
+            if not upstream_patch.strip():
+                ts_print(f"[ai_analysis] {step_id}: no vllm/ code changes, skipping adaptation")
+            else:
+                ts_print(f"[ai_analysis] SKIP_AI_ANALYSIS=true, skipping for step {step_id}")
+
+            vllm_path = self.state.vllm_path
+            ascend_path = self.state.vllm_ascend_path
+
+            if self.state.retry_count == 0:
+                run_git(vllm_path, "checkout", step["end_commit"])
+                ts_print(f"[ai_analysis] {step_id}: vllm checked out to {step['end_commit'][:8]}")
+                try:
+                    ref_result = run_update(
+                        ascend_path=Path(ascend_path),
+                        old_commit=step["start_commit"],
+                        new_commit=step["end_commit"],
+                    )
+                    ts_print(f"[ai_analysis] {step_id}: updated commit ref in "
+                          f"{len(ref_result['files_updated'])} file(s): "
+                          f"{ref_result['files_updated']}")
+                except ValueError:
+                    ts_print(f"[ai_analysis] {step_id}: commit ref already updated, skipping")
+
+            ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
             self.state.cur_vllm_commit = step["end_commit"]
             self.state.cur_ascend_commit = ascend_head
             self.state.cur_patch_path = str(step_dir / EACH_STEP_TARGET_PATCH_FILE)
             return True
-
-        step = self.state.steps[self.state.current_step]
-        step_id = step["id"]
-        step_dir = WORKSPACE_DIR / STEPS_DIR / step_id
         previous_step = self.state.steps[self.state.current_step - 1] if self.state.current_step > 0 else None
         previous_step_id = previous_step["id"] if previous_step else ""
         previous_step_summary_path = (
