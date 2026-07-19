@@ -534,8 +534,8 @@ def push_and_create_pr(
         # The branch we just pushed contains the cumulative adaptation
         # state; mark it as the baseline so tomorrow's run can rebase on
         # top instead of starting from upstream/main.
-        if branch_name:
-            _update_baseline_ref(ascend_path, head_fork, branch_name)
+        if branch:
+            _update_baseline_ref(ascend_path, head_fork, branch)
 
         # ---- delete old main2main_auto_* timestamped branches ----
         keep_n = int(os.getenv("MAIN2MAIN_KEEP_BRANCHES", "3"))
