@@ -254,12 +254,17 @@ def _close_old_main2main_prs(github_repo: str, current_pr_number: str) -> None:
         title = pr.get("title", "")
         ts_print(f"[push] Closing old main2main PR #{num}: {title}")
         cr = subprocess.run(
-            ["gh", "pr", "close", num, "--repo", github_repo,
-             "-c", f"Superseded by #{current_pr_number}."],
+            ["gh", "pr", "close", num, "--repo", github_repo],
             capture_output=True, text=True,
         )
         if cr.returncode != 0:
             ts_print(f"[push]   failed to close #{num}: {cr.stderr.strip()[:300]}")
+        else:
+            subprocess.run(
+                ["gh", "pr", "comment", num, "--repo", github_repo,
+                 "-b", f"Superseded by #{current_pr_number}."],
+                capture_output=True, text=True,
+            )
 
 
 def _update_baseline_ref(ascend_path: Path, head_fork: str,
@@ -399,10 +404,17 @@ def push_and_create_pr(
                 ts_print(f"[push] Reusing branch '{branch}', committing working tree changes")
                 _run_format(ascend_path)
                 run_git(ascend_path, "add", "-A")
-                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-                commit_msg = _build_commit_msg(old_commit, new_commit, ts)
-                run_git(ascend_path, "commit", "-s", "-m", commit_msg)
-                ts_print(f"[push] Committed as '{commit_msg}'.")
+                diff_cached = subprocess.run(
+                    ["git", "diff", "--cached", "--stat"], cwd=str(ascend_path),
+                    capture_output=True, text=True,
+                ).stdout.strip()
+                if diff_cached:
+                    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    commit_msg = _build_commit_msg(old_commit, new_commit, ts)
+                    run_git(ascend_path, "commit", "-s", "-m", commit_msg)
+                    ts_print(f"[push] Committed as '{commit_msg}'.")
+                else:
+                    ts_print("[push] No uncommitted changes (already committed by process_steps).")
             else:
                 # Create fresh branch and apply patch
                 ts = datetime.now().strftime("%Y%m%d-%H%M%S")

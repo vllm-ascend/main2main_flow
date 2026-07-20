@@ -294,13 +294,31 @@ class Main2MainFlow(Flow[Main2MainState]):
 
     @listen(HasCommit)
     def process_steps(self):
+        ascend_path = self.state.vllm_ascend_path
         while self.state.current_step < self.state.total_steps:
+            step = self.state.steps[self.state.current_step]
+            step_id = step["id"]
+
             if not self._ai_analysis():
-                ts_print("[process_steps] ai_analysis exhausted retries, aborting")
+                # Adaptation could not pass pre_ci + critic after 3 attempts.
+                # Discard the broken working-tree changes and fall through to
+                # generate_final_post / push with whatever passed in prior steps.
+                ts_print(f"[process_steps] {step_id}: ai_analysis exhausted retries, "
+                         f"reverting to last committed state")
+                run_git(ascend_path, "checkout", "--", ".")
+                subprocess.run(["git", "clean", "-fd"],
+                               cwd=ascend_path, capture_output=True)
                 self.state.final_status = UpgradeFailed
                 return
+
             test_pass = self._run_e2e_test()
             if test_pass:
+                # Commit the successful adaptations so they survive a future
+                # step failure and become part of the baseline for the next run.
+                run_git(ascend_path, "add", "-A")
+                subprocess.run(["git", "commit", "-s", "-m",
+                                f"main2main: step {step_id} ({step['end_commit'][:8]})"],
+                               cwd=ascend_path, capture_output=True)
                 self.state.current_step += 1
                 self.state.retry_count = 0
                 self.state.last_verified_commit = self.state.cur_vllm_commit
