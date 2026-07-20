@@ -2,6 +2,24 @@
 
 Mistakes that break CI or cause silent failures.
 
+## Format violations (E501 / F821 / F841 / F401)
+
+These are all caught by pre_ci and block adaptation.  Proactively avoid them:
+
+| Code | Meaning | Prevention |
+|------|---------|------------|
+| E501 | Line too long (>120) | Break lines BEFORE committing.  `== "X"` → `in (...)` expansions always exceed 120 chars. |
+| F821 | Undefined name | Every `vllm_version_is()` call needs `from vllm_ascend.utils import vllm_version_is`. |
+| F841 | Unused variable | Remove or prefix with `_`. |
+| F401 | Unused import | Delete the import line. |
+
+### Indentation errors
+
+When inserting version-guard blocks into existing code, **count the leading
+spaces** of surrounding lines in the same block.  Copy the count exactly.
+Do not eyeball it.  Indentation errors can survive `ruff format` and
+require manual fixing — they are the #1 cause of failed pre_ci attempts.
+
 ## Importing modules that don't exist (yet)
 
 **Symptom**: mypy reports `import-not-found` for a `from vllm.X import Y` line.

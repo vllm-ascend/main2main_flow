@@ -80,11 +80,15 @@ The step_target.patch is cumulative (git diff HEAD).
   last use, remove the import.
 - No unused local variables (F841).  Every assigned variable is either
   used or prefixed with `_`.
+- No undefined names (F821).  When using `vllm_version_is()`, make sure
+  `from vllm_ascend.utils import vllm_version_is` is in the file — this
+  is the #1 cause of F821 in main2main adaptations.  Every new symbol
+  used must be imported or defined in the same file.
 - Imports sorted per `ruff` rules (stdlib → third-party → first-party).
 - If unsure, run `bash format.sh` to auto-fix what it can, then fix any
   remaining violations before marking the adaptation complete.
-
-**The output-buffer trap — check EVERY removed parameter:**
+- See `reference/common-pitfalls.md` for the output-buffer trap, indentation
+  errors, and other frequent adaptation mistakes.
 
 When the upstream patch removes a parameter from a method signature
 and the old code used it as a mutable output buffer (e.g. `output[:] =
