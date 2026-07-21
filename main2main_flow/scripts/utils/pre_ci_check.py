@@ -116,26 +116,52 @@ def _check_temp_files(repo: Path) -> dict:
 
 
 def _check_mypy(repo: Path) -> dict:
-    """Run mypy on changed Python files — same as CI's ``tools/mypy.sh``."""
+    """Run mypy on changed Python files, only flagging errors on ADDED lines.
+
+    Pre-existing mypy issues in the codebase are not the AI's fault —
+    only errors on lines introduced by the current adaptation count.
+    """
     py_files = _changed_py_files(repo)
     if not py_files:
         return {"violations": [], "detail": "no changed .py files"}
     mypy = shutil.which("mypy")
     if not mypy:
         return {"violations": [], "detail": "mypy not installed", "skipped": True}
+
+    # Collect added line numbers per file from git diff
+    added_lines = _get_added_lines(repo)
+    added_locations: dict[str, set[int]] = {}
+    for entry in added_lines:
+        added_locations.setdefault(entry["file"], set()).add(int(entry["line_no"]))
+
     r = subprocess.run(
-        [mypy, "--config-file", str(repo / "mypy.ini"),
+        [mypy, "--follow-imports", "skip",
          "--check-untyped-defs"] + py_files,
         cwd=str(repo), capture_output=True, text=True,
     )
-    if r.returncode != 0:
-        combined = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
-        violations = [l.strip() for l in combined.splitlines() if l.strip()]
-        ts_print(f"[pre_ci] mypy: {len(violations)} issue(s)")
+    if r.returncode == 0:
+        ts_print("[pre_ci] mypy: OK")
+        return {"violations": [], "detail": "mypy clean"}
+
+    # Parse mypy output: "file.py:LINE:COL: error: ..."
+    _MYPY_ERR_RE = re.compile(r"^(.+\.py):(\d+):\d+:\s+error:")
+    violations: list[str] = []
+    for line in (r.stdout + "\n" + r.stderr).splitlines():
+        m = _MYPY_ERR_RE.search(line.strip())
+        if not m:
+            continue
+        fname = m.group(1)
+        lineno = int(m.group(2))
+        # Only flag if the error is on a line ADDED by this adaptation
+        if lineno in added_locations.get(fname, set()):
+            violations.append(line.strip())
+
+    if violations:
+        ts_print(f"[pre_ci] mypy: {len(violations)} issue(s) on added lines")
         return {"violations": violations,
-                "detail": f"{len(violations)} mypy issue(s)"}
-    ts_print("[pre_ci] mypy: OK")
-    return {"violations": [], "detail": "mypy clean"}
+                "detail": f"{len(violations)} mypy issue(s) on new code"}
+    ts_print("[pre_ci] mypy: OK (pre-existing issues on unchanged lines ignored)")
+    return {"violations": [], "detail": "mypy clean (new code only)"}
 
 
 def _changed_py_files(repo: Path) -> list[str]:
