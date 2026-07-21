@@ -115,6 +115,39 @@ def _check_temp_files(repo: Path) -> dict:
     return {"violations": violations}
 
 
+def _check_mypy(repo: Path) -> dict:
+    """Run mypy on changed Python files — same as CI's ``tools/mypy.sh``."""
+    py_files = _changed_py_files(repo)
+    if not py_files:
+        return {"violations": [], "detail": "no changed .py files"}
+    mypy = shutil.which("mypy")
+    if not mypy:
+        return {"violations": [], "detail": "mypy not installed", "skipped": True}
+    r = subprocess.run(
+        [mypy, "--config-file", str(repo / "mypy.ini"),
+         "--check-untyped-defs"] + py_files,
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        combined = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
+        violations = [l.strip() for l in combined.splitlines() if l.strip()]
+        ts_print(f"[pre_ci] mypy: {len(violations)} issue(s)")
+        return {"violations": violations,
+                "detail": f"{len(violations)} mypy issue(s)"}
+    ts_print("[pre_ci] mypy: OK")
+    return {"violations": [], "detail": "mypy clean"}
+
+
+def _changed_py_files(repo: Path) -> list[str]:
+    """Return list of changed .py files in the working tree (vs HEAD)."""
+    r = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD"], cwd=str(repo),
+        capture_output=True, text=True,
+    )
+    return [f for f in r.stdout.strip().splitlines()
+            if f.endswith(".py") and Path(repo, f).exists()]
+
+
 def _check_format(repo: Path) -> dict:
     """Run ``bash format.sh`` and detect real (non-auto-fixable) errors.
 
@@ -302,6 +335,7 @@ def run_check(ascend_path: str | Path, release_tag: str,
         temps = _check_temp_files(repo)
         fmt = _check_format(repo)
         imports = _check_broken_imports(repo, vllm_path) if vllm_path else {"violations": []}
+        mypy = _check_mypy(repo)
     except subprocess.CalledProcessError as exc:
         return {
             "all_passed": False,
@@ -370,5 +404,16 @@ def run_check(ascend_path: str | Path, release_tag: str,
         })
         if not import_ok:
             all_passed = False
+
+    mypy_ok = len(mypy["violations"]) == 0
+    checks.append({
+        "name": "mypy",
+        "passed": mypy_ok or mypy.get("skipped", False),
+        "detail": mypy["detail"],
+        "violations": mypy["violations"],
+        "skipped": mypy.get("skipped", False),
+    })
+    if not mypy_ok and not mypy.get("skipped"):
+        all_passed = False
 
     return {"all_passed": all_passed, "checks": checks}
