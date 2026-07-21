@@ -46,6 +46,7 @@ _SSH_OPTS = ["-o", "StrictHostKeyChecking=no"]
 # ---- test path → cards ----
 
 _CARD_PATTERNS: list[tuple[str, int]] = [
+    ("tests/ut/", 0), ("tests.ut.", 0),
     ("one_card", 1), ("singlecard", 1), ("single_card", 1),
     ("two_card", 2), ("2.cards", 2), ("2-card", 2),
     ("four_card", 4), ("4.cards", 4), ("4-card", 4),

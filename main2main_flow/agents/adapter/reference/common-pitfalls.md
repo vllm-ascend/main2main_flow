@@ -62,11 +62,32 @@ If deleted, remove the corresponding vllm-ascend patch and note the reason in
 
 **Symptom**: New upstream-main behavior runs on the release version instead, or
 old behavior runs on main.  The most common review catch (8 occurrences in merged
-PRs).
+PRs).  This is the #1 cause of failed main2main PRs.
 
-**Prevention**: Ask yourself: "which branch runs the NEW code?"  The answer must
-be `not vllm_version_is("...")`.  If you're adding code for upstream main, put
-it in the `else` block.
+**Prevention — MANDATORY self-check before every `vllm_version_is` guard**:
+
+1. "Is this guard protecting NEW upstream-main behavior or OLD release behavior?"
+2. If NEW behavior: "Is it in the `else` or `not vllm_version_is` branch?" — it **must** be
+3. If OLD behavior: "Is it in the `if vllm_version_is` branch or absent?" — it **must** be
+
+**Failure cascade when guards are inverted** (real example from PR #12519):
+
+When `if vllm_version_is("0.25.1")` guards are used for NEW code instead of `else`:
+
+| Guard type | What breaks | Where | Error |
+|-----------|------------|-------|-------|
+| New param in `if` (should be `else`) | Release (old vllm) | `SingleTypeKVCacheManager.__init__` | `TypeError: got unexpected keyword argument` |
+| New return type in `if` (should be `else`) | Main (new vllm) | `find_longest_cache_hit` call sites | `ValueError: not enough values to unpack` |
+| Renamed attr in `if` (should be `else`) | Main (new vllm) | `cache_config.hash_block_size` → `prefix_match_unit` | `AttributeError: no attribute` |
+| New positional arg in `if` | Release (old vllm) | `get_num_blocks_to_allocate` call sites | `TypeError: missing required positional` |
+
+> Always add new parameters as **keyword** args with defaults — never as
+> positional-only, or they will shift the positional positions and break
+> callers on the release version.
+
+> If both branches of a guard are version-dependent, add `# type: ignore`
+> comments to each branch so mypy does not flag the branch that doesn't
+> apply to the current version.
 
 ## `hasattr` / `try-except` used instead of version guard
 

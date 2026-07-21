@@ -1,5 +1,12 @@
 # Adaptation Patterns
 
+> **CRITICAL**: Every `vllm_version_is` guard in this document shows NEW
+> upstream-main code in the `else`/`not` branch and OLD release code in the
+> `if` branch.  If you write a guard the other way around, it is **wrong**.
+> This single mistake is the #1 cause of failed main2main PRs.
+> `common-pitfalls.md` §"Version guard direction is inverted" has the
+> mandatory self-check and real failure examples.
+
 Patterns extracted from successful main2main PRs. For each upstream change type
 a correct adaptation approach and anti-pattern.
 

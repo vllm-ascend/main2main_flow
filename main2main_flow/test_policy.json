@@ -1,5 +1,6 @@
 {
   "allowlist": [
+    "tests/ut/",
     "tests/e2e/pull_request/one_card/test_vlm.py::test_multimodal_vl[hunyuan-vl]"
   ],
   "blocklist": []

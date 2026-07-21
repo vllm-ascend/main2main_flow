@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -665,6 +666,32 @@ class Main2MainFlow(Flow[Main2MainState]):
             )
             return
 
+        # Squash per-step checkpoint commits into one so the PR always has
+        # a single commit.  process_steps commits after each successful step
+        # (so later step failures can revert without losing progress), but
+        # those intermediate commits should not appear in the PR.
+        if self.state.final_status == UpgradeCompleted:
+            ascend_path = Path(self.state.vllm_ascend_path)
+            step_count = subprocess.run(
+                ["git", "rev-list", "--count",
+                 f"{self.state.original_ascend_ref}..HEAD"],
+                cwd=str(ascend_path), capture_output=True, text=True,
+            )
+            if (step_count.returncode == 0
+                    and int(step_count.stdout.strip() or "0") > 1):
+                run_git(ascend_path, "reset", "--soft",
+                        self.state.original_ascend_ref)
+                run_git(ascend_path, "add", "-A")
+                target = self.state.target_commit or self.state.cur_vllm_commit
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                commit_msg = (
+                    f"main2main: sync vllm upstream "
+                    f"({self.state.base_commit[:8]}...{target[:8]}) [{ts}]"
+                )
+                run_git(ascend_path, "commit", "-s", "-m", commit_msg)
+                ts_print(f"[generate_final_post] Squashed step commits into: "
+                         f"{commit_msg}")
+
         last_step = self.state.steps[self.state.current_step - 1]
         step_dir = WORKSPACE_DIR / STEPS_DIR / last_step["id"]
         final_summary_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
@@ -694,31 +721,78 @@ class Main2MainFlow(Flow[Main2MainState]):
             if not files:
                 continue
             cause = ""
+            change = ""
+            upstream_links: list[str] = []
             ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
             if ssp.exists():
+                in_our_step = False
+                parts: list[str] = []
+                collecting: str = ""  # "cause" or "change"
                 for dline in ssp.read_text(encoding="utf-8").strip().splitlines():
                     dl = dline.strip()
-                    if dl.startswith("Cause:"):
-                        cause = dl.removeprefix("Cause:").strip()
+                    # Per-step section: e.g. "- step-2: Adapted — ..."
+                    if dl.startswith(f"- {s['id']}:"):
+                        in_our_step = True
+                        continue
+                    # Next step entry starts → stop collecting
+                    if in_our_step and dl.startswith("- step-") and ":" in dl:
                         break
+                    if not in_our_step:
+                        continue
+                    if dl.startswith("Cause:"):
+                        collecting = "cause"
+                        parts = [dl.removeprefix("Cause:").strip()]
+                        continue
+                    if dl.startswith("Change:"):
+                        if collecting == "cause":
+                            cause = " ".join(parts)
+                        collecting = "change"
+                        parts = [dl.removeprefix("Change:").strip()]
+                        continue
+                    if dl.startswith("Upstream source:"):
+                        # Parse: "Upstream source: [sha](url)"
+                        m = re.search(r'\[([^\]]+)\]\(([^\)]+)\)', dl)
+                        if m:
+                            upstream_links.append(f"[{m.group(1)[:8]}]({m.group(2)})")
+                        continue
+                    # Continuation lines (indented)
+                    if collecting and parts and (dline.startswith(("  ", "\t")) or
+                                                  (dl and not dl.startswith("-"))):
+                        parts.append(dl)
+                if collecting == "cause":
+                    cause = " ".join(parts)
+                elif collecting == "change":
+                    change = " ".join(parts)
             step_items.append({
                 "files": files,
                 "commit": s["end_commit"][:8],
                 "cause": cause,
+                "change": change,
+                "upstream_links": upstream_links,
             })
 
         parts = [
             "### What this PR does / why we need it?",
             "",
-            f"Upgrade vLLM commit to `{(self.state.target_commit or self.state.cur_vllm_commit)[:8]}`",
+            f"Adapt vllm-ascend to vLLM main commits up to {datetime.now().strftime('%B %d')}.",
             "",
+            "### Changes",
+            "",
+            "| Files | Upstream vLLM change | vllm-ascend adaptation |",
+            "|-------|---------------------|------------------------|",
         ]
-        for idx, item in enumerate(step_items, 1):
-            files_str = ", ".join(f"`{f}`" for f in item["files"])
-            commit_link = f"[{item['commit']}]({commit_url}/{item['commit']})"
-            parts.append(f"{idx}. Adapt {files_str} due to {commit_link}")
-            if item["cause"]:
-                parts.append(f"   - {item['cause']}")
+        for item in step_items:
+            files_str = "<br>".join(f"`{f}`" for f in item["files"])
+            # Upstream column: PR/commit links + cause
+            links = item.get("upstream_links") or []
+            if not links:
+                links = [f"[{item['commit'][:8]}]({commit_url}/{item['commit']})"]
+            upstream = " · ".join(links)
+            if item.get("cause"):
+                upstream = f"{upstream} — {item['cause']}"
+            # Adaptation column
+            adapt = item.get("change") or item.get("cause") or ""
+            parts.append(f"| {files_str} | {upstream} | {adapt} |")
         parts.append("")
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")
