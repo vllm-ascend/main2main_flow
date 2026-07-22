@@ -183,12 +183,30 @@ No-op — ONE line: `- {step_id}: No-op — <reason>`
 Adapted:
 ```
 - {step_id}: Adapted — <files>
-  Upstream commit: <sha>
-  Cause: <what changed upstream>
-  Change: <what was done in vllm-ascend>
+  Upstream source: [<sha>](https://github.com/vllm-project/vllm/commit/<sha>)
+  Cause: <what changed upstream — 1-2 sentences on the upstream diff>
+  Change: <what was done in vllm-ascend — specific files, guards, new params>
 ```
 
-Do NOT list "files checked but unchanged".
+**Cause vs Change — they must be DIFFERENT:**
+
+- **Cause** = what the upstream vLLM commit changed (e.g. "`foo()` signature
+  changed to add `new_param: bool`")
+- **Change** = what vllm-ascend did to adapt (e.g. "Added `new_param=True` to
+  `foo()` call in `bar.py` and `baz.py`; version-guarded in `qux.py`")
+
+Do NOT write the same text for both fields.  If the adaptation is trivial,
+the Change should still describe the specific files, line changes, and
+guards used — not just restate the upstream cause.
+
+Multi-line fields: indent continuation lines with 2 spaces:
+
+```
+  Cause: <first line of cause>
+    <continuation line>
+  Change: <first line of change>
+    <continuation line>
+```
 
 ## Last Step Only
 

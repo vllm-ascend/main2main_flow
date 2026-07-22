@@ -752,15 +752,22 @@ class Main2MainFlow(Flow[Main2MainState]):
                         collecting = "change"
                         parts = [dl.removeprefix("Change:").strip()]
                         continue
-                    if dl.startswith("Upstream source:"):
-                        # Parse: "Upstream source: [sha](url)"
+                    if dl.startswith("Upstream source:") or dl.startswith("Upstream commit:"):
+                        # Parse: "Upstream source: [sha](url)" or "Upstream commit: <sha>"
                         m = re.search(r'\[([^\]]+)\]\(([^\)]+)\)', dl)
                         if m:
                             upstream_links.append(f"[{m.group(1)[:8]}]({m.group(2)})")
+                        else:
+                            # Plain SHA format: "Upstream commit: <sha>"
+                            sha = dl.split(":", 1)[1].strip()
+                            if sha:
+                                upstream_links.append(f"[{sha[:8]}]({commit_url}/{sha})")
                         continue
-                    # Continuation lines (indented)
-                    if collecting and parts and (dline.startswith(("  ", "\t")) or
-                                                  (dl and not dl.startswith("-"))):
+                    # Continuation lines (indented with 2+ spaces or tab).
+                    # Only match indented lines — the old fallback (dl and not
+                    # dl.startswith("-")) was too broad and caught unrelated
+                    # lines like "Upstream commit:" into the cause/change text.
+                    if collecting and parts and dline.startswith(("  ", "\t")):
                         parts.append(dl)
                 if collecting == "cause":
                     cause = " ".join(parts)
@@ -804,8 +811,10 @@ class Main2MainFlow(Flow[Main2MainState]):
             upstream = " · ".join(links)
             if item.get("cause"):
                 upstream = f"{upstream} — {item['cause']}"
-            # Adaptation column
-            adapt = item.get("change") or item.get("cause") or ""
+            # Adaptation column: never fall back to cause text — the two
+            # columns serve different purposes.  If the adapter didn't write a
+            # Change, show the files touched instead.
+            adapt = item.get("change") or ""
             parts.append(f"| {files_str} | {upstream} | {adapt} |")
         parts.append("")
 
