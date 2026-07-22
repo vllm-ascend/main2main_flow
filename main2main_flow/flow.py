@@ -774,10 +774,21 @@ class Main2MainFlow(Flow[Main2MainState]):
                 "upstream_links": upstream_links,
             })
 
+        # Get the commit date of the target vllm commit for the PR description.
+        target = self.state.target_commit or self.state.cur_vllm_commit
+        commit_date = datetime.now()
+        if target:
+            r = subprocess.run(
+                ["git", "log", "-1", "--format=%ct", target],
+                cwd=self.state.vllm_path, capture_output=True, text=True,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                commit_date = datetime.fromtimestamp(int(r.stdout.strip()))
+
         parts = [
             "### What this PR does / why we need it?",
             "",
-            f"Adapt vllm-ascend to vLLM main commits up to {datetime.now().strftime('%B %d')}.",
+            f"Adapt vllm-ascend to vLLM main commits up to {commit_date.strftime('%B %d')}.",
             "",
             "### Changes",
             "",
