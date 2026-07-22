@@ -79,10 +79,22 @@ The step_target.patch is cumulative (git diff HEAD).
    check EVERY guard you wrote.
 3. Every guarded `from vllm.X import Y` line has `# type: ignore[import-not-found]`
    appended.  Open each file you modified and visually verify.
-4. No circular imports — if file A patches something file B imports, B must
+4. **Imports that don't exist on the OLD vllm version**: if a class or module
+   was added only on main (e.g. `SpeculatorCudaGraphManager` replaced
+   separate `PrefillSpeculatorCudaGraphManager` + `DecodeSpeculatorCudaGraphManager`),
+   the import of the new class MUST be inside `else` (not guarded with
+   `# type: ignore`).  An unconditional import will `ImportError` on the old
+   version.  See `reference/common-pitfalls.md` §"Importing modules that
+   don't exist (yet)".
+5. No circular imports — if file A patches something file B imports, B must
    not also import from A at module level.
-5. Every call site of a method whose signature changed upstream passes the
+6. Every call site of a method whose signature changed upstream passes the
    correct number and type of arguments on BOTH version branches.
+7. **Override methods (`capture`, `set_attn`, etc.)**: when upstream adds new
+   required parameters, the override method signature must match.  If you
+   version-guard the call, add the new params as keyword-only with defaults
+   (`*, new_param=None`) so positional callers on the old version are not
+   broken.
 
 **Format rules — apply WHILE editing, not after:**
 
