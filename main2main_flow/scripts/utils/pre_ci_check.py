@@ -337,10 +337,18 @@ def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
 
         has_ignore = "# type: ignore[import-not-found]" in line
         if not has_ignore and int(entry["line_no"]) in _guarded_lines(entry["file"]):
-            violations.append(
-                f"{entry['file']}:{entry['line_no']}: guarded import missing "
-                f"'# type: ignore[import-not-found]' — {line}"
-            )
+            # Auto-fix: append the comment to the import line in the source file.
+            # This is a purely mechanical fix — no logic change, no reason to
+            # force an adapter retry.
+            fpath = repo / entry["file"]
+            if fpath.exists():
+                orig_lines = fpath.read_text(encoding="utf-8").splitlines()
+                lineno = int(entry["line_no"]) - 1  # 0-based
+                if 0 <= lineno < len(orig_lines):
+                    orig_lines[lineno] = orig_lines[lineno].rstrip() + "  # type: ignore[import-not-found]"
+                    fpath.write_text("\n".join(orig_lines) + "\n", encoding="utf-8")
+                    ts_print(f"[pre_ci] broken_imports: auto-fixed {entry['file']}:{entry['line_no']} "
+                             f"(added # type: ignore[import-not-found])")
 
     return {"violations": violations}
 

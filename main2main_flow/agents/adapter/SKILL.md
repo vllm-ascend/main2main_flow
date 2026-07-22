@@ -71,6 +71,19 @@ The step_target.patch is cumulative (git diff HEAD).
 2. Use targeted search to find the impacted vllm-ascend code (see Code Exploration)
 3. Apply minimal changes — do not refactor unrelated code
 
+**BEFORE marking the adaptation complete, verify ALL of these:**
+
+1. `bash format.sh` runs clean (no FAILED hooks, no ruff errors)
+2. Every `vllm_version_is` guard: NEW upstream-main code is in `else`/`not`
+   branch, OLD release code is in `if` branch.  This is the #1 PR CI failure —
+   check EVERY guard you wrote.
+3. Every guarded `from vllm.X import Y` line has `# type: ignore[import-not-found]`
+   appended.  Open each file you modified and visually verify.
+4. No circular imports — if file A patches something file B imports, B must
+   not also import from A at module level.
+5. Every call site of a method whose signature changed upstream passes the
+   correct number and type of arguments on BOTH version branches.
+
 **Format rules — apply WHILE editing, not after:**
 
 - Every line **must** be ≤ 120 characters.  When replacing `== "X"` with
