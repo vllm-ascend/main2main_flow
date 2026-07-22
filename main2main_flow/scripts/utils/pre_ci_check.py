@@ -143,8 +143,8 @@ def _check_mypy(repo: Path) -> dict:
         ts_print("[pre_ci] mypy: OK")
         return {"violations": [], "detail": "mypy clean"}
 
-    # Parse mypy output: "file.py:LINE:COL: error: ..."
-    _MYPY_ERR_RE = re.compile(r"^(.+\.py):(\d+):\d+:\s+error:")
+    # Parse mypy output: "file.py:LINE:COL: error:" or "file.py:LINE: error:"
+    _MYPY_ERR_RE = re.compile(r"^(.+\.py):(\d+):(?:\d+:\s+)?error:")
     violations: list[str] = []
     for line in (r.stdout + "\n" + r.stderr).splitlines():
         m = _MYPY_ERR_RE.search(line.strip())

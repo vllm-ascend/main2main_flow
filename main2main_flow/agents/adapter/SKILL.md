@@ -95,6 +95,12 @@ The step_target.patch is cumulative (git diff HEAD).
    version-guard the call, add the new params as keyword-only with defaults
    (`*, new_param=None`) so positional callers on the old version are not
    broken.
+8. **Variable aliases as base classes → mypy [valid-type]/[misc]**: when
+   upstream merges two classes into one (e.g. `A` + `B` → `C`), do NOT create
+   `_Base = C` and use `class X(_Base):`.  mypy sees `_Base` as a variable,
+   not a type.  Use `C` directly as the base class, or annotate with
+   `from typing import TypeAlias; _Base: TypeAlias = C`.  See
+   `reference/common-pitfalls.md` §"Variable aliases as base classes".
 
 **Format rules — apply WHILE editing, not after:**
 

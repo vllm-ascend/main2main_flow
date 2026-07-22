@@ -233,8 +233,11 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         vllm_branch = run_git(self.state.vllm_path, "branch", "--show-current").strip()
         self.state.original_vllm_ref = vllm_branch or run_git(self.state.vllm_path, "rev-parse", "HEAD").strip()
-        ascend_branch = run_git(self.state.vllm_ascend_path, "branch", "--show-current").strip()
-        self.state.original_ascend_ref = ascend_branch or run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
+        # Use merge-base with upstream/main as the squash baseline, not the
+        # branch name.  git rev-list --count <branch>..HEAD is always 0
+        # because they point to the same ref.
+        merge_base = run_git(self.state.vllm_ascend_path, "merge-base", "HEAD", "upstream/main").strip()
+        self.state.original_ascend_ref = merge_base or run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
 
     @router(initialize)
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:

@@ -238,3 +238,40 @@ extension points (backends, platforms, model loaders).
 constructor in the upstream patch.  Update the vllm-ascend registration
 to match.  Use a version guard only if both old and new contracts must
 be supported.
+
+## Variable aliases as base classes
+
+**Symptom**: mypy `[valid-type]` and `[misc]` errors on class definitions
+like `class X(_Base):` where `_Base = SomeClass` is a simple variable
+assignment.  CI fails even though the code runs correctly.
+
+**Root cause**: When upstream merges two classes (e.g. `PrefillA` + `DecodeA`
+→ `Manager`), the adapter creates `_PrefillBase = Manager` and uses it as a
+base class.  mypy treats `_PrefillBase` as a variable, not a type, and rejects
+it as a base class.  `# type: ignore[name-defined]` does NOT suppress
+`valid-type` or `misc`.
+
+**Prevention**: Use the imported class directly as the base class, or use
+`TypeAlias`:
+
+```python
+# Wrong: variable alias, mypy rejects as base class
+_PrefillManagerBase = SpeculatorCudaGraphManager
+class PrefillEagleAclGraphManager(_PrefillManagerBase):  # [valid-type] [misc]
+    ...
+
+# Right option 1: use the class directly
+class PrefillEagleAclGraphManager(SpeculatorCudaGraphManager):
+    ...
+
+# Right option 2: use TypeAlias
+from typing import TypeAlias
+_PrefillManagerBase: TypeAlias = SpeculatorCudaGraphManager
+class PrefillEagleAclGraphManager(_PrefillManagerBase):  # mypy happy
+    ...
+```
+
+**ALSO**: If the imported class (`SpeculatorCudaGraphManager`) was added only
+on main, the import MUST be version-guarded.  An unconditional import of a
+class that doesn't exist on the release version will `ImportError` at runtime.
+See SKILL.md checklist item 4.
