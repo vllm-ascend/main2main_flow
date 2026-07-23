@@ -76,6 +76,12 @@ The step_target.patch is cumulative (git diff HEAD).
 1. Read the upstream patch and changed file list from `{patch_path}` and `{changed_files_path}`
 2. Use targeted search to find the impacted vllm-ascend code (see Code Exploration)
 3. Apply minimal changes — do not refactor unrelated code
+4. **Run ``bash format.sh`` and fix all errors BEFORE marking complete**:
+   Use the Bash tool to run `bash format.sh` in `{ascend_path}`. Read the
+   output. If there are FAILED hooks or ruff errors, fix them and re-run.
+   Repeat until format.sh exits clean. Do NOT proceed to the checklist
+   until this is done. This is NOT optional — format failures here will cause
+   a pre_ci failure and force a retry.
 
 **Guard decision tree**:
 
@@ -92,7 +98,7 @@ Does this code path need to support BOTH the release version AND upstream main?
 
 **BEFORE marking the adaptation complete, verify ALL of these:**
 
-1. `bash format.sh` runs clean (no FAILED hooks, no ruff errors)
+1. (Already handled in step 4 above — format.sh was run and passes clean)
 2. Every `vllm_version_is` guard: NEW upstream-main code is in `else`/`not`
    branch, OLD release code is in `if` branch.
 3. Every guarded `from vllm.X import Y` line has `# type: ignore[import-not-found]`
@@ -133,10 +139,12 @@ scratch. Make minimal targeted fixes to the specific errors reported.
 
 **Pre-CI failures**: open `pre_ci_check.json` → each failed check has
 `violations` with exact file:line:col:CODE. Fix those specific lines.
+After fixing, run `bash format.sh` to verify.
 
 **E2E test failures**: open `round-N-result.json` → check `code_bugs_count` > 0
 → open failed tests from `suite_results[test_name]`. Read both `-summary.json`
-(structured code_bugs/env_flakes) and `.log` (raw traceback).
+(structured code_bugs/env_flakes) and `.log` (raw traceback). After fixing,
+run `bash format.sh` to verify.
 
 ## Output
 
