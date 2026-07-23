@@ -101,6 +101,16 @@ The step_target.patch is cumulative (git diff HEAD).
    not a type.  Use `C` directly as the base class, or annotate with
    `from typing import TypeAlias; _Base: TypeAlias = C`.  See
    `reference/common-pitfalls.md` §"Variable aliases as base classes".
+9. **Sibling functions with the same version-branch bug**: when you fix a
+   computation bug in one version-guarded function (e.g. `hit_length` in
+   `find_longest_cache_hit_per_group`), grep for the same pattern in ALL
+   sibling functions in the same file (`find_longest_cache_hit`,
+   `find_longest_cache_hit_per_group`, etc.).  The same wrong multiplier or
+   wrong return-type handling almost certainly exists in every function that
+   handles the same upstream return type.  Fix them ALL in the same commit -
+   otherwise the next CI run fails on a different test with the same root
+   cause.  See `reference/common-pitfalls.md` for "Same bug in multiple
+   code paths" and "effective_block_size vs physical block_size".
 
 **Format rules — apply WHILE editing, not after:**
 

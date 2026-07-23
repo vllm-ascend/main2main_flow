@@ -275,3 +275,109 @@ class PrefillEagleAclGraphManager(_PrefillManagerBase):  # mypy happy
 on main, the import MUST be version-guarded.  An unconditional import of a
 class that doesn't exist on the release version will `ImportError` at runtime.
 See SKILL.md checklist item 4.
+
+## effective_block_size vs physical block_size for hit_length
+
+**Symptom**: v0.25.1-only native crash (segfault, no Python traceback) during
+or after `llm.generate()` on MLA models (DeepSeek-V2-Lite/V3/V4).  Main passes.
+The crash is often intermittent - ENPU mode may mask it.
+
+**Root cause**: When upstream changes a function's return type so that v0.25.1
+must compute `hit_length` externally (e.g. `find_longest_cache_hit` returns
+just `blocks` on 0.25.1 but `(blocks, hit_length)` on main), the external
+computation must use the **physical** block size, not `_get_effective_block_size()`.
+
+`_get_effective_block_size()` multiplies by `compress_ratio` for MLA specs.
+But `hit_blocks[0]` holds **physical** blocks (each `spec.block_size` tokens),
+not logical blocks.  Multiplying physical block count by logical block size
+inflates `hit_length` by `compress_ratio` (e.g. 4x for DeepSeek MLA).
+
+```python
+# Wrong: effective_block_size includes compress_ratio -> 4x over-count
+if vllm_version_is("{release_tag}"):
+    hit_blocks = hit_result
+    _new_hit_length = len(hit_blocks[0]) * effective_block_size  # 4 * 512 = 2048
+
+# Right: use physical block_size
+if vllm_version_is("{release_tag}"):
+    hit_blocks = hit_result
+    block_size = spec.block_size
+    if self.dcp_world_size * self.pcp_world_size > 1:
+        block_size *= self.dcp_world_size * self.pcp_world_size
+    _new_hit_length = len(hit_blocks[0]) * block_size  # 4 * 128 = 512
+```
+
+The inflated `hit_length` tells the scheduler that more tokens are cached than
+actually exist.  The model skips computing those "cached" tokens and accesses
+out-of-bounds KV cache entries -> segfault.
+
+**Why main is unaffected**: on main, `find_longest_cache_hit` returns
+`(blocks, hit_length)` where `hit_length` is computed inside the manager with
+the correct logical-block semantics.  The external recomputation only happens
+on the release-tag branch.
+
+**Check ALL sibling functions**: this bug pattern was found in
+`find_longest_cache_hit_per_group` (fixed) but the identical bug in
+`find_longest_cache_hit` (regular scheduling path, called during every
+`llm.generate`) was missed for a full CI cycle.  When fixing a version-branch
+computation bug, grep for every call site that recomputes the same value:
+
+```bash
+grep -n 'effective_block_size\|_get_effective_block_size' vllm_ascend/patch/platform/patch_kv_cache_coordinator.py
+```
+
+## Same bug in multiple code paths - fix them all at once
+
+**Symptom**: You fix a version-branch bug reported by one failing test.  The
+next CI run reveals a *different* test failing from the *same* root cause in a
+*sibling* function you didn't check.
+
+**Prevention**: When a bug is caused by a version-branch returning a different
+type or computing a value externally, the same bug almost certainly exists in
+every sibling function that handles the same upstream return type.  Fix them
+all in the same commit.
+
+Real example from PR #12502 / #12648:
+
+| function | called by | first fix | missed for 1 cycle |
+|----------|-----------|-----------|--------------------|
+| `find_longest_cache_hit_per_group` | recompute scheduler only | yes | - |
+| `find_longest_cache_hit` | **regular `llm.generate()` scheduling** | no | yes |
+
+The per_group function was fixed because a unit test caught it.  The regular
+function was missed because no unit test exercised it with compressed MLA on
+v0.25.1 - only a 4-card e2e test (`test_aclgraph[CASE_DS_ACLGRAPH]`) caught
+it, and that test crashed with no traceback, making diagnosis harder.
+
+**Action**: after fixing any version-branch computation bug, immediately:
+
+1. Grep for the same pattern (`effective_block_size`, `len(hit_blocks[0])`,
+   etc.) in the same file and sibling files
+2. Fix every occurrence in the same commit
+3. Note in `step_summary.md` that sibling functions were audited
+
+## v0.25.1-only segfault after llm.generate -> suspect hit_length
+
+**Symptom**: e2e test crashes on v0.25.1 with `AssertionError: Expected N
+results, got 0` and `Error: Timeout waiting for worker results. A worker
+might have crashed.`  No Python traceback.  Main passes the same test.
+
+**Diagnosis flow**:
+
+1. Check if the test uses an MLA model (DeepSeek-V2-Lite/V3/V4, Qwen3-MoE
+   with MLA).  MLA specs have `compress_ratio > 1`.
+2. If yes, grep for `effective_block_size` and `_get_effective_block_size` in
+   `vllm_ascend/patch/platform/patch_kv_cache_coordinator.py` and
+   `vllm_ascend/core/single_type_kv_cache_manager.py`.
+3. Any line that multiplies `len(hit_blocks[0])` (physical block count) by
+   `effective_block_size` (logical block size) on the release-tag branch is
+   the crash site.
+4. The crash happens AFTER inference because the wrong `hit_length` causes the
+   scheduler to mark non-cached tokens as cached.  The model reads garbage KV
+   cache entries, and the segfault triggers during attention backward or
+   cleanup - not at the point of the wrong computation.
+
+**Why ENPU may mask it**: ENPU uses different operator implementations with
+different memory layouts.  The out-of-bounds access may land on valid memory
+by coincidence, so the test passes with wrong results instead of crashing.
+Do NOT assume ENPU-pass means the bug is absent.
