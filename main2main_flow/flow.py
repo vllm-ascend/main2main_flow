@@ -667,6 +667,15 @@ class Main2MainFlow(Flow[Main2MainState]):
                             "new_commit": self.state.target_commit or ""}, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8"
             )
+            # Try to copy the last attempted step's patch so push_to_github
+            # can still create a PR with the best-effort diff.
+            if self.state.total_steps > 0:
+                last_attempted = self.state.steps[-1]
+                last_step_dir = WORKSPACE_DIR / STEPS_DIR / last_attempted["id"]
+                last_patch = last_step_dir / EACH_STEP_TARGET_PATCH_FILE
+                if last_patch.exists():
+                    shutil.copy2(last_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
+                    ts_print("[generate_final_post] Copied last attempted step's patch as final_target.patch")
             return
 
         # Squash per-step checkpoint commits into one so the PR always has

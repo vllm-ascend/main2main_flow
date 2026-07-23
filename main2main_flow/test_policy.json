@@ -1,7 +1,6 @@
 {
   "allowlist": [
-    "tests/e2e/pull_request/one_card/test_vlm.py::test_multimodal_vl[hunyuan-vl]",
-    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_eager_mode[True-32-vllm-ascend/DeepSeek-V2-Lite-W8A8]"
+    "tests/e2e/pull_request/one_card/test_vlm.py::test_multimodal_vl[hunyuan-vl]"
   ],
   "blocklist": []
 }
