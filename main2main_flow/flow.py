@@ -343,12 +343,18 @@ class Main2MainFlow(Flow[Main2MainState]):
         # Skip opencode adaptation when upstream_patch is empty (no vllm/ code
         # changes in this step).  Still advance verified.commit and set state
         # so e2e tests can verify the new vllm commit doesn't break anything.
+        # However, if e2e already ran once and failed (retry_count > 0), don't
+        # retry — there are no code changes to fix, so re-running is pointless.
         upstream_patch = step.get("upstream_patch", "")
         if os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true" or not upstream_patch.strip():
             if not upstream_patch.strip():
                 ts_print(f"[ai_analysis] {step_id}: no vllm/ code changes, skipping adaptation")
             else:
                 ts_print(f"[ai_analysis] SKIP_AI_ANALYSIS=true, skipping for step {step_id}")
+
+            if self.state.retry_count > 0:
+                ts_print(f"[ai_analysis] {step_id}: no code to fix, e2e already ran — giving up")
+                return False
 
             vllm_path = self.state.vllm_path
             ascend_path = self.state.vllm_ascend_path
