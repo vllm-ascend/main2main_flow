@@ -2,7 +2,7 @@
   "allowlist": [
     "tests/e2e/pull_request/one_card/test_vlm.py::test_multimodal_vl[hunyuan-vl]",
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_eager_mode[True-32-vllm-ascend/DeepSeek-V2-Lite-W8A8]",
-    "tests/ut/test_compressed_prefix_cache.py::test_compressed_prefix_cache_uses_logical_block_hash"
+    "tests/e2e/pull_request/one_card/test_qwen3_0_6b.py::test_dense_default_full_and_piecewise_graph"
   ],
   "blocklist": []
 }
