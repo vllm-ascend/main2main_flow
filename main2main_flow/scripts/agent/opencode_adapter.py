@@ -49,8 +49,11 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     if role == "adapter-fix":
         ref_content = "(reference docs already in session context — see previous messages)"
     else:
-        ref_names = ["adapt-guide.md", "adaptation-patterns.md",
-                     "common-pitfalls.md", "code-structure-guide.md"]
+        ref_names = ["adaptation-patterns.md",
+                     "common-pitfalls.md"]
+        # Load code-structure-guide only on the first step (static mapping table)
+        if inputs.get("step_id") == "step-1":
+            ref_names.append("code-structure-guide.md")
         parts = []
         for rf in ref_names:
             text = _load_ref(agent_dir, rf)
