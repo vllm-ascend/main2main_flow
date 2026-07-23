@@ -107,6 +107,12 @@ Does this code path need to support BOTH the release version AND upstream main?
    functions and fix them all in the same commit.
 10. When a method signature changed, grep for ALL `def <method_name>(` in the
     codebase — every override must be updated.
+11. Every `next(gen, default)` has a default value — no bare `next(...)`.
+12. `super().__init__()` called in every subclass `__init__`.
+13. No exact version matching (`== "X.Y.Z"`).
+14. No dead code, commented-out blocks, or stale `# type: ignore` left behind.
+15. See `reference/common-pitfalls.md` §"Additional QA-level checks" for
+    remaining items (registries, Triton params, getattr, path resolution, etc.).
 
 **Format rules — apply WHILE editing, not after:**
 

@@ -223,6 +223,34 @@ Ruff format CANNOT auto-fix E501/F821/F841 — these need manual code edits.
 
 Check every added comment and string for spelling.
 
+## Additional QA-level checks
+
+These are caught by the QA reviewer but should be applied proactively:
+
+- **`next()` must have a default value**: always `next(iter, default)`, never bare `next(...)`.
+- **`super().__init__()` must be called**: every subclass `__init__` must chain to parent.
+- **Verify registries after touching KVCacheSpecRegistry**: when removing old-version
+  branches, confirm `KVCacheSpecRegistry.register()` / `__init_subclass__` calls are not
+  deleted. Grep: `grep -rn "register\|__init_subclass__" vllm_ascend/` near changed code.
+- **No exact version matching**: never `== "X.Y.Z"`. Use `vllm_version_is()` or `>=`.
+- **Grep before deleting**: before removing any function/env-var/utility, grep the full
+  call chain. Even if a function appears single-version, multiple patch files may depend
+  on it.
+- **`getattr` for cross-version params**: when an upstream parameter changes type across
+  versions, `getattr(obj, "param", default)` is acceptable. This is different from using
+  `hasattr`/`try-except` FOR VERSION DETECTION, which is prohibited.
+- **Triton kernel params must match**: every arg passed to a Triton kernel call must exist
+  in the kernel function signature.
+- **No `logging.debug` on TorchDynamo compile path**: guard with
+  `if not torch.compiler.is_compiling()`.
+- **Resolve paths before chaining**: call `.resolve()` before `.parents[N]` on `Path`.
+- **Remove dead code**: commented-out experimental lines, `# "FusedMoE": AscendFusedMoE,`
+  blocks left for reference — remove them.
+- **Clean up stale `# type: ignore`**: when editing nearby code, remove redundant
+  type-ignore comments and meaningless annotations.
+- **Document default value changes**: when changing a parameter's default (e.g.
+  `swiglu_limit: 0 → None`), explain the reason in step_summary.md.
+
 ## Fix mode workflow
 
 1. Extract search term from error (method name, config field, class name)

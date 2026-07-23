@@ -4,8 +4,6 @@
 > upstream-main code in the `else`/`not` branch and OLD release code in the
 > `if` branch. If you write a guard the other way around, it is **wrong**.
 
-Patterns extracted from successful main2main PRs.
-
 ## 1. Upstream adds a parameter
 
 **Rule**: Add the parameter as a keyword argument with a default value.
@@ -135,6 +133,18 @@ the processor must always be patched.
 
 See `common-pitfalls.md` §"Processor/multimodal compat patch blocked by early
 return" for the full HunYuan-VL example.
+
+## 12. `next()` calls in changed code
+
+**Rule**: Always provide a default value. Bare `next(...)` raises StopIteration.
+
+```python
+# Wrong
+layer = next(l for l in model.layers if l.name == target)
+
+# Right
+layer = next((l for l in model.layers if l.name == target), None)
+```
 
 ## Mypy prevention
 
