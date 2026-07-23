@@ -89,7 +89,11 @@ The step_target.patch is cumulative (git diff HEAD).
 5. No circular imports — if file A patches something file B imports, B must
    not also import from A at module level.
 6. Every call site of a method whose signature changed upstream passes the
-   correct number and type of arguments on BOTH version branches.
+   correct number, type, AND ORDER of arguments on BOTH version branches.
+   When a new parameter is inserted between existing ones (not appended),
+   positional callers MUST match the new order — keyword arguments are
+   safer.  See `reference/common-pitfalls.md` §"Positional argument order
+   after upstream inserts a parameter".
 7. **Override methods (`capture`, `set_attn`, etc.)**: when upstream adds new
    required parameters, the override method signature must match.  If you
    version-guard the call, add the new params as keyword-only with defaults

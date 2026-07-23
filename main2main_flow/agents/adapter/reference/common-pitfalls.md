@@ -162,6 +162,31 @@ vllm-ascend call site.  For added parameters, add a keyword default.
 For removed parameters, guard with `vllm_version_is()` and pass
 conditionally.  `adaptation-patterns.md` §1–§1b cover this in detail.
 
+**Positional argument order after upstream inserts a parameter**:
+
+When upstream inserts a new parameter between existing ones (not at the end),
+positional callers in the `else` branch must match the new order.  Passing the
+right number of arguments but in the wrong order is a silent bug — no
+TypeError, just wrong behavior.
+
+```python
+# Upstream: get_num_blocks(..., total_computed, num_local, num_main)
+# Old:      get_num_blocks(..., total_computed, num_main)
+
+# Wrong: right count, wrong order
+self.get_num_blocks_to_allocate(
+    ..., total_computed_tokens, num_tokens_main_model, num_local_computed_tokens
+)
+
+# Right: matches new upstream order
+self.get_num_blocks_to_allocate(
+    ..., total_computed_tokens, num_local_computed_tokens, num_tokens_main_model
+)
+```
+
+**Prevention**: Always use keyword arguments for new parameters in the
+`else`/`not` branch.  This avoids positional-order bugs entirely.
+
 **The output-buffer trap**: When upstream changes from `output[:] = result`
 pattern to `return result`, merely redirecting a forward method (e.g.
 `_GDN_PATCH_TARGET.forward = ...`) is NOT enough.  You must also:
