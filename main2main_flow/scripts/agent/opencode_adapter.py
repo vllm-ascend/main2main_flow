@@ -25,9 +25,9 @@ from main2main_flow.scripts.utils.utils import ts_print
 
 _AGENT_DIR = Path(__file__).parent.parent.parent / "agents"
 _TIMEOUT_MINUTES = 30
-_STALE_SECONDS = 600
+_STALE_SECONDS = 300
 _MAX_STALE_RETRIES = 3
-_DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "claude-sonnet-4-6")
+_DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
 
 # Verify opencode is available at import time
 if not shutil.which("opencode"):
