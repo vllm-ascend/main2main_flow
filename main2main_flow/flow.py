@@ -10,8 +10,6 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from crewai.flow import Flow, listen, start, router
-
 from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter, run_opencode_review
 from main2main_flow.scripts.utils.detect_commits import detect
 from main2main_flow.scripts.utils.plan_steps import run_plan
@@ -204,12 +202,24 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
     return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
 
 
-class Main2MainFlow(Flow[Main2MainState]):
+class Main2MainFlow:
 
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+        self.state = Main2MainState(**kwargs)
 
-    @start()
+    def run(self, inputs: dict | None = None):
+        if inputs:
+            for k, v in inputs.items():
+                setattr(self.state, k, v)
+        self.initialize()
+        signal = self.analyze_commit_and_plan_step()
+        if signal == HasNoCommit:
+            self.has_no_commit()
+            return
+        self.process_steps()
+        self.generate_final_post()
+        self.push_to_github()
+
     def initialize(self):
         """Initialize state; all paths default to workspace/ under the project root."""
         if WORKSPACE_DIR.exists():
@@ -239,7 +249,6 @@ class Main2MainFlow(Flow[Main2MainState]):
         merge_base = run_git(self.state.vllm_ascend_path, "merge-base", "HEAD", "upstream/main").strip()
         self.state.original_ascend_ref = merge_base or run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
 
-    @router(initialize)
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
         vllm_path = Path(self.state.vllm_path)
         vllm_ascend_path = Path(self.state.vllm_ascend_path)
@@ -292,11 +301,9 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         return HasCommit
 
-    @listen(HasNoCommit)
     def has_no_commit(self):
         ts_print(f"[done] 仓库已同步，无需适配，流程结束。")
 
-    @listen(HasCommit)
     def process_steps(self):
         ascend_path = self.state.vllm_ascend_path
         while self.state.current_step < self.state.total_steps:
@@ -652,7 +659,6 @@ class Main2MainFlow(Flow[Main2MainState]):
 
         return test_passed
 
-    @listen(process_steps)
     def generate_final_post(self):
         # The last successful step's patch is cumulative: git diff HEAD after all
         # successful adaptations. Prefer its cumulative summary, and fall back to
@@ -882,7 +888,6 @@ class Main2MainFlow(Flow[Main2MainState]):
             run_git(ascend_path, "checkout", "-f", self.state.original_ascend_ref)
             ts_print(f"[generate_final_post] Restored vllm-ascend to '{self.state.original_ascend_ref}'.")
 
-    @listen(generate_final_post)
     def push_to_github(self):
         if os.getenv("PUSH_TO_GITHUB", "false").lower() != "true":
             ts_print("[push] PUSH_TO_GITHUB is not true, skipping.")

@@ -26,18 +26,11 @@ def kickoff():
         inputs["target_commit"] = args.target_commit
 
     flow = Main2MainFlow()
-    flow.kickoff(inputs=inputs if inputs else None)
+    flow.run(inputs if inputs else None)
 
 
 def plot():
-    import shutil
-    output_dir = Path(__file__).resolve().parent.parent / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    flow = Main2MainFlow()
-    tmp_html = Path(flow.plot(filename="flow.html", show=False))
-    for f in tmp_html.parent.iterdir():
-        shutil.copy2(f, output_dir / f.name)
-    print(f"Flow plot saved to: {output_dir / tmp_html.name}")
+    print("Flow visualization has been removed along with crewai dependency.")
 
 
 def run_with_trigger():
@@ -51,7 +44,7 @@ def run_with_trigger():
 
     flow = Main2MainFlow()
     try:
-        result = flow.kickoff({"crewai_trigger_payload": trigger_payload})
-        return result
+        flow.run({"crewai_trigger_payload": trigger_payload})
+        return flow.state
     except Exception as e:
         raise Exception(f"An error occurred while running the flow with trigger: {e}")
