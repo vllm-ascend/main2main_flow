@@ -274,6 +274,15 @@ def _is_real_error(line: str) -> bool:
         return False
     if "To bypass pre-commit hooks" in s:
         return False
+    # gitleaks / shell permission issues are infrastructure, not adaptation
+    if "is not executable" in s:
+        return False
+    if "gitleaks" in s.lower():
+        return False
+    # Only report lines that look like actual lint violations:
+    # file.py:LINE:COL: CODE or file.py:LINE: CODE
+    if not re.match(r'^[\w/.-]+\.py:\d+:', s):
+        return False
     return True
 
 

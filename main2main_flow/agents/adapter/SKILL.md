@@ -76,12 +76,15 @@ The step_target.patch is cumulative (git diff HEAD).
 1. Read the upstream patch and changed file list from `{patch_path}` and `{changed_files_path}`
 2. Use targeted search to find the impacted vllm-ascend code (see Code Exploration)
 3. Apply minimal changes — do not refactor unrelated code
-4. **Run ``bash format.sh`` and fix all errors BEFORE marking complete**:
-   Use the Bash tool to run `bash format.sh` in `{ascend_path}`. Read the
-   output. If there are FAILED hooks or ruff errors, fix them and re-run.
-   Repeat until format.sh exits clean. Do NOT proceed to the checklist
-   until this is done. This is NOT optional — format failures here will cause
-   a pre_ci failure and force a retry.
+4. **Run format.sh and mypy, fix all errors BEFORE marking complete**:
+   - `bash format.sh` in `{ascend_path}`. Fix `file.py:LINE: CODE` violations
+     (E501, F821, F841). Re-run until clean.
+   - **Ignore env noise**: gitleaks "is not executable", shellcheck missing,
+     "Exec format error" are infrastructure issues. Do NOT modify
+     `.github/workflows/scripts/` to fix these.
+   - `tools/mypy.sh 1 3.12` in `{ascend_path}`. Fix `file.py:LINE: error:`
+     on lines you added/changed. Re-run until clean.
+   - NOT optional - failures here cause pre_ci retry.
 
 **Guard decision tree**:
 
