@@ -249,6 +249,12 @@ class Main2MainFlow:
         merge_base = run_git(self.state.vllm_ascend_path, "merge-base", "HEAD", "upstream/main").strip()
         self.state.original_ascend_ref = merge_base or run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
 
+        # Fix pre-commit hook permissions: git doesn't track +x, so gitleaks.sh
+        # is not executable after checkout, causing spurious format.sh failures.
+        gitleaks_script = Path(self.state.vllm_ascend_path) / ".github/workflows/scripts/gitleaks.sh"
+        if gitleaks_script.exists():
+            gitleaks_script.chmod(0o755)
+
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
         vllm_path = Path(self.state.vllm_path)
         vllm_ascend_path = Path(self.state.vllm_ascend_path)
