@@ -95,6 +95,27 @@ grep -rn "class.*BaseClassName" vllm_ascend/
 Add the new attribute to every subclass. Even if it's just a default value,
 without it the subclass will `AttributeError` at runtime.
 
+## Return type mismatch across version branches
+
+**Symptom**: `AttributeError: 'list' object has no attribute 'ref_cnt'` at
+runtime on the release version. Main passes. No mypy error.
+
+**Root cause**: Upstream changed a method's return type (e.g.
+`tuple[list, ...]` → `tuple[tuple[list, ...], int]`). Adapter updated the
+type annotation and the main-branch return statements, but a version-guarded
+`return old_list` inside the `if vllm_version_is` branch still returns the
+old type. mypy doesn't catch this because the annotation says the new type.
+
+**Prevention**: After updating any method's return type, grep ALL `return`
+statements inside that method:
+
+```bash
+grep -n "return " vllm_ascend/path/to/file.py
+```
+
+Verify every branch returns the new type. Don't rely on the type annotation
+alone — it can be wrong without mypy noticing.
+
 ## Missing override in sibling class after method signature change
 
 **Symptom**: `TypeError: missing required positional argument` on a class

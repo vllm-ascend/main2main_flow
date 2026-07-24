@@ -119,6 +119,10 @@ Does this code path need to support BOTH the release version AND upstream main?
 14. No dead code, commented-out blocks, or stale `# type: ignore` left behind.
 15. See `reference/common-pitfalls.md` §"Additional QA-level checks" for
     remaining items (registries, Triton params, getattr, path resolution, etc.).
+16. **Return type change → verify ALL return statements**: when upstream
+    changes what a method returns (e.g. `list` → `tuple[list, int]`), grep
+    every `return` in that method.  A single leftover `return old_list`
+    causes `AttributeError` at runtime — pre_ci and mypy cannot catch it.
 
 **Format rules — apply WHILE editing, not after:**
 
