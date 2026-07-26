@@ -695,27 +695,30 @@ class Main2MainFlow:
         # a single commit.  process_steps commits after each successful step
         # (so later step failures can revert without losing progress), but
         # those intermediate commits should not appear in the PR.
-        if self.state.final_status == UpgradeCompleted:
-            ascend_path = Path(self.state.vllm_ascend_path)
-            step_count = subprocess.run(
-                ["git", "rev-list", "--count",
-                 f"{self.state.original_ascend_ref}..HEAD"],
-                cwd=str(ascend_path), capture_output=True, text=True,
+        # Always squash regardless of final_status — step commits survive
+        # even when e2e tests fail.
+        ascend_path = Path(self.state.vllm_ascend_path)
+        step_count = subprocess.run(
+            ["git", "rev-list", "--count",
+             f"{self.state.original_ascend_ref}..HEAD"],
+            cwd=str(ascend_path), capture_output=True, text=True,
+        )
+        if (step_count.returncode == 0
+                and int(step_count.stdout.strip() or "0") > 1):
+            run_git(ascend_path, "reset", "--soft",
+                    self.state.original_ascend_ref)
+            run_git(ascend_path, "add", "-A")
+            target = self.state.target_commit or self.state.cur_vllm_commit
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            commit_msg = (
+                f"main2main: sync vllm upstream "
+                f"({self.state.base_commit[:8]}...{target[:8]}) [{ts}]"
             )
-            if (step_count.returncode == 0
-                    and int(step_count.stdout.strip() or "0") > 1):
-                run_git(ascend_path, "reset", "--soft",
-                        self.state.original_ascend_ref)
-                run_git(ascend_path, "add", "-A")
-                target = self.state.target_commit or self.state.cur_vllm_commit
-                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-                commit_msg = (
-                    f"main2main: sync vllm upstream "
-                    f"({self.state.base_commit[:8]}...{target[:8]}) [{ts}]"
-                )
-                run_git(ascend_path, "commit", "-s", "-m", commit_msg)
-                ts_print(f"[generate_final_post] Squashed step commits into: "
-                         f"{commit_msg}")
+            run_git(ascend_path, "commit", "-s", "-m", commit_msg)
+            ts_print(f"[generate_final_post] Squashed step commits into: "
+                     f"{commit_msg}")
+        else:
+            ts_print("[generate_final_post] No step commits to squash (branch at baseline)")
 
         last_step = self.state.steps[self.state.current_step - 1]
         step_dir = WORKSPACE_DIR / STEPS_DIR / last_step["id"]
