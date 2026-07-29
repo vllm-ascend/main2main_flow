@@ -280,4 +280,5 @@ These are caught by the QA reviewer but should be applied proactively:
 4. Map to vllm-ascend code that depends on it
 5. Decide if `vllm_version_is` guard is needed
 6. Open pre_ci_check.json → read violations → fix each file:line:col:CODE
-7. Run `bash format.sh` → repeat until clean
+   (do NOT run `bash format.sh` yourself — pre_ci runs it mechanically;
+   if it still fails, the new `pre_ci_check.json` will be fed back next round)

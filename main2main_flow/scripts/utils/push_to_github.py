@@ -35,10 +35,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import run_git, ts_print
+from main2main_flow.scripts.utils.utils import run_format_sh, run_git, ts_print
 
 DEFAULT_WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
-_PR_URL_FILE = "/tmp/main2main/pr_url.txt"
 
 
 def _run_format(repo: Path) -> None:
@@ -51,11 +50,7 @@ def _run_format(repo: Path) -> None:
         ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
     ).stdout.strip()
     ts_print("[push] === format.sh output begin ===")
-    env = os.environ.copy()
-    env["PRE_COMMIT_HOME"] = "/root/.cache/main2main-pre-commit"
-    r = subprocess.run(
-        ["bash", str(fmt_script)], cwd=str(repo), capture_output=True, text=True, env=env,
-    )
+    r = run_format_sh(repo)
     ts_print((r.stdout + "\n" + r.stderr).strip())
     ts_print(f"[push] === format.sh output end (exit={r.returncode}) ===")
     after = subprocess.run(
@@ -221,6 +216,34 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
 
 
 def _git_push(ascend_path: Path, branch: str) -> None:
+    # Final safety net: guarantee exactly 1 commit before push.
+    # If generate_final_post squash failed for any reason, force-squash here.
+    try:
+        count = subprocess.run(
+            ["git", "rev-list", "--count", "origin/main..HEAD"],
+            cwd=str(ascend_path), capture_output=True, text=True,
+        )
+        if count.returncode == 0 and int(count.stdout.strip() or "0") > 1:
+            # Find the merge-base with origin/main or use the first commit's parent
+            base = subprocess.run(
+                ["git", "merge-base", "HEAD", "origin/main"],
+                cwd=str(ascend_path), capture_output=True, text=True,
+            ).stdout.strip()
+            if not base:
+                base = subprocess.run(
+                    ["git", "rev-list", "--max-parents=0", "HEAD"],
+                    cwd=str(ascend_path), capture_output=True, text=True,
+                ).stdout.strip()
+            if base:
+                subprocess.run(["git", "reset", "--soft", base],
+                               cwd=str(ascend_path), capture_output=True)
+                subprocess.run(["git", "add", "-A"], cwd=str(ascend_path), capture_output=True)
+                subprocess.run(
+                    ["git", "commit", "-m", f"main2main: sync vllm upstream [{branch}]"],
+                    cwd=str(ascend_path), capture_output=True)
+                ts_print(f"[push] Force-squashed {count.stdout.strip()} commits into 1")
+    except (ValueError, subprocess.CalledProcessError):
+        pass
     _push_via_proxy(ascend_path, os.environ.get("HEAD_FORK", ""),
                     branch, "--force-with-lease")
 
@@ -398,10 +421,11 @@ def push_and_create_pr(
         keep_branch = os.getenv("MAIN2MAIN_KEEP_BRANCH", "false").lower() == "true"
         if has_patch:
             if keep_branch and not is_detached:
-                # Reuse existing branch, but still apply the cumulative patch
-                # and commit — otherwise the push would send an empty branch.
+                # Reuse existing branch.  generate_final_post already squashed
+                # and committed — just push.  Only add a new commit if there are
+                # uncommitted changes (e.g. format.sh modified files).
                 branch = current_branch
-                ts_print(f"[push] Reusing branch '{branch}', committing working tree changes")
+                ts_print(f"[push] Reusing branch '{branch}'")
                 _run_format(ascend_path)
                 run_git(ascend_path, "add", "-A")
                 diff_cached = subprocess.run(
@@ -409,12 +433,12 @@ def push_and_create_pr(
                     capture_output=True, text=True,
                 ).stdout.strip()
                 if diff_cached:
-                    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-                    commit_msg = _build_commit_msg(old_commit, new_commit, ts)
-                    run_git(ascend_path, "commit", "-s", "-m", commit_msg)
-                    ts_print(f"[push] Committed as '{commit_msg}'.")
+                    # Squash this into the existing commit
+                    subprocess.run(["git", "commit", "--amend", "--no-edit"],
+                                   cwd=str(ascend_path), capture_output=True)
+                    ts_print("[push] Amended squash commit with format fixes.")
                 else:
-                    ts_print("[push] No uncommitted changes (already committed by process_steps).")
+                    ts_print("[push] Working tree clean, push ready.")
             else:
                 # Create fresh branch and apply patch
                 ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -535,9 +559,10 @@ def push_and_create_pr(
             _add_labels(github_repo, pr_number, labels)
 
         # ---- persist PR URL ----
+        pr_url_file = "/tmp/main2main/pr_url.txt"
         Path("/tmp/main2main").mkdir(parents=True, exist_ok=True)
-        Path(_PR_URL_FILE).write_text(pr_url + "\n")
-        ts_print(f"[push] PR URL written to {_PR_URL_FILE}")
+        Path(pr_url_file).write_text(pr_url + "\n")
+        ts_print(f"[push] PR URL written to {pr_url_file}")
 
         # ---- close old main2main PRs ----
         _close_old_main2main_prs(github_repo, pr_number)

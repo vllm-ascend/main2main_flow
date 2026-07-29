@@ -1,6 +1,6 @@
 # AGENTS.md
 
-CrewAI Flow that automates vllm-ascend's main2main upgrade against upstream vLLM. Drives an external `opencode run` subprocess as the AI adapter; everything else is deterministic Python.
+Main2Main flow that automates vllm-ascend's main2main upgrade against upstream vLLM. Drives an external `opencode run` subprocess as the AI adapter; everything else is deterministic Python.
 
 ## Run
 

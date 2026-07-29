@@ -76,15 +76,13 @@ The step_target.patch is cumulative (git diff HEAD).
 1. Read the upstream patch and changed file list from `{patch_path}` and `{changed_files_path}`
 2. Use targeted search to find the impacted vllm-ascend code (see Code Exploration)
 3. Apply minimal changes — do not refactor unrelated code
-4. **Run format.sh and mypy, fix all errors BEFORE marking complete**:
-   - `bash format.sh` in `{ascend_path}`. Fix `file.py:LINE: CODE` violations
-     (E501, F821, F841). Re-run until clean.
-   - **Ignore env noise**: gitleaks "is not executable", shellcheck missing,
-     "Exec format error" are infrastructure issues. Do NOT modify
-     `.github/workflows/scripts/` to fix these.
-   - `tools/mypy.sh 1 3.12` in `{ascend_path}`. Fix `file.py:LINE: error:`
-     on lines you added/changed. Re-run until clean.
-   - NOT optional - failures here cause pre_ci retry.
+4. **Apply the Format rules and mypy prevention rules below WHILE editing**
+   (do NOT run `bash format.sh` or `tools/mypy.sh` yourself — pre_ci runs
+   them mechanically after you finish; if they fail, the exact
+   `file:LINE:CODE` is fed back via `pre_ci_check.json` in fix mode).
+   - **Ignore env noise in pre_ci output**: gitleaks "is not executable",
+     shellcheck missing, "Exec format error" are infrastructure issues.
+     Do NOT modify `.github/workflows/scripts/` to fix these.
 
 **Guard decision tree**:
 
@@ -101,28 +99,27 @@ Does this code path need to support BOTH the release version AND upstream main?
 
 **BEFORE marking the adaptation complete, verify ALL of these:**
 
-1. (Already handled in step 4 above — format.sh was run and passes clean)
-2. Every `vllm_version_is` guard: NEW upstream-main code is in `else`/`not`
+1. Every `vllm_version_is` guard: NEW upstream-main code is in `else`/`not`
    branch, OLD release code is in `if` branch.
-3. Every guarded `from vllm.X import Y` line has `# type: ignore[import-not-found]`
-4. Imports that don't exist on the OLD vllm version: the import of the new
+2. Every guarded `from vllm.X import Y` line has `# type: ignore[import-not-found]`
+3. Imports that don't exist on the OLD vllm version: the import of the new
    class MUST be inside `else` (not guarded with `# type: ignore`).
-5. No circular imports
-6. Every call site passes correct number, type, AND ORDER of arguments on
+4. No circular imports
+5. Every call site passes correct number, type, AND ORDER of arguments on
    BOTH version branches. Use keyword arguments for new parameters.
-7. Override methods match the upstream signature.
-8. No variable aliases as base classes — use `TypeAlias` or direct class name.
-9. When fixing a version-branch bug, grep for the same pattern in ALL sibling
+6. Override methods match the upstream signature.
+7. No variable aliases as base classes — use `TypeAlias` or direct class name.
+8. When fixing a version-branch bug, grep for the same pattern in ALL sibling
    functions and fix them all in the same commit.
-10. When a method signature changed, grep for ALL `def <method_name>(` in the
-    codebase — every override must be updated.
-11. Every `next(gen, default)` has a default value — no bare `next(...)`.
-12. `super().__init__()` called in every subclass `__init__`.
-13. No exact version matching (`== "X.Y.Z"`).
-14. No dead code, commented-out blocks, or stale `# type: ignore` left behind.
-15. See `reference/common-pitfalls.md` §"Additional QA-level checks" for
+9. When a method signature changed, grep for ALL `def <method_name>(` in the
+   codebase — every override must be updated.
+10. Every `next(gen, default)` has a default value — no bare `next(...)`.
+11. `super().__init__()` called in every subclass `__init__`.
+12. No exact version matching (`== "X.Y.Z"`).
+13. No dead code, commented-out blocks, or stale `# type: ignore` left behind.
+14. See `reference/common-pitfalls.md` §"Additional QA-level checks" for
     remaining items (registries, Triton params, getattr, path resolution, etc.).
-16. **Return type change → verify ALL return statements**: when upstream
+15. **Return type change → verify ALL return statements**: when upstream
     changes what a method returns (e.g. `list` → `tuple[list, int]`), grep
     every `return` in that method.  A single leftover `return old_list`
     causes `AttributeError` at runtime — pre_ci and mypy cannot catch it.
@@ -146,12 +143,10 @@ scratch. Make minimal targeted fixes to the specific errors reported.
 
 **Pre-CI failures**: open `pre_ci_check.json` → each failed check has
 `violations` with exact file:line:col:CODE. Fix those specific lines.
-After fixing, run `bash format.sh` to verify.
 
 **E2E test failures**: open `round-N-result.json` → check `code_bugs_count` > 0
 → open failed tests from `suite_results[test_name]`. Read both `-summary.json`
-(structured code_bugs/env_flakes) and `.log` (raw traceback). After fixing,
-run `bash format.sh` to verify.
+(structured code_bugs/env_flakes) and `.log` (raw traceback).
 
 ## Output
 

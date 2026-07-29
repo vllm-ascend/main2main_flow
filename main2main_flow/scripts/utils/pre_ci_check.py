@@ -14,13 +14,12 @@ Design note:
 """
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import run_git, ts_print
+from main2main_flow.scripts.utils.utils import run_format_sh, run_git, ts_print
 
 _TEMP_PATTERNS = [
     ".log",
@@ -36,8 +35,20 @@ _TEMP_PATTERNS = [
 _VERSION_IS_RE = re.compile(r'vllm_version_is\(\s*["\']([^"\']+)["\']\s*\)')
 
 
-def _get_added_lines(repo: Path) -> list[dict[str, str]]:
-    diff_output = run_git(repo, "diff", "HEAD", "-U0")
+def _get_added_lines(repo: Path, base_ref: str | None = None) -> list[dict[str, str]]:
+    """Get lines added in the working tree vs *base_ref*.
+
+    Defaults to ``upstream/main`` so that incremental mode (rebase from
+    baseline) catches all accumulated diffs, not just the current step's.
+    Falls back to ``HEAD`` if upstream/main is unavailable.
+    """
+    if base_ref is None:
+        try:
+            run_git(repo, "merge-base", "HEAD", "upstream/main")
+            base_ref = "upstream/main"
+        except subprocess.CalledProcessError:
+            base_ref = "HEAD"
+    diff_output = run_git(repo, "diff", base_ref, "-U0")
     added: list[dict[str, str]] = []
     current_file = None
     current_line = 0
@@ -115,63 +126,123 @@ def _check_temp_files(repo: Path) -> dict:
     return {"violations": violations}
 
 
-def _check_mypy(repo: Path) -> dict:
-    """Run mypy on changed Python files, only flagging errors on ADDED lines.
+def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
+                base_commit: str = "") -> dict:
+    """Run mypy with the same core command and environment as vllm-ascend's CI.
 
-    Pre-existing mypy issues in the codebase are not the AI's fault —
-    only errors on lines introduced by the current adaptation count.
+    Mirrors the CI pre-commit job's "Run mypy" step: for each python version
+    in ``3.10/3.11/3.12`` (the matrix CI runs), runs::
+
+        PYTHONPATH=<vllm_path> mypy --follow-imports skip --check-untyped-defs \
+            --python-version <X.Y> --exclude _cann_ops_custom/ \
+            vllm_ascend examples tests
+
+    Two deviations from CI's ``tools/mypy.sh``:
+
+    1. ``PYTHONPATH=<vllm_path>`` — CI checks out vllm source to
+       ``./vllm-empty`` and prepends it to PYTHONPATH so mypy resolves
+       ``from vllm...import`` against the verified vllm commit (not an
+       installed package).  We replicate this: main2main flow has vllm
+       checked out at the target commit, so pointing PYTHONPATH there makes
+       mypy see the same vllm version CI uses.  Without this, mypy falls
+       back to the installed vllm package (stale), reporting hundreds of
+       spurious [arg-type]/[call-arg] errors in tests/ that drown out real
+       adaptation errors.
+
+    2. ``--exclude _cann_ops_custom/`` — CI's lint image has no
+       ``_cann_ops_custom/`` dir (build_aclnn never ran), so it never
+       reports vendor noise.  On the main2main runner vllm-ascend is
+       installed with CANN ops built, so the dir exists and mypy would
+       otherwise report 3000+ spurious errors in vendor files the adapter
+       never touches.
     """
-    py_files = _changed_py_files(repo)
-    if not py_files:
-        return {"violations": [], "detail": "no changed .py files"}
     mypy = shutil.which("mypy")
     if not mypy:
         return {"violations": [], "detail": "mypy not installed", "skipped": True}
 
-    # Collect added line numbers per file from git diff
-    added_lines = _get_added_lines(repo)
-    added_locations: dict[str, set[int]] = {}
-    for entry in added_lines:
-        added_locations.setdefault(entry["file"], set()).add(int(entry["line_no"]))
+    import os as _os
+    env = _os.environ.copy()
+    if vllm_path:
+        vllm_abs = str(Path(vllm_path).resolve())
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{vllm_abs}:{existing}" if existing else vllm_abs
+        ts_print(f"[pre_ci] mypy: PYTHONPATH includes vllm source: {vllm_abs}")
 
-    r = subprocess.run(
-        [mypy, "--follow-imports", "skip",
-         "--check-untyped-defs"] + py_files,
-        cwd=str(repo), capture_output=True, text=True,
-    )
-    if r.returncode == 0:
-        ts_print("[pre_ci] mypy: OK")
-        return {"violations": [], "detail": "mypy clean"}
+    # Temporarily checkout vllm to base_commit (verified) so mypy sees the
+    # same vllm API CI uses.  adapter has finished by the time pre_ci runs,
+    # so switching the vllm checkout here doesn't interfere with adaptation.
+    original_vllm_ref = ""
+    switched = False
+    if vllm_path and base_commit:
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(vllm_path), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True,
+            )
+            original_vllm_ref = r.stdout.strip()
+            if original_vllm_ref != base_commit:
+                ts_print(f"[pre_ci] mypy: vllm {original_vllm_ref[:8]} -> base {base_commit[:8]} "
+                         f"(verified, matches CI)")
+                subprocess.run(
+                    ["git", "-C", str(vllm_path), "checkout", base_commit],
+                    capture_output=True, text=True, check=True,
+                )
+                switched = True
+        except subprocess.CalledProcessError as e:
+            ts_print(f"[pre_ci] mypy: could not checkout vllm to base_commit "
+                     f"({e.stderr.strip()[:200]}), using current ref")
+
+    try:
+        all_violations: list[str] = []
+        all_output: list[str] = []
+        any_failed = False
+        for py_ver in ("3.10", "3.11", "3.12"):
+            ts_print(f"[pre_ci] === mypy --python-version {py_ver} output begin ===")
+            r = subprocess.run(
+                [mypy, "--follow-imports", "skip", "--check-untyped-defs",
+                 "--python-version", py_ver,
+                 "--exclude", "_cann_ops_custom/",
+                 "vllm_ascend", "examples", "tests"],
+                cwd=str(repo), capture_output=True, text=True, env=env,
+            )
+            output = r.stdout + "\n" + r.stderr
+            ts_print(output.strip())
+            ts_print(f"[pre_ci] === mypy output end (py={py_ver}, exit={r.returncode}) ===")
+            all_output.append(f"--- python {py_ver} (exit={r.returncode}) ---\n{output}")
+            if r.returncode != 0:
+                any_failed = True
+    finally:
+        if switched and original_vllm_ref:
+            subprocess.run(
+                ["git", "-C", str(vllm_path), "checkout", original_vllm_ref],
+                capture_output=True, text=True,
+            )
+            ts_print(f"[pre_ci] mypy: restored vllm to {original_vllm_ref[:8]}")
+
+    if not any_failed:
+        ts_print("[pre_ci] mypy: OK (all 3 python versions clean)")
+        return {"violations": [], "detail": "mypy clean (3.10/3.11/3.12)"}
 
     # Parse mypy output: "file.py:LINE:COL: error:" or "file.py:LINE: error:"
     _MYPY_ERR_RE = re.compile(r"^(.+\.py):(\d+):(?:\d+:)?\s*error:")
-    violations: list[str] = []
-    for line in (r.stdout + "\n" + r.stderr).splitlines():
-        m = _MYPY_ERR_RE.search(line.strip())
-        if not m:
-            continue
-        fname = m.group(1)
-        lineno = int(m.group(2))
-        # Only flag if the error is on a line ADDED by this adaptation
-        if lineno in added_locations.get(fname, set()):
-            violations.append(line.strip())
+    seen: set[str] = set()
+    for line in "\n".join(all_output).splitlines():
+        stripped = line.strip()
+        if _MYPY_ERR_RE.search(stripped) and stripped not in seen:
+            seen.add(stripped)
+            all_violations.append(stripped)
 
-    if violations:
-        ts_print(f"[pre_ci] mypy: {len(violations)} issue(s) on added lines")
-        return {"violations": violations,
-                "detail": f"{len(violations)} mypy issue(s) on new code"}
-    ts_print("[pre_ci] mypy: OK (pre-existing issues on unchanged lines ignored)")
-    return {"violations": [], "detail": "mypy clean (new code only)"}
-
-
-def _changed_py_files(repo: Path) -> list[str]:
-    """Return list of changed .py files in the working tree (vs HEAD)."""
-    r = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD"], cwd=str(repo),
-        capture_output=True, text=True,
-    )
-    return [f for f in r.stdout.strip().splitlines()
-            if f.endswith(".py") and Path(repo, f).exists()]
+    if all_violations:
+        ts_print(f"[pre_ci] mypy: {len(all_violations)} unique issue(s):")
+        for v in all_violations[:20]:
+            ts_print(f"  {v}")
+        if len(all_violations) > 20:
+            ts_print(f"  ... and {len(all_violations) - 20} more (see pre_ci_check.json)")
+        return {"violations": all_violations,
+                "detail": f"{len(all_violations)} mypy issue(s) (3.10/3.11/3.12)"}
+    ts_print("[pre_ci] mypy: FAILED but no parseable error lines")
+    return {"violations": ["\n".join(all_output)[-2000:]],
+            "detail": "mypy failed but no parseable errors"}
 
 
 def _check_format(repo: Path) -> dict:
@@ -193,14 +264,8 @@ def _check_format(repo: Path) -> dict:
         ts_print("[pre_ci] format: SKIPPED — pre-commit not installed, all lint checks bypassed!")
         return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
 
-    env = os.environ.copy()
-    env["PRE_COMMIT_HOME"] = "/root/.cache/main2main-pre-commit"
-
-    ts_print("[pre_ci] === format.sh output begin ===")
-    r = subprocess.run(
-        ["bash", str(fmt_script)], cwd=str(repo),
-        capture_output=True, text=True, env=env,
-    )
+    ts_print("\n[pre_ci] === format.sh output begin ===")
+    r = run_format_sh(repo)
     output = (r.stdout + "\n" + r.stderr)
     ts_print(output.strip())
     ts_print(f"[pre_ci] === format.sh output end (exit={r.returncode}) ===")
@@ -280,8 +345,8 @@ def _is_real_error(line: str) -> bool:
     if "gitleaks" in s.lower():
         return False
     # Only report lines that look like actual lint violations:
-    # file.py:LINE:COL: CODE or file.py:LINE: CODE
-    if not re.match(r'^[\w/.-]+\.py:\d+:', s):
+    # file.EXT:LINE:COL: CODE or file.EXT:LINE: CODE
+    if not re.match(r'^[\w/.-]+\.\w+:\d+:', s):
         return False
     return True
 
@@ -363,12 +428,15 @@ def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
 
 
 def run_check(ascend_path: str | Path, release_tag: str,
-              vllm_path: str | Path | None = None) -> dict:
+              vllm_path: str | Path | None = None,
+              base_commit: str = "") -> dict:
     """Run pre-CI checks on the vllm-ascend working tree.
 
     Returns a dict with 'all_passed' (bool) and 'checks' (list of check results).
     If `vllm_path` is provided, also verifies that any new ``from vllm.X``
     imports in changed Python files reference modules that actually exist.
+    ``base_commit`` (the verified vllm commit) is passed to mypy so it can
+    check out vllm to that ref, matching CI's lint environment.
     """
     repo = Path(ascend_path)
 
@@ -378,7 +446,7 @@ def run_check(ascend_path: str | Path, release_tag: str,
         temps = _check_temp_files(repo)
         fmt = _check_format(repo)
         imports = _check_broken_imports(repo, vllm_path) if vllm_path else {"violations": []}
-        mypy = _check_mypy(repo)
+        mypy = _check_mypy(repo, vllm_path, base_commit)
     except subprocess.CalledProcessError as exc:
         return {
             "all_passed": False,

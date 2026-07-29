@@ -472,21 +472,6 @@ def _classify(exit_code: int, summary: dict | None, error: str | None) -> str:
     return "failed"
 
 
-def _discover_test_files(ascend_path: Path, paths: list[str]) -> list[str]:
-    """Expand directories into individual test_*.py files."""
-    result: list[str] = []
-    for p in paths:
-        full = (ascend_path / p).resolve() if not os.path.isabs(p) else Path(p).resolve()
-        if full.is_file():
-            result.append(str(full.relative_to(ascend_path)))
-        elif full.is_dir():
-            for tf in sorted(full.rglob("test_*.py")):
-                result.append(str(tf.relative_to(ascend_path)))
-        else:
-            ts_print(f"  [warn] Test path not found: {p}", flush=True)
-    return result
-
-
 def _select_tests_by_files(ascend_path: Path, changed_files: list[str]) -> list[str] | None:
     """Call vllm-ascend's select_tests.py to resolve changed files → test files.
 

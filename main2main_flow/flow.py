@@ -97,6 +97,10 @@ class Main2MainState(BaseModel):
     # Persistent opencode session ID for full conversational context
     session_id: str = ""
 
+    # Branch baseline ref (saved at init, before any step commits).
+    # Used as the squash baseline — always available, no remote ref needed.
+    branch_base_ref: str = ""
+
     # Persistent QA session — reused across retries so the reviewer doesn't
     # re-read the entire codebase from scratch on every attempt.
     qa_session_id: str = ""
@@ -105,107 +109,97 @@ class Main2MainState(BaseModel):
     last_verified_commit: str = ""
 
 
-def _run_adapter_qa(
-    ascend_path: str, vllm_path: str, step_id: str,
-    step_dir: str, release_tag: str,
-    upstream_patch_path: str = "",
-    qa_session_id: str = "",
-) -> tuple[list[str], str]:
-    """adapter-qa: independent review of the current diff.
-
-    Fresh opencode session (no --session reuse) — the reviewer sees only the
-    diff and the review-lessons checklist, without the generator's context.
-    Generator/critic separation.
-    """
-    diff = subprocess.run(
-        ["git", "diff", "HEAD"], cwd=ascend_path,
-        capture_output=True, text=True,
-    ).stdout.strip()
-    if not diff:
-        return [], qa_session_id  # no changes to review
-
-    lessons_path = Path(__file__).parent / "agents" / "adapter-qa" / "reference" / "review-lessons.md"
-    if not lessons_path.exists():
-        return [], qa_session_id
-    # Load adapter-qa prompt template
-    qa_template_path = Path(__file__).parent / "agents" / "adapter-qa" / "SKILL.md"
-    qa_template = ""
-    if qa_template_path.exists():
-        qa_template = qa_template_path.read_text(encoding="utf-8")
-
-    # Extract §9 checklist from review-lessons.md
-    lessons = lessons_path.read_text(encoding="utf-8")
-    idx = lessons.find("## 9.")
-    checklist = lessons[idx:] if idx != -1 else lessons
-
-    # Truncate diff if it's huge
-    diff_limit = 8000
-    diff_snippet = diff if len(diff) <= diff_limit else diff[:diff_limit] + "\n... [truncated]"
-
-    review_path = str(Path(step_dir) / "review.json")
-    if qa_template:
-        upstream_patch = ""
-        if upstream_patch_path:
-            pp = Path(upstream_patch_path)
-            if pp.exists():
-                upstream_patch = pp.read_text(encoding="utf-8")[:4000]
-
-        prompt = qa_template.format(
-            step_id=step_id,
-            release_tag=release_tag,
-            vllm_path=vllm_path,
-            ascend_path=ascend_path,
-            patch_path=upstream_patch,
-            review_path=review_path,
-            diff_content=diff_snippet,
-            review_checklist=checklist,
-        )
-    else:
-        # Fallback inline prompt
-        prompt = f"""You are a code reviewer. Review the following adaptation diff for policy violations.
-Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
-DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
-
-    model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
-
-    ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
-    qa_log = Path(step_dir) / "opencode_qa.log"
-    qa_raw = Path(step_dir) / "opencode_qa_raw.jsonl"
-    qa_stderr = Path(step_dir) / "opencode_qa_stderr.log"
-    output_text, new_session_id = run_opencode_review(
-        prompt, log_path=qa_log, raw_path=qa_raw, stderr_path=qa_stderr,
-        session_id=qa_session_id, model=model,
-    )
-    if not output_text.strip():
-        ts_print(f"[adapter-qa] {step_id}: opencode produced no output")
-        return ["critic: opencode produced no output"], new_session_id
-
-    # Read the verdict from review.json (written by the model per SKILL.md to the step dir)
-    import json as _json
-    review_json = Path(review_path)
-    if review_json.exists():
-        try:
-            review = _json.loads(review_json.read_text(encoding="utf-8"))
-            verdict = review.get("verdict", "")
-            issues = review.get("issues", [])
-            if verdict == "pass":
-                ts_print(f"[adapter-qa] {step_id}: pass")
-                return [], new_session_id
-            ts_print(f"[adapter-qa] {step_id}: fail — {len(issues)} issue(s)")
-            return ([f"{i.get('file', '?')}:{i.get('line', '?')}: {i.get('issue', '?')}" for i in issues],
-                    new_session_id)
-        except (_json.JSONDecodeError, KeyError):
-            ts_print(f"[adapter-qa] {step_id}: fail (review.json unparseable)")
-            return ["critic: review.json could not be parsed"], new_session_id
-
-    ts_print(f"[adapter-qa] {step_id}: fail (no review.json found)")
-    return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
-
-
 class Main2MainFlow:
 
     def __init__(self, **kwargs):
         self.state = Main2MainState(**kwargs)
+
+    def _run_adapter_qa(
+        self, ascend_path: str, vllm_path: str, step_id: str,
+        step_dir: str, release_tag: str,
+        upstream_patch_path: str = "",
+        qa_session_id: str = "",
+    ) -> tuple[list[str], str]:
+        """adapter-qa: independent review of the current diff."""
+        diff = subprocess.run(
+            ["git", "diff", "HEAD"], cwd=ascend_path,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if not diff:
+            return [], qa_session_id
+
+        lessons_path = Path(__file__).parent / "agents" / "adapter-qa" / "reference" / "review-lessons.md"
+        if not lessons_path.exists():
+            return [], qa_session_id
+        qa_template_path = Path(__file__).parent / "agents" / "adapter-qa" / "SKILL.md"
+        qa_template = ""
+        if qa_template_path.exists():
+            qa_template = qa_template_path.read_text(encoding="utf-8")
+
+        lessons = lessons_path.read_text(encoding="utf-8")
+        # Inject the full review-lessons.md: §1-8 give context (classic
+        # examples) for each checklist item in §9, so the reviewer can
+        # pattern-match, not just tick boxes.
+        checklist = lessons
+
+        diff_limit = 8000
+        diff_snippet = diff if len(diff) <= diff_limit else diff[:diff_limit] + "\n... [truncated]"
+
+        review_path = str(Path(step_dir) / "review.json")
+        if qa_template:
+            upstream_patch = ""
+            if upstream_patch_path:
+                pp = Path(upstream_patch_path)
+                if pp.exists():
+                    upstream_patch = pp.read_text(encoding="utf-8")[:4000]
+
+            prompt = qa_template.format(
+                step_id=step_id,
+                release_tag=release_tag,
+                vllm_path=vllm_path,
+                ascend_path=ascend_path,
+                patch_path=upstream_patch,
+                review_path=review_path,
+                diff_content=diff_snippet,
+                review_checklist=checklist,
+            )
+        else:
+            prompt = f"""You are a code reviewer. Review the following adaptation diff for policy violations.
+Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
+DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
+
+        model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
+
+        ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
+        qa_log = Path(step_dir) / "opencode_qa.log"
+        qa_raw = Path(step_dir) / "opencode_qa_raw.jsonl"
+        qa_stderr = Path(step_dir) / "opencode_qa_stderr.log"
+        output_text, new_session_id = run_opencode_review(
+            prompt, log_path=qa_log, raw_path=qa_raw, stderr_path=qa_stderr,
+            session_id=qa_session_id, model=model,
+        )
+        if not output_text.strip():
+            ts_print(f"[adapter-qa] {step_id}: opencode produced no output")
+            return ["critic: opencode produced no output"], new_session_id
+
+        review_json = Path(review_path)
+        if review_json.exists():
+            try:
+                review = json.loads(review_json.read_text(encoding="utf-8"))
+                verdict = review.get("verdict", "")
+                issues = review.get("issues", [])
+                if verdict == "pass":
+                    ts_print(f"[adapter-qa] {step_id}: pass")
+                    return [], new_session_id
+                ts_print(f"[adapter-qa] {step_id}: fail — {len(issues)} issue(s)")
+                return ([f"{i.get('file', '?')}:{i.get('line', '?')}: {i.get('issue', '?')}" for i in issues],
+                        new_session_id)
+            except (json.JSONDecodeError, KeyError):
+                ts_print(f"[adapter-qa] {step_id}: fail (review.json unparseable)")
+                return ["critic: review.json could not be parsed"], new_session_id
+
+        ts_print(f"[adapter-qa] {step_id}: fail (no review.json found)")
+        return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
 
     def run(self, inputs: dict | None = None):
         if inputs:
@@ -246,8 +240,11 @@ class Main2MainFlow:
         # Use merge-base with upstream/main as the squash baseline, not the
         # branch name.  git rev-list --count <branch>..HEAD is always 0
         # because they point to the same ref.
-        merge_base = run_git(self.state.vllm_ascend_path, "merge-base", "HEAD", "upstream/main").strip()
-        self.state.original_ascend_ref = merge_base or run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
+        # Save current HEAD as the branch baseline — no remote ref needed.
+        # Any subsequent step commits will be squashed relative to this ref.
+        ascend_head = run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
+        self.state.branch_base_ref = ascend_head
+        self.state.original_ascend_ref = ascend_head
 
         # Fix pre-commit hook permissions: git doesn't track +x, so gitleaks.sh
         # is not executable after checkout, causing spurious format.sh failures.
@@ -477,7 +474,9 @@ class Main2MainFlow:
                 self.state.session_id = adapt_result.session_id
 
             # pre_ci: mechanical checks (version, format, imports, temp files)
-            check_result = run_check(ascend_path, self.state.release_tag, vllm_path=vllm_path)
+            check_result = run_check(ascend_path, self.state.release_tag,
+                                     vllm_path=vllm_path,
+                                     base_commit=self.state.base_commit)
             pre_ci_passed = check_result["all_passed"]
             if not pre_ci_passed:
                 log_path = step_dir / PRE_CI_CHECK_FILE
@@ -499,7 +498,7 @@ class Main2MainFlow:
             # If pre_ci found mechanical issues the attempt will retry anyway,
             # so reviewing broken code is wasted time.
             if pre_ci_passed:
-                review_issues, new_qa_sid = _run_adapter_qa(
+                review_issues, new_qa_sid = self._run_adapter_qa(
                     ascend_path=ascend_path,
                     vllm_path=vllm_path,
                     step_id=step_id,
@@ -620,11 +619,10 @@ class Main2MainFlow:
         tests_dir = WORKSPACE_DIR / STEPS_DIR / str(step_id) / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
         summary_log = str(tests_dir / f"round-{self.state.retry_count}-result.json")
-        import json as _json
         summary_log_path = Path(summary_log)
         if not summary_log_path.exists():
             summary_log_path.write_text(
-                _json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+                json.dumps(result, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
         ts_print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
@@ -669,34 +667,10 @@ class Main2MainFlow:
         # The last successful step's patch is cumulative: git diff HEAD after all
         # successful adaptations. Prefer its cumulative summary, and fall back to
         # concatenating available step summaries if the last one is missing.
-        if self.state.current_step == 0:
-            ts_print(f"[generate_final_post] fail to upgrade, no step success")
-            (WORKSPACE_DIR / FINAL_SUMMARY_FILE).write_text(
-                "main2main adaptation failed — no steps completed.\n", encoding="utf-8"
-            )
-            (WORKSPACE_DIR / "final_status.json").write_text(
-                json.dumps({"status": "failed", "steps_completed": 0, "steps_total": self.state.total_steps,
-                            "reached_commit": "", "old_commit": self.state.base_commit,
-                            "new_commit": self.state.target_commit or ""}, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8"
-            )
-            # Try to copy the last attempted step's patch so push_to_github
-            # can still create a PR with the best-effort diff.
-            if self.state.total_steps > 0:
-                last_attempted = self.state.steps[-1]
-                last_step_dir = WORKSPACE_DIR / STEPS_DIR / last_attempted["id"]
-                last_patch = last_step_dir / EACH_STEP_TARGET_PATCH_FILE
-                if last_patch.exists():
-                    shutil.copy2(last_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
-                    ts_print("[generate_final_post] Copied last attempted step's patch as final_target.patch")
-            return
-
-        # Squash per-step checkpoint commits into one so the PR always has
-        # a single commit.  process_steps commits after each successful step
-        # (so later step failures can revert without losing progress), but
-        # those intermediate commits should not appear in the PR.
-        # Always squash regardless of final_status — step commits survive
-        # even when e2e tests fail.
+        # Squash per-step checkpoint commits into one so the PR always has a
+        # single commit.  Must run BEFORE the current_step==0 check because
+        # old runs may have left step commits on a reused branch — even if
+        # this run adapted zero steps, the branch may still have stale commits.
         ascend_path = Path(self.state.vllm_ascend_path)
         step_count = subprocess.run(
             ["git", "rev-list", "--count",
@@ -719,6 +693,28 @@ class Main2MainFlow:
                      f"{commit_msg}")
         else:
             ts_print("[generate_final_post] No step commits to squash (branch at baseline)")
+
+        if self.state.current_step == 0:
+            ts_print(f"[generate_final_post] fail to upgrade, no step success")
+            (WORKSPACE_DIR / FINAL_SUMMARY_FILE).write_text(
+                "main2main adaptation failed — no steps completed.\n", encoding="utf-8"
+            )
+            (WORKSPACE_DIR / "final_status.json").write_text(
+                json.dumps({"status": "failed", "steps_completed": 0, "steps_total": self.state.total_steps,
+                            "reached_commit": "", "old_commit": self.state.base_commit,
+                            "new_commit": self.state.target_commit or ""}, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8"
+            )
+            # Try to copy the last attempted step's patch so push_to_github
+            # can still create a PR with the best-effort diff.
+            if self.state.total_steps > 0:
+                last_attempted = self.state.steps[-1]
+                last_step_dir = WORKSPACE_DIR / STEPS_DIR / last_attempted["id"]
+                last_patch = last_step_dir / EACH_STEP_TARGET_PATCH_FILE
+                if last_patch.exists():
+                    shutil.copy2(last_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
+                    ts_print("[generate_final_post] Copied last attempted step's patch as final_target.patch")
+            return
 
         last_step = self.state.steps[self.state.current_step - 1]
         step_dir = WORKSPACE_DIR / STEPS_DIR / last_step["id"]

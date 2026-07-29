@@ -105,12 +105,16 @@ def _load_ref(role: str, filename: str) -> str:
     return ""
 
 
-def _build_continue_prompt(base_prompt: str, inputs: dict[str, Any], retry: int) -> str:
+def _build_continue_prompt(inputs: dict[str, Any], retry: int) -> str:
     step_dir = inputs.get("step_dir", "")
     return f"""Continue the adaptation task for step {inputs.get('step_id', '')}.
 
 The previous opencode run produced no output for {_STALE_SECONDS} seconds and
 was terminated. This is continuation retry {retry}/{_MAX_STALE_RETRIES}.
+
+The full task prompt, reference docs, and rules are already in this session's
+context — do NOT expect them to be repeated here. Re-read them from the
+session history if needed.
 
 Do not start from scratch. The current vllm-ascend working tree may already
 contain partial code changes from the previous attempt. These files may also
@@ -124,11 +128,6 @@ contain partial results:
 
 First inspect the existing changes and generated files. Reuse prior work, then
 continue any unfinished adaptation, static review, and step_summary.md updates.
-Continue to follow the original task requirements below.
-
-━━━ ORIGINAL TASK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-{base_prompt}
 """
 
 
@@ -191,7 +190,7 @@ def run_opencode_adapter(inputs: dict[str, Any],
                     ts_print(f"[opencode] stderr tail:\n{err_text.strip()}", flush=True)
             last_reason = last_reason or "hard_failure"
             if attempt < _MAX_STALE_RETRIES:
-                prompt = _build_continue_prompt(base_prompt, inputs, attempt + 1)
+                prompt = _build_continue_prompt(inputs, attempt + 1)
                 continue
             break
 
@@ -201,7 +200,7 @@ def run_opencode_adapter(inputs: dict[str, Any],
         if reason == "stale_timeout" and attempt < _MAX_STALE_RETRIES:
             retry = attempt + 1
             ts_print(f"\n[opencode] retrying after stale timeout ({retry}/{_MAX_STALE_RETRIES})", flush=True)
-            prompt = _build_continue_prompt(base_prompt, inputs, retry)
+            prompt = _build_continue_prompt(inputs, retry)
             continue
 
         if stderr_path and stderr_path.exists():
@@ -342,7 +341,7 @@ def _run_once(
                 raw_fh.write(line)
             _print_event(line, state)
             if log_fh:
-                _log_event(line, state, log_fh)
+                _log_event(line, log_fh)
     finally:
         if log_fh:
             log_fh.close()
@@ -423,7 +422,7 @@ def _print_event(line: str, state: _EventState) -> None:
 
 # ── event logger ─────────────────────────────────────────────────────────────
 
-def _log_event(line: str, state: _EventState, fh: Any) -> None:  # noqa: ARG001
+def _log_event(line: str, fh: Any) -> None:
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}"
     try:
         ev = json.loads(line)

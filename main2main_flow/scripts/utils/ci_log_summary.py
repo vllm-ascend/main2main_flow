@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import ts_print
@@ -21,8 +20,6 @@ from main2main_flow.scripts.utils.utils import ts_print
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _GHA_GROUP_RE = re.compile(r"^::(?:group|endgroup)::.*$")
 
-_RUN_SUITE_START_RE = re.compile(r"\[\d+/\d+\]\s+START\s+(tests/\S+)")
-_RUN_SUITE_END_RE = re.compile(r"\[\d+/\d+\]\s+(?:PASSED|FAILED\s+\(exit\s+code\s+\d+\))\s+(tests/\S+)")
 _RUN_SUITE_FAILED_RE = re.compile(r"\[\d+/\d+\]\s+FAILED\s+\(exit\s+code\s+\d+\)\s+(tests/\S+)")
 
 _PYTEST_FAILURE_HEADER_RE = re.compile(r"^_+\s+test_\S+.*_+$")
@@ -32,11 +29,6 @@ _PYTEST_SUMMARY_FAILED_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)")
 _PYTEST_SUMMARY_FAILED_PAYLOAD_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)\s+-\s+(.+)")
 
 _ERROR_RE = re.compile(r"((?:[A-Za-z_][\w]*\.)*[A-Za-z_][\w]*(?:Error|Exception|Warning)):\s*(.+)")
-_TRACEBACK_START_RE = re.compile(
-    r"^(Traceback\s+\(most\s+recent\s+call\s+last\):"
-    r"|ImportError\s+while\s+loading\s+conftest"
-    r"|ERROR\s+collecting)"
-)
 
 _ENV_FLAKE_PATTERNS: list[str] = [
     r"OSError:.*Stale file handle",

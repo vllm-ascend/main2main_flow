@@ -21,7 +21,6 @@ vllm-ascend 是 vLLM 的昇腾（Ascend NPU）硬件适配插件，其代码以 
 ### 前置条件
 
 - Python 3.10–3.13
-- 已安装 [crewAI](https://github.com/joaomdmoura/crewAI)（`pip install crewai`）
 - 已安装 [opencode](https://opencode.ai) CLI 工具
 - 本地已有 vllm 和 vllm-ascend 的 git 仓库，或可以访问 GitHub 进行 clone
 - 如需运行 e2e 测试：目标机器上有昇腾 NPU 设备，并配置好 Docker 容器环境
@@ -33,8 +32,7 @@ vllm-ascend 是 vLLM 的昇腾（Ascend NPU）硬件适配插件，其代码以 
 # 进入项目目录
 cd main2main_flow
 
-# 安装 crewAI 和项目依赖
-pip install crewai
+# 安装项目依赖
 pip install -e .
 ```
 
@@ -113,20 +111,30 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `SKIP_AI_ANALYSIS` | 设为 `true` 跳过 AI 分析阶段，只做引用更新等确定性操作 | `false` |
 | `PUSH_TO_GITHUB` | 设为 `true` 在全部步骤成功后自动创建 PR | `false` |
 | `GITHUB_REPO` | PR 目标仓库，格式 `owner/name`（如 `vllm-project/vllm-ascend`） | — |
-| `MAIN2MAIN_REMOTE_HOST` | e2e 测试远程机器的 SSH 地址（如 `root@192.168.1.10`）。不设置则在本机执行 | — |
-| `MAIN2MAIN_REMOTE_CONTAINER` | 远程机器上已存在的 Docker 容器名，测试命令将通过 `docker exec` 在其中运行 | — |
+| `HEAD_FORK` | 推送目标 fork 仓库（默认 `vllm-ascend-ci/vllm-ascend`） | — |
+| `GH_TOKEN` | GitHub PAT（CI 推送与 PR 创建必需） | — |
+| `PR_LABELS` | PR 标签，逗号分隔（默认 `ready`） | `ready` |
+| `PR_DRAFT` | 是否创建 draft PR（默认 `true`） | `true` |
+| `MAIN2MAIN_MODEL` | opencode 模型（默认 `deepseek/deepseek-chat`）。按角色覆盖：`MAIN2MAIN_MODEL_ADAPT`、`MAIN2MAIN_MODEL_FIX`、`MAIN2MAIN_MODEL_REVIEW` | `deepseek/deepseek-chat` |
+| `MAIN2MAIN_TIMEOUT_MIN` | opencode 总超时分钟（默认 30） | `30` |
+| `MAIN2MAIN_STALE_SEC` | opencode 输出静默超时秒（默认 300） | `300` |
+| `MAIN2MAIN_WORKSPACE` | workspace 根目录（默认 `<repo>/workspace`） | `<repo>/workspace` |
+| `MAIN2MAIN_TEST_CASES` | 空格分隔的测试用例列表 | — |
+| `MAIN2MAIN_KEEP_BRANCH` | 设为 `true` 时跳过 vllm-ascend setup 的 `git reset --hard origin/main`，复用既有分支做增量 | `false` |
+| `MAIN2MAIN_RUN_TESTS_REMOTE` | 在远程主机上执行 e2e（`user@host` 或 `env`） | — |
+| `MAIN2MAIN_REMOTE_HOST`、`MAIN2MAIN_REMOTE_CONTAINER` | SSH 主机和容器名，远程 e2e 用 | — |
 
 ---
 
 ## 工作流总览
 
-整个 Flow 由 5 个节点组成，核心是一个针对每个步骤的"适配 → 测试 → 重试"循环。
-
-![Flow 结构图](images/flow.png)
+整个 Flow 由 `Main2MainFlow` 类（`main2main_flow/flow.py`）驱动，节点顺序为：
 
 `initialize` → `analyze_commit_and_plan_step` → `process_steps`（循环 `_ai_analysis` + `_run_e2e_test`，最多重试 3 次）→ `generate_final_post` → `push_to_github`
 
-Flow 中的节点通过字符串信号传递控制权：`HasCommit`、`HasNoCommit`、`UpgradeCompleted`、`UpgradeFailed`。这些信号在 `utils.py` 中定义为常量，在 `main.py` 的各节点返回值中使用。
+流程通过字符串信号传递控制权：`HasCommit`、`HasNoCommit`、`UpgradeCompleted`、`UpgradeFailed`，定义在 `scripts/utils/utils.py`。
+
+![Flow 结构图](images/flow.png)
 
 ---
 
@@ -134,63 +142,34 @@ Flow 中的节点通过字符串信号传递控制权：`HasCommit`、`HasNoComm
 
 ### Step 1 — `initialize`
 
-**触发条件**：Flow 入口，由 `@start` 装饰，是整个工作流第一个执行的节点。
+初始化阶段清理工作区并规范化路径。每次运行都会彻底删除并重建 `workspace/` 目录，确保本次运行的所有产物与上次运行完全隔离。
 
-**核心功能**
+路径规范化逻辑：优先使用 CLI 参数，其次读取对应环境变量，最后使用默认值（`workspace/repos/<name>`）。如果最终得到的路径是一个 GitHub URL（以 `https://` 或 `git@` 开头），则自动执行 `git clone`。
 
-初始化阶段做两件事：清理工作区、规范化路径。每次运行都会彻底删除并重建 `workspace/` 目录，确保本次运行的所有产物与上次运行完全隔离，不会因为残留文件干扰后续步骤的判断。
+`initialize` 还会保存 `original_vllm_ref` / `original_ascend_ref` 与 `branch_base_ref`（HEAD at init，用作 squash 基线），并修复 `.github/workflows/scripts/gitleaks.sh` 的可执行权限（git 不追踪 +x，checkout 后需要 `chmod 755`，否则 format.sh 会误报失败）。
 
-路径规范化逻辑如下：优先使用 CLI 参数，其次读取对应环境变量，最后使用默认值（`workspace/repos/<name>`）。如果最终得到的路径是一个 GitHub URL（以 `https://` 或 `git@` 开头），则自动执行 `git clone` 将仓库下载到 `workspace/repos/` 目录，并将本地路径记录到 state 中供后续节点使用。
-
-**输入**
-
-- CLI 参数 `--vllm-path`、`--vllm-ascend-path`、`--target-commit`（三者均可选）
-- 或对应环境变量 `VLLM_PATH`、`VLLM_ASCEND_PATH`、`VLLM_TARGET_COMMIT`
-- 若均未设置，`vllm_path` 和 `vllm_ascend_path` 默认为 `workspace/repos/vllm` 和 `workspace/repos/vllm-ascend`
-
-**输出**
-
-- 空的 `workspace/` 目录（旧目录已被删除）
-- Flow state 中写入以下字段，供后续所有节点读取：
-  - `state.vllm_path`：vllm 仓库的本地绝对路径
-  - `state.vllm_ascend_path`：vllm-ascend 仓库的本地绝对路径
-  - `state.target_commit`：目标 commit SHA（可能为空，表示以 vllm HEAD 为目标）
+**输出 state 字段**：`vllm_path`、`vllm_ascend_path`、`target_commit`、`test_log_dir`、`original_vllm_ref`、`original_ascend_ref`、`branch_base_ref`。
 
 ---
 
 ### Step 2 — `analyze_commit_and_plan_step`
 
-**触发条件**：`initialize` 完成后，由 `@router` 装饰，执行完毕后根据结果路由到 `HasCommit` 或 `HasNoCommit`。
-
-**核心功能**
-
-这一步回答两个问题：
-
-1. **需要同步多少内容？** — 找出 vllm-ascend 当前已同步到哪个 vllm commit，与目标 commit 对比，确定需要同步的范围。
-2. **怎么分批同步？** — 如果范围很大（跨越几十个 commit），一次性全部适配风险太高，需要拆分成若干大小适中的步骤逐步推进。
+回答两个问题：需要同步多少内容、怎么分批同步。
 
 #### 子步骤 2.1 — 检测 commit 范围（`detect_commits.py`）
 
-vllm-ascend 在 `docs/source/conf.py` 文件的 `myst_substitutions` 字典中维护了两个字段：
+vllm-ascend 在 `docs/source/conf.py` 的 `myst_substitutions` 字典中维护了两个字段：
 
-- `main_vllm_commit`：记录当前 vllm-ascend 已经适配并验证过的 vllm commit SHA（即 base commit）
-- `main_vllm_tag`：对应的 vllm release tag（如 `v0.20.2`），用于后续 `vllm_version_is()` 版本 guard 的正确性校验
+- `main_vllm_commit`：当前已适配并验证过的 vllm commit SHA（base commit）
+- `main_vllm_tag`：对应的 vllm release tag（如 `v0.25.1`），用于 `vllm_version_is()` 版本 guard 的正确性校验
 
-检测逻辑：读取 `conf.py` 中的 `main_vllm_commit` 作为 base，读取 vllm 仓库 HEAD（或 `target_commit`）作为 target。如果两者相同，说明已经同步到最新，返回 `HasNoCommit` 信号，流程直接结束；否则返回 `HasCommit`，继续规划步骤。
+检测逻辑：读取 `main_vllm_commit` 作为 base，读取 vllm 仓库 HEAD（或 `target_commit`）作为 target。若两者相同，返回 `HasNoCommit`，流程结束；否则返回 `HasCommit`，继续规划。
 
-检测结果写入 `workspace/detect.json`：
-
-```json
-{
-  "base_commit": "a1b2c3d4e5f6...",
-  "target_commit": "f6e5d4c3b2a1...",
-  "compat_tag": "v0.20.2"
-}
-```
+检测结果写入 `workspace/detect.json`。
 
 #### 子步骤 2.2 — 规划适配步骤（`plan_steps.py`）
 
-将 base 到 target 之间所有修改了 `vllm/` 目录的 commit 拆分为若干"步骤"（step）。拆分的目的是控制每一步的改动量，避免单次适配涉及过多文件变化导致 AI 分析不准或 CI 定位困难。
+将 base 到 target 之间所有修改了 `vllm/` 目录的 commit 拆分为若干"步骤"（step）。拆分目的是控制每一步的改动量，避免单次适配涉及过多文件变化导致 AI 分析不准或 CI 定位困难。
 
 **分组算法**：
 
@@ -201,140 +180,52 @@ vllm-ascend 在 `docs/source/conf.py` 文件的 `myst_substitutions` 字典中�
    - **超大 commit 单独成步**：单个 commit 的 `vllm_changed_lines > 1000` 时单独成步，避免分析时上下文过长
    - **累积分组**：其余 commit 累积到当前步，当累积的 `vllm_changed_lines` 超过 1000 行，或 commit 数量超过上限（动态计算，基数 10）时，将当前批次封装为一步，重新开始累积
 
-这样规划出的每一步变更量适中，通常涵盖 1–10 个 commit，vllm 源码变更行数在 1000 行以内。
+若所有 commit 都未修改 `vllm/`，会生成一个覆盖整个范围的 no-op step，确保 `verified.commit` 推进、e2e 仍会跑。
 
 **输出**：
-- `workspace/steps.json`：完整的步骤计划，每个步骤记录其包含的 commit 列表、commit 范围（`start_commit`、`end_commit`）、涉及的文件和总变更行数：
-
-  ```json
-  {
-    "base_commit": "a1b2c3...",
-    "target_commit": "f6e5d4...",
-    "total_commits": 24,
-    "steps": [
-      {
-        "id": "step-1",
-        "index": 1,
-        "start_commit": "a1b2c3...",
-        "end_commit": "d4e5f6...",
-        "commits": [
-          {"sha": "b2c3d4...", "subject": "feat: add new attention backend option"},
-          {"sha": "d4e5f6...", "subject": "refactor: split platform config"}
-        ],
-        "commit_count": 2,
-        "vllm_changed_lines": 340,
-        "files_changed": ["vllm/attention/backends/flash_attn.py", "vllm/config.py"]
-      }
-    ]
-  }
-  ```
-
-- `workspace/steps/step-*/` 目录：每个步骤写入各自的产物：
-  - `upstream.patch`：本步 vllm `vllm/` 目录的变更 diff
-  - `changed_files.txt`：本步变更的文件路径列表
-- `state.steps`：步骤列表写入 flow state，驱动后续循环迭代
-- `state.release_tag`：兼容版本 tag（`compat_tag`），在整个适配过程中作为 `vllm_version_is()` 的版本基准
+- `workspace/steps.json`：完整步骤计划
+- `workspace/steps/step-*/` 目录：每步写入 `upstream.patch`（vllm 上游 diff）与 `changed_files.txt`（变更文件列表）
+- `state.steps`、`state.total_steps`、`state.release_tag`
 
 ---
 
 ### Step 3 — `process_steps`（核心循环）
 
-**触发条件**：监听 `HasCommit` 信号，由 `@listen` 装饰。
+这是整个工作流的核心循环，对每个步骤依次执行 AI 适配和 e2e 测试。每步最多重试 3 次（AI 适配内部也有最多 3 次尝试）。循环体内部调用 `_ai_analysis` 和 `_run_e2e_test`。
 
-**核心功能**
+#### Step 3a — `_ai_analysis`
 
-这是整个工作流的核心循环，对每个步骤依次执行 AI 适配和 e2e 测试。每一步最多重试 3 次（AI 适配内部也有最多 3 次尝试）。循环体内部调用两个私有方法：`_ai_analysis` 和 `_run_e2e_test`。
+**准备阶段**（确定性操作）：
 
----
+1. `git checkout` vllm 到本步 `end_commit`，确保 AI agent 读取 vllm 源码时看到的是与 upstream patch 对应的版本
+2. 调用 `update_commit_reference.py`：扫描 vllm-ascend 仓库所有被 git 追踪的文件，将文件内容中出现的旧 commit SHA 批量替换为新 SHA（严格 40 位十六进制）。首轮（`retry_count == 0`）执行一次，重试轮次跳过
 
-### Step 3a — `_ai_analysis`
+**AI 适配循环**（最多 3 次 opencode 调用）：
 
-#### 准备阶段（确定性操作）
+每次循环调用 `opencode run` 启动一个 AI agent，然后执行 pre-CI 校验。pre-CI 通过则退出循环，否则将校验错误日志反馈给下一轮 agent，以 `fix` 模式重新适配，最多 3 次。
 
-**1. checkout vllm 到本步目标 commit**
-
-在开始分析之前，将 vllm 仓库 `git checkout` 到本步的 `end_commit`，确保后续 AI agent 读取 vllm 源码时看到的是与 upstream patch 对应的版本。
-
-**2. 更新 commit 引用（`update_commit_reference.py`）**
-
-vllm-ascend 在多个文件（`conf.py` 以及可能的其他配置文件）中硬编码了当前对齐的 vllm commit SHA。在每一步适配开始时，需要将这些旧 SHA 替换为本步的目标 SHA，以保持文档和配置的一致性。
-
-具体做法：扫描 vllm-ascend 仓库所有被 git 追踪的文件（`git ls-files`），将文件内容中出现的旧 commit SHA 批量替换为新 SHA（严格 40 位十六进制）。这是纯文本替换，对二进制文件自动跳过。首轮（`retry_count == 0`）执行一次，重试轮次（`retry_count > 0`）跳过（因为引用已经在首轮更新过了）。
-
-#### AI 适配循环（最多 3 次 opencode 调用）
-
-准备工作完成后，进入 AI 适配循环。每次循环调用 `opencode run` 启动一个 AI agent，然后执行 **pre-CI 校验**。如果 pre-CI 通过则退出循环，否则将校验错误日志反馈给下一轮 agent，以 `fix` 模式重新适配，最多 3 次。
-
-**调用方式**：通过 `subprocess.Popen` 启动 `opencode run --format json --dangerously-skip-permissions`，以 JSON 流式输出实时事件（agent 输出、工具调用等）。超时控制：总超时 30 分钟，输出静默超时 5 分钟。
+**调用方式**：通过 `subprocess.Popen` 启动 `opencode run --format json --auto`，以 JSON 流式输出实时事件。超时控制：总超时默认 30 分钟（`MAIN2MAIN_TIMEOUT_MIN`），输出静默超时默认 5 分钟（`MAIN2MAIN_STALE_SEC`）。session 模式复用：同一 step 的 attempt 2/3 与 stale timeout 重试都复用同一 opencode session，不重发 reference 全文。
 
 **AI agent 工作模式**
 
-agent 在 `prompt.md` 中接收完整的任务上下文，包括：
+agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包括：`patch_path`、`changed_files_path`、`ascend_path`、`vllm_path`、`release_tag`、`step_dir`、`mode`、`error_logs`（fix 模式）。
 
-| 输入 | 说明 |
-|---|---|
-| `patch_path` | 本步 `upstream.patch` 路径 |
-| `changed_files_path` | 本步 `changed_files.txt` 路径 |
-| `ascend_path` | vllm-ascend 仓库本地路径 |
-| `vllm_path` | vllm 仓库本地路径 |
-| `release_tag` | 兼容版本 tag（如 `v0.20.2`），用于 `vllm_version_is()` 校验 |
-| `reference_dir` | 参考文档目录，包含 `adapt-guide.md`、`diagnosis-guide.md`、`error-pattern-examples.md` |
-| `mode` | `"adapt"` 或 `"fix"` |
-| `error_logs` | fix 模式下传入的 CI 错误日志 |
+**两种运行模式**：
 
-**两种运行模式**
+- **`adapt` 模式**（首次执行或新步骤，role=`adapter`）：agent 从 upstream patch 出发，分析上游改动并将其适配到 vllm-ascend。reference 注入 `adaptation-patterns.md` + `common-pitfalls.md` 全文，step-1 额外注入 `code-structure-guide.md`
+- **`fix` 模式**（pre-CI 或 e2e 失败后，role=`adapter-fix`）：不重发 reference（已在 session 上下文中），只注入 `error_logs` 内联的错误日志内容（每文件截 16000 字符）
 
-- **`adapt` 模式**（首次执行或新步骤）：agent 从 upstream patch 出发，分析上游改动并将其适配到 vllm-ascend：
-  1. 读取 `changed_files.txt`，对照 `adapt-guide.md` 的 Key Areas 表确定受影响子系统
-  2. 读取 `upstream.patch` 识别具体变更
-  3. 使用 File Mapping 表找到对应 vllm-ascend 文件
-  4. 实施修改，使用 `vllm_version_is("{release_tag}")` 进行版本兼容 guard
-  5. 自我审查：验证所有变更、签名是否匹配、version guard 版本号是否正确
-  6. 在 `step_dir` 下输出 `analysis.md`、`adaptation_log.md`（git diff）、`review.md`
+**pre-CI 校验**（`pre_ci_check.py`）是 AI 适配环节的"快速门"，在 NPU 测试前用确定性规则拦截常见错误：
 
-- **`fix` 模式**（pre-CI 或 e2e 测试失败后）：
-  1. 读取结构化 CI 错误日志，区分 `code_bugs` 和 `env_flakes`
-  2. 对每个 `code_bug`，对照 `diagnosis-guide.md` 的错误类型映射（TypeError → 签名变更、AttributeError → 配置字段变更、ImportError → 模块路径变更、NotImplementedError → 新增抽象方法）
-  3. 在 `upstream.patch` 中搜索根因
-  4. 映射到 `error-pattern-examples.md` 中的修复模式
-  5. 实施修复
+- **version_strings**：扫描本次 `git diff upstream/main` 中新增的行，找出 `vllm_version_is("...")` 调用，检查版本号是否与 `release_tag` 一致
+- **temp_files**：检查工作区是否有 `.patch`、`.log`、`.jsonl`、`vllm_changes.md` 等临时文件
+- **format**：跑 `bash format.sh`，解析 pre-commit 输出，只报非自动修复类错误（ruff E501/F821/F841、codespell 等），过滤 gitleaks/shellcheck 环境噪声
+- **broken_imports**：验证新增的 `from vllm.X import Y` 引用的模块在 vllm 源码树中存在；若在 `vllm_version_is` guard 内，自动补 `# type: ignore[import-not-found]`
+- **mypy**：跑 `mypy --follow-imports skip --check-untyped-defs vllm_ascend`，按新增行 + 签名类错误码（`[override]`/`[call-arg]`/`[return-value]`/`[arg-type]`/`[assignment]`/`[no-redef]`/`[valid-type]`/`[misc]`）在所有文件中过滤
 
-agent 完成后输出 JSON（被 `opencode_adapter.py` 的 `_parse_result` 解析为 `AdaptResult`）：
+校验结果写入 `workspace/steps/<step-id>/pre_ci_check.json`（每次尝试覆盖）。
 
-```json
-{
-  "modified_files": ["list of changed vllm-ascend files, empty if no-op"],
-  "is_noop": false,
-  "step_summary": "comprehensive summary of what was done"
-}
-```
-
-#### 每次 AI 完成后执行 pre-CI 校验（`pre_ci_check.py`）
-
-pre-CI 校验是 AI 适配环节的"快速门"，在真正跑 NPU 测试之前用确定性规则拦截常见错误：
-
-- **版本字符串检查**：扫描本次 `git diff HEAD` 中新增的行，找出所有 `vllm_version_is("...")` 调用，检查其中的版本号是否与 `release_tag` 完全一致。检查范围是仅限新增行，不影响历史遗留的版本 guard
-- **临时文件检查**：检查 vllm-ascend 工作区是否存在 `.patch`、`.log`、`.jsonl`、`vllm_changes.md` 等临时文件。这类文件若被误提交会污染仓库
-
-校验结果写入 `workspace/steps/<step-id>/pre_ci_check.json`（每次尝试覆盖写入）：
-
-```json
-{
-  "all_passed": true,
-  "checks": [
-    {
-      "name": "version_strings",
-      "passed": true,
-      "detail": "2 new vllm_version_is() calls all use v0.20.2"
-    },
-    {
-      "name": "temp_files",
-      "passed": true,
-      "detail": "no temp files in repo"
-    }
-  ]
-}
-```
+**adapter-qa**（独立 critic）：仅在 pre_ci 通过后运行，用独立 opencode session 做对抗式 review，注入 `agents/adapter-qa/SKILL.md` + `review-lessons.md` 全文 + 当前 diff（截 8000 字符）+ upstream patch（截 4000 字符）。产出 `review.json`（`verdict`/`issues`），失败时写 `adapter-qa.md` 并把 issues 喂给 fix 模式。
 
 **_ai_analysis 阶段的全部输出**（每步）：
 
@@ -343,66 +234,60 @@ pre-CI 校验是 AI 适配环节的"快速门"，在真正跑 NPU 测试之前�
 | `workspace/steps/<step-id>/upstream.patch` | 本步 vllm 上游变更的完整 diff（仅 `vllm/` 目录） |
 | `workspace/steps/<step-id>/changed_files.txt` | 本步变更的 vllm 文件名列表 |
 | `workspace/steps/<step-id>/pre_ci_check.json` | pre-CI 校验结果（每次尝试覆盖） |
-| `workspace/steps/<step-id>/step_summary.json` | AI 生成的本步适配总结（`AdaptResult.step_summary`） |
+| `workspace/steps/<step-id>/step_summary.md` | AI 生成的本步适配总结（`AdaptResult.step_summary`） |
 | `workspace/steps/<step-id>/step_target.patch` | vllm-ascend 本步全量变更（`git diff HEAD`） |
-| `workspace/steps/<step-id>/opencode.log` | opencode agent 的完整对话日志 |
+| `workspace/steps/<step-id>/opencode.log` | opencode agent 完整对话日志 |
 | `workspace/steps/<step-id>/opencode_raw.jsonl` | opencode 原始 JSON 事件流 |
-| `workspace/steps/<step-id>/opencode_stderr.log` | opencode 子进程的 stderr 输出 |
-| `workspace/steps/<step-id>/analysis.md` | AI 输出的分析报告 |
-| `workspace/steps/<step-id>/adaptation_log.md` | AI 输出的变更日志 |
-| `workspace/steps/<step-id>/review.md` | AI 输出的自审查报告 |
+| `workspace/steps/<step-id>/opencode_stderr.log` | opencode 子进程 stderr |
+| `workspace/steps/<step-id>/adapter-qa.md` | QA critic 发现的 issues（文本） |
+| `workspace/steps/<step-id>/review.json` | QA critic 的结构化 verdict |
+| `workspace/steps/<step-id>/opencode_qa.log` | QA session 对话日志 |
+| `workspace/steps/<step-id>/opencode_qa_raw.jsonl` | QA session 原始事件流 |
 
-同时更新 flow state：`state.cur_vllm_commit`、`state.cur_ascend_commit`、`state.cur_patch_path`，供 `run_e2e_test` 使用。
+同时更新 flow state：`cur_vllm_commit`、`cur_ascend_commit`、`cur_patch_path`、`changed_files`，供 `_run_e2e_test` 使用。
 
 ---
 
 ### Step 3b — `_run_e2e_test`
 
-**核心功能**
-
-在真实的昇腾 NPU 环境中搭建测试环境，执行 e2e CI 测试套件，判断本步 AI 适配结果是否正确可用。支持本地执行和通过 SSH 在远程机器上执行两种模式。
+在真实的昇腾 NPU 环境中执行 e2e CI 测试套件。支持本地执行和通过 SSH 在远程机器上执行两种模式。
 
 #### 环境搭建
 
-无论本地还是远程，环境搭建流程相同：
-
-1. **vllm 仓库**：clone（若不存在）或 fetch（若已存在），checkout 到 `cur_vllm_commit`，然后以 `VLLM_TARGET_DEVICE=empty` 运行 `pip install -e .`（empty device 模式安装依赖但不编译 GPU 扩展，速度更快）
-2. **vllm-ascend 仓库**：同样 clone 或 fetch，reset 到 `origin/main`，checkout 到 `cur_ascend_commit`
-3. **应用 step_target.patch**：若存在 patch 文件，通过 `git apply` 应用到 vllm-ascend，使其包含本步 AI 生成的全部适配代码
+1. **vllm 仓库**：clone（若不存在）或 fetch（若已存在），checkout 到 `cur_vllm_commit`，然后以 `VLLM_TARGET_DEVICE=empty` 运行 `pip install -e .`
+2. **vllm-ascend 仓库**：clone 或 fetch，checkout 到 `cur_ascend_commit`
+3. **应用 step_target.patch**：若存在 patch 文件，通过 `git apply` 应用到 vllm-ascend
 4. **安装 vllm-ascend 依赖**：运行 `pip install -r requirements-dev.txt`
 
-远程执行时，上述步骤被打包成一个 shell 脚本，通过 `ssh <host> docker exec <container> sh -c "..."` 在远端容器中执行，本地不需要有 NPU 环境。
+远程执行时，上述步骤被打包成一个 shell 脚本，通过 `ssh <host> docker exec <container> sh -c "..."` 在远端容器中执行。
 
-#### 测试套件调度
+#### 测试用例选择
 
-当前 `main.py` 中默认配置为：`total_cards=8`、`suites=["e2e-2card-light"]`，即仅运行 2 卡轻量级 e2e 测试。`run_tests.py` 底层支持更丰富的套件调度：
+测试用例来源（合并去重）：
+1. `MAIN2MAIN_TEST_CASES` 环境变量（空格分隔）
+2. `main2main_flow/test_policy.json` 的 `allowlist`（总是包含）与 `blocklist`（总是排除）
+3. 若以上都为空，回退到按 `changed_files` 选择相关测试文件
 
-| 套件名 | 所需卡数 |
-|---|---|
-| `e2e-singlecard-light` | 1 卡 |
-| `e2e-2card-light` | 2 卡 |
-| `e2e-4card-light` | 4 卡 |
-| `e2e-singlecard` | 1 卡 |
-| `e2e-multicard-2-cards` | 2 卡 |
-| `e2e-multicard-4-cards` | 4 卡 |
-| `e2e-upstream_singlecard` | 1 卡 |
+#### 测试调度
 
-调度算法（贪心 first-fit decreasing bin-packing）：将套件按卡数降序排列，尽量将多个套件塞进同一轮次（round）同时运行，充分利用总卡数。每个套件分配到独立的设备 ID 范围，通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量隔离。不同轮次串行执行。
+`run_tests.py` 把每个 test 文件当作一个独立 suite 并行执行，按卡数贪心 bin-packing（first-fit decreasing），尽量将多个 suite 塞进同一轮次同时运行。每个 suite 分配到独立的设备 ID 范围，通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量隔离。不同轮次串行执行。
 
-每个套件的测试结果由 `ci_log_summary.py` 解析日志并分类：
+每个 suite 的测试结果由 `ci_log_summary.py` 解析日志并分类：
 - `passed`：所有用例通过
 - `env_flake_pass`：有失败用例，但全部被识别为环境抖动（env flake），视为通过
 - `failed`：存在代码 bug 导致的失败（`code_bugs_count > 0`）
 - `summary_error`：日志解析失败，无法判断
 
-只要任何一个套件报告 `failed`，整轮测试即为失败；所有套件均为 `passed` 或 `env_flake_pass` 时，测试视为通过。
+只要任何一个 suite 报告 `failed`，整轮测试即为失败；所有 suite 均为 `passed` 或 `env_flake_pass` 时，测试视为通过。
 
 **输出文件**（每步每轮次）：
 
 | 文件 | 内容 |
 |---|---|
-| `workspace/steps/<step-id>/tests/round-<n>-<suite>.log` | 测试套件的完整原始输出日志 |
-| `workspace/steps/<step-id>/tests/round-<n>-summary.json` | 本轮的汇总结果（`can_commit`、`ci_result` 等） |
+| `workspace/steps/<step-id>/tests/round-<n>-<slug>.log` | suite 完整原始日志 |
+| `workspace/steps/<step-id>/tests/round-<n>-<slug>-summary.json` | suite 结构化摘要（`code_bugs`/`env_flakes`） |
+| `workspace/steps/<step-id>/tests/round-<n>-result.json` | 本轮汇总（`can_commit`、`ci_result`、`suite_results`） |
+| `workspace/steps/<step-id>/tests/round-<n>-test-errors.txt` | 失败 suite 的 summary + log tail（喂给 fix 模式） |
 
 **重试逻辑**（在 `process_steps` 的 while 循环中实现）：
 
@@ -412,43 +297,40 @@ pre-CI 校验是 AI 适配环节的"快速门"，在真正跑 NPU 测试之前�
 | 测试失败，`retry_count < 3` | `retry_count++`，以 fix 模式重新进入 `_ai_analysis` |
 | 测试失败，`retry_count >= 3` | 设置 `final_status = UpgradeFailed`，退出循环进入 `generate_final_post` |
 
-设置 `SKIP_E2E_TEST=true` 时，此方法不执行任何测试，直接返回 `True`（视为通过）。
+设置 `SKIP_E2E_TEST=true` 时，此方法直接返回 `True`（视为通过）。
 
 ---
 
 ### Step 4 — `generate_final_post`
 
-**触发条件**：`process_steps` 完成后，由 `@listen` 装饰，无论升级成功还是中途失败都会执行。
+无论升级成功还是中途失败都会执行。做三件事：
 
-**核心功能**
+1. **Squash step commits**：把 `process_steps` 期间累积的 per-step checkpoint commits 用 `git reset --soft branch_base_ref` + `git commit` 压成单个 commit，确保 PR 只有一个 commit
+2. **生成 PR body**：从各步 `step_summary.md` 提取 `Files`/`Upstream vLLM change`/`vllm-ascend adaptation` 三列表格，PR 日期取自 vllm target commit 的合入时间（非当前时间）
+3. **回滚 verified.commit**：若 `last_verified_commit != target`，把 `.github/vllm-main-verified.commit` 回滚到最后一个 e2e 通过的 commit，确保失败运行不会把 baseline 指向未验证 commit
 
-将最后成功步骤的产物复制到 `workspace/` 根目录下：
-
-- `workspace/step_summary.json` → `workspace/final_summary.json`
-- `workspace/step_target.patch` → `workspace/final_target.patch`
-
-**输出**：`workspace/final_summary.json`、`workspace/final_target.patch`
+**输出**：`workspace/final_summary.md`（PR body）、`workspace/final_target.patch`、`workspace/final_status.json`
 
 ---
 
 ### Step 5 — `push_to_github`
 
-**触发条件**：`generate_final_post` 完成后（`@listen`），且 `PUSH_TO_GITHUB=true` 时执行。
-
-**核心功能**
-
-将本次升级的适配代码推送到 GitHub 并自动创建 Pull Request。这一步是可选的，需要显式设置 `PUSH_TO_GITHUB=true` 才会执行，否则打印提示后直接跳过，方便在不自动推送的场景下手动审查代码后再决定是否推。
+仅在 `PUSH_TO_GITHUB=true` 时执行。否则打印提示后跳过。
 
 **执行流程**：
 
-1. **找到最终 patch 文件**：扫描 `workspace/steps/` 目录，找到 `step_target.patch`
-2. **创建新分支**：在 vllm-ascend 仓库中 `git checkout -b update/main2main-<timestamp>`，时间戳确保分支名唯一
-3. **应用 patch**：`git apply <patch>`，将适配代码写入工作区
-4. **提交**：`git add -A && git commit -s -m "main2main: sync vllm upstream (<timestamp>)"`，`-s` 添加 Signed-off-by
-5. **推送**：`git push origin <branch>`
-6. **创建 PR**：`gh pr create --title <commit-msg> --body <final_summary.md>`
+1. 找到 `workspace/final_target.patch`（或复用当前分支已有 commit）
+2. 创建新分支 `main2main_auto_<timestamp>`（或 `MAIN2MAIN_KEEP_BRANCH=true` 时复用现有分支）
+3. 应用 patch（若需），跑 `format.sh`，`git commit`（已有分支则 `--amend --no-edit`，把 format 修复合进现有 commit）
+4. 推送到 fork 仓库（`HEAD_FORK`，默认 `vllm-ascend-ci/vllm-ascend`），`--force-with-lease`
+5. 最后的安全网：`_git_push` 若检测到 `origin/main..HEAD` 多于 1 个 commit，会再次 force-squash 成单个 commit
+6. `gh pr create` 创建 draft PR（最多重试 5 次），body 取自 `final_summary.md`
+7. 添加 PR labels（默认 `ready`）
+8. 关闭旧的 main2main auto PR（按 title pattern 匹配）
+9. 推送 `main2main_baseline` ref 到 fork，供下次增量运行
+10. 清理旧的 `main2main_auto_*` 分支（保留最新 N 个，`MAIN2MAIN_KEEP_BRANCHES` 默认 3）
 
-**输出**：GitHub PR URL（打印到标准输出并作为节点返回值）
+**输出**：GitHub PR URL（打印到 stdout 并写入 `/tmp/main2main/pr_url.txt`）
 
 ---
 
@@ -459,28 +341,31 @@ pre-CI 校验是 AI 适配环节的"快速门"，在真正跑 NPU 测试之前�
 ```
 workspace/
 ├── detect.json                           # 检测结果：base/target commit 和 compat_tag
-├── steps.json                            # 完整步骤计划：所有步骤的 commit 范围和变更统计
-├── final_summary.json                    # 最后成功步骤的总结（从 step_summary.json 复制）
-├── final_target.patch                    # 最后成功步骤的全量 patch（从 step_target.patch 复制）
+├── steps.json                            # 完整步骤计划
+├── final_summary.md                      # PR body（Changes 表格）
+├── final_target.patch                    # 最后成功步骤的全量 patch
+├── final_status.json                     # 运行结果状态
 ├── repos/                                # 自动 clone 的仓库（仅在传入 GitHub URL 时存在）
 │   ├── vllm/
 │   └── vllm-ascend/
 └── steps/
     ├── step-1/
-    │   ├── upstream.patch                # 本步 vllm 上游 diff（git diff start..end，仅 vllm/ 目录）
-    │   ├── changed_files.txt             # 本步变更的 vllm 文件路径列表
-    │   ├── pre_ci_check.json             # pre-CI 校验结果（每次尝试覆盖）
-    │   ├── step_summary.json             # AI 生成的本步适配总结
-    │   ├── step_target.patch             # vllm-ascend 本步实际变更（git diff HEAD）
-    │   ├── opencode.log                  # opencode agent 完整对话日志
-    │   ├── opencode_raw.jsonl            # opencode 原始 JSON 事件流
-    │   ├── analysis.md                   # AI 分析报告
-    │   ├── adaptation_log.md             # AI 变更日志
-    │   ├── review.md                     # AI 自审查报告
+    │   ├── upstream.patch
+    │   ├── changed_files.txt
+    │   ├── pre_ci_check.json
+    │   ├── step_summary.md
+    │   ├── step_target.patch
+    │   ├── opencode.log
+    │   ├── opencode_raw.jsonl
+    │   ├── opencode_stderr.log
+    │   ├── adapter-qa.md
+    │   ├── review.json
+    │   ├── opencode_qa.log
     │   └── tests/
-    │       ├── round-0-e2e-2card-light.log          # 套件原始日志（retry_count=0）
-    │       ├── round-1-e2e-2card-light.log          # 重试轮次日志（retry_count=1）
-    │       └── round-0-summary.json                 # 本轮汇总（can_commit、ci_result 等）
+    │       ├── round-0-<slug>.log
+    │       ├── round-0-<slug>-summary.json
+    │       ├── round-0-result.json
+    │       └── round-0-test-errors.txt
     ├── step-2/
     │   └── ...
     └── step-N/
@@ -493,12 +378,15 @@ workspace/
 
 ## AI Agent 参考文档
 
-AI agent 在分析和适配过程中会参考项目内置的参考文档，这些文档编码了 vllm-ascend 适配工作的领域知识，是 AI 分析质量的重要保障。文档位于 `src/reference/`：
+AI agent 在分析和适配过程中会参考项目内置的参考文档，这些文档编码了 vllm-ascend 适配工作的领域知识。文档位于 `main2main_flow/agents/`：
 
-| 文件 | 主要内容 |
-|---|---|
-| `adapt-guide.md` | **Key Areas 表**：vLLM 内部子系统（attention backend、worker、platform、config 等）与 vllm-ascend 实现之间的映射关系；**File Mapping 表**：上游 vllm 文件路径 → 对应需要关注的 vllm-ascend 文件；**适配步骤指引**：agent 执行任务时的操作规范 |
-| `diagnosis-guide.md` | 常见 CI 错误类型的诊断流程：签名不匹配、import 错误、版本 guard 问题、临时文件残留等，以及对应的修复模式 |
-| `error-pattern-examples.md` | 具体错误案例和对应修复代码示例，帮助 agent 快速识别已知错误模式并套用正确的修复方法 |
+| 文件 | 角色 | 主要内容 |
+|---|---|---|
+| `adapter/SKILL.md` | adapter | 任务上下文、Rules、Guard 决策树、15 项完成前 checklist、Format rules、fix mode 工作流、Output 规范 |
+| `adapter/reference/adaptation-patterns.md` | adapter | 12 类上游变更模式的适配指引（constructor signature、new attribute、method signature change 等） |
+| `adapter/reference/common-pitfalls.md` | adapter | 常见陷阱与修复（version guard 方向、import-not-found、[valid-type]、hit_length、Triton 参数等）+ Additional QA-level checks + Fix mode workflow |
+| `adapter/reference/code-structure-guide.md` | adapter | vllm-ascend 子系统静态映射表，仅 step-1 注入，用于代码定位 |
+| `adapter-qa/SKILL.md` | adapter-qa | 独立 reviewer 任务规范、输出 `review.json` 的 JSON shape |
+| `adapter-qa/reference/review-lessons.md` | adapter-qa | Review 最佳实践 §1-8（带经典案例）+ §9 Pre-Submit Checklist |
 
 这些文档随着项目演进应当持续维护，当出现新的适配错误类型或发现 agent 存在分析盲区时，应将相关经验沉淀到对应文档中，以提升后续运行的适配准确率。

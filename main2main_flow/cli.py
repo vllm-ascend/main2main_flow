@@ -1,8 +1,5 @@
-"""CLI entry-point for ``kickoff`` console script and ``python main.py``."""
+"""CLI entry-point for ``kickoff`` console script."""
 import argparse
-import json
-import sys
-from pathlib import Path
 
 from main2main_flow.flow import Main2MainFlow
 
@@ -27,24 +24,3 @@ def kickoff():
 
     flow = Main2MainFlow()
     flow.run(inputs if inputs else None)
-
-
-def plot():
-    print("Flow visualization has been removed along with crewai dependency.")
-
-
-def run_with_trigger():
-    """Run the flow with a JSON trigger payload passed as a CLI argument."""
-    if len(sys.argv) < 2:
-        raise Exception("No trigger payload provided. Please provide JSON payload as argument.")
-    try:
-        trigger_payload = json.loads(sys.argv[1])
-    except json.JSONDecodeError:
-        raise Exception("Invalid JSON payload provided as argument")
-
-    flow = Main2MainFlow()
-    try:
-        flow.run({"crewai_trigger_payload": trigger_payload})
-        return flow.state
-    except Exception as e:
-        raise Exception(f"An error occurred while running the flow with trigger: {e}")

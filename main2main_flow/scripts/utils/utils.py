@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -62,3 +63,18 @@ def resolve_path(raw: str, name: str) -> str:
         clone_repo(raw, str(target))
         return str(target)
     return raw
+
+
+def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
+    """Run ``bash format.sh`` and return the CompletedProcess result.
+
+    Sets ``PRE_COMMIT_HOME`` to a persistent cache path so pre-commit hooks
+    don't re-download environments on every invocation.
+    """
+    fmt_script = repo / "format.sh"
+    env = os.environ.copy()
+    env["PRE_COMMIT_HOME"] = "/root/.cache/main2main-pre-commit"
+    return subprocess.run(
+        ["bash", str(fmt_script)], cwd=str(repo),
+        capture_output=True, text=True, env=env,
+    )

@@ -17,19 +17,17 @@ Output:
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 
 from main2main_flow.scripts.utils.utils import run_git
 
 LINE_BUDGET = 1000
-BASE_LINE_BUDGET = 1000
 BASE_COMMIT_COUNT_BUDGET = 10
 
 
-def _commit_count_budget(line_budget: int = LINE_BUDGET) -> int:
-    return max(1, round(BASE_COMMIT_COUNT_BUDGET * math.sqrt(line_budget / BASE_LINE_BUDGET)))
+def _commit_count_budget() -> int:
+    return max(1, BASE_COMMIT_COUNT_BUDGET)
 
 
 def _list_commits(repo: Path, base: str, target: str) -> list[dict[str, str]]:

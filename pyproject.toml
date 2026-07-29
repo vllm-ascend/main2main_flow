@@ -2,7 +2,7 @@
 name = "main2main_flow"
 version = "0.1.0"
 description = "main2main_flow — automated vllm-ascend adaptation to upstream vLLM"
-authors = [{ name = "Your Name", email = "you@example.com" }]
+authors = [{ name = "vllm-ascend-ci", email = "vllm-ascend-ci@example.com" }]
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "pydantic>=2.0",
@@ -11,8 +11,6 @@ dependencies = [
 
 [project.scripts]
 kickoff = "main2main_flow.cli:kickoff"
-plot = "main2main_flow.cli:plot"
-run_with_trigger = "main2main_flow.cli:run_with_trigger"
 
 [build-system]
 requires = ["hatchling"]
