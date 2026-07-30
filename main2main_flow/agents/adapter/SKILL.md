@@ -108,18 +108,25 @@ Does this code path need to support BOTH the release version AND upstream main?
 5. Every call site passes correct number, type, AND ORDER of arguments on
    BOTH version branches. Use keyword arguments for new parameters.
 6. Override methods match the upstream signature.
-7. No variable aliases as base classes — use `TypeAlias` or direct class name.
-8. When fixing a version-branch bug, grep for the same pattern in ALL sibling
+7. **Base-class attribute sync**: when upstream adds an attribute/field to a
+   base class (e.g. `GPUInputBatch.__init__` gains `use_replayssm`), every
+   vllm-ascend subclass MUST accept and set it - even if the feature is
+   NVIDIA-only. vllm's base-class code reads `self.X` at runtime; a
+   subclass that doesn't set it crashes with `AttributeError` on every
+   request. "Feature is GPU-only" is NOT a reason to skip the attribute.
+   See `reference/adaptation-patterns.md` §9.
+8. No variable aliases as base classes — use `TypeAlias` or direct class name.
+9. When fixing a version-branch bug, grep for the same pattern in ALL sibling
    functions and fix them all in the same commit.
-9. When a method signature changed, grep for ALL `def <method_name>(` in the
+10. When a method signature changed, grep for ALL `def <method_name>(` in the
    codebase — every override must be updated.
-10. Every `next(gen, default)` has a default value — no bare `next(...)`.
-11. `super().__init__()` called in every subclass `__init__`.
-12. No exact version matching (`== "X.Y.Z"`).
-13. No dead code, commented-out blocks, or stale `# type: ignore` left behind.
-14. See `reference/common-pitfalls.md` §"Additional QA-level checks" for
+11. Every `next(gen, default)` has a default value — no bare `next(...)`.
+12. `super().__init__()` called in every subclass `__init__`.
+13. No exact version matching (`== "X.Y.Z"`).
+14. No dead code, commented-out blocks, or stale `# type: ignore` left behind.
+15. See `reference/common-pitfalls.md` §"Additional QA-level checks" for
     remaining items (registries, Triton params, getattr, path resolution, etc.).
-15. **Return type change → verify ALL return statements**: when upstream
+16. **Return type change → verify ALL return statements**: when upstream
     changes what a method returns (e.g. `list` → `tuple[list, int]`), grep
     every `return` in that method.  A single leftover `return old_list`
     causes `AttributeError` at runtime — pre_ci and mypy cannot catch it.

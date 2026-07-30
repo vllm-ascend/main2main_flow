@@ -114,6 +114,26 @@ grep -rn "class.*BaseClassName" vllm_ascend/
 Missing an attribute on one subclass causes `AttributeError` at runtime on
 every test that uses it. pre_ci and mypy cannot catch this.
 
+**Critical trap - "feature is NVIDIA-only" does NOT mean the attribute can
+be skipped.** Even if the feature (e.g. ReplaySSM, a Triton kernel) is
+GPU/NVIDIA-only and vllm-ascend never enables it, vllm's base-class code
+still accesses `self.use_X` / `self.X_field` at runtime. vllm-ascend's
+subclass (e.g. `NPUInputBatch` extends `GPUInputBatch`) inherits that
+access path - if the subclass `__init__` doesn't accept and set the new
+attribute, every instance crashes with `AttributeError` the moment
+vllm's base class touches it.
+
+So the decision is NOT "does vllm-ascend use this feature" - it's
+"does vllm's base class code read this attribute". If yes, the
+vllm-ascend subclass MUST accept the parameter (in `__init__`) and set
+`self.X = X` (or default), regardless of whether the feature is enabled.
+
+Classic example: upstream adds `use_replayssm` param to `GPUInputBatch.__init__`.
+Adapter marks step as no-op ("ReplaySSM is NVIDIA-only"). But
+`GPUModelRunner` reads `input_batch.use_replayssm` at runtime ->
+`NPUInputBatch` (which doesn't set it) crashes with `AttributeError:
+'NPUInputBatch' object has no attribute 'use_replayssm'` on every request.
+
 ## 10. Upstream changes a method signature — check ALL overrides
 
 **Rule**: After changing a method signature, grep for ALL overrides:
