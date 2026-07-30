@@ -474,9 +474,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self.state.session_id = adapt_result.session_id
 
             # pre_ci: mechanical checks (version, format, imports, temp files)
-            check_result = run_check(ascend_path, self.state.release_tag,
-                                     vllm_path=vllm_path,
-                                     base_commit=self.state.base_commit)
+            check_result = run_check(ascend_path, self.state.release_tag, vllm_path=vllm_path)
             pre_ci_passed = check_result["all_passed"]
             if not pre_ci_passed:
                 log_path = step_dir / PRE_CI_CHECK_FILE

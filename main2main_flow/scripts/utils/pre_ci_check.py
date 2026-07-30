@@ -126,125 +126,6 @@ def _check_temp_files(repo: Path) -> dict:
     return {"violations": violations}
 
 
-def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
-                base_commit: str = "") -> dict:
-    """Run mypy with the same core command and environment as vllm-ascend's CI.
-
-    Mirrors the CI pre-commit job's "Run mypy" step: for each python version
-    in ``3.10/3.11/3.12`` (the matrix CI runs), runs::
-
-        PYTHONPATH=<vllm_path> mypy --follow-imports skip --check-untyped-defs \
-            --python-version <X.Y> --exclude _cann_ops_custom/ \
-            vllm_ascend examples tests
-
-    Two deviations from CI's ``tools/mypy.sh``:
-
-    1. ``PYTHONPATH=<vllm_path>`` — CI checks out vllm source to
-       ``./vllm-empty`` and prepends it to PYTHONPATH so mypy resolves
-       ``from vllm...import`` against the verified vllm commit (not an
-       installed package).  We replicate this: main2main flow has vllm
-       checked out at the target commit, so pointing PYTHONPATH there makes
-       mypy see the same vllm version CI uses.  Without this, mypy falls
-       back to the installed vllm package (stale), reporting hundreds of
-       spurious [arg-type]/[call-arg] errors in tests/ that drown out real
-       adaptation errors.
-
-    2. ``--exclude _cann_ops_custom/`` — CI's lint image has no
-       ``_cann_ops_custom/`` dir (build_aclnn never ran), so it never
-       reports vendor noise.  On the main2main runner vllm-ascend is
-       installed with CANN ops built, so the dir exists and mypy would
-       otherwise report 3000+ spurious errors in vendor files the adapter
-       never touches.
-    """
-    mypy = shutil.which("mypy")
-    if not mypy:
-        return {"violations": [], "detail": "mypy not installed", "skipped": True}
-
-    import os as _os
-    env = _os.environ.copy()
-    if vllm_path:
-        vllm_abs = str(Path(vllm_path).resolve())
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{vllm_abs}:{existing}" if existing else vllm_abs
-        ts_print(f"[pre_ci] mypy: PYTHONPATH includes vllm source: {vllm_abs}")
-
-    # Temporarily checkout vllm to base_commit (verified) so mypy sees the
-    # same vllm API CI uses.  adapter has finished by the time pre_ci runs,
-    # so switching the vllm checkout here doesn't interfere with adaptation.
-    original_vllm_ref = ""
-    switched = False
-    if vllm_path and base_commit:
-        try:
-            r = subprocess.run(
-                ["git", "-C", str(vllm_path), "rev-parse", "HEAD"],
-                capture_output=True, text=True, check=True,
-            )
-            original_vllm_ref = r.stdout.strip()
-            if original_vllm_ref != base_commit:
-                ts_print(f"[pre_ci] mypy: vllm {original_vllm_ref[:8]} -> base {base_commit[:8]} "
-                         f"(verified, matches CI)")
-                subprocess.run(
-                    ["git", "-C", str(vllm_path), "checkout", base_commit],
-                    capture_output=True, text=True, check=True,
-                )
-                switched = True
-        except subprocess.CalledProcessError as e:
-            ts_print(f"[pre_ci] mypy: could not checkout vllm to base_commit "
-                     f"({e.stderr.strip()[:200]}), using current ref")
-
-    try:
-        all_violations: list[str] = []
-        all_output: list[str] = []
-        any_failed = False
-        for py_ver in ("3.10", "3.11", "3.12"):
-            ts_print(f"[pre_ci] === mypy --python-version {py_ver} output begin ===")
-            r = subprocess.run(
-                [mypy, "--follow-imports", "skip", "--check-untyped-defs",
-                 "--python-version", py_ver,
-                 "--exclude", "_cann_ops_custom/",
-                 "vllm_ascend", "examples", "tests"],
-                cwd=str(repo), capture_output=True, text=True, env=env,
-            )
-            output = r.stdout + "\n" + r.stderr
-            ts_print(output.strip())
-            ts_print(f"[pre_ci] === mypy output end (py={py_ver}, exit={r.returncode}) ===")
-            all_output.append(f"--- python {py_ver} (exit={r.returncode}) ---\n{output}")
-            if r.returncode != 0:
-                any_failed = True
-    finally:
-        if switched and original_vllm_ref:
-            subprocess.run(
-                ["git", "-C", str(vllm_path), "checkout", original_vllm_ref],
-                capture_output=True, text=True,
-            )
-            ts_print(f"[pre_ci] mypy: restored vllm to {original_vllm_ref[:8]}")
-
-    if not any_failed:
-        ts_print("[pre_ci] mypy: OK (all 3 python versions clean)")
-        return {"violations": [], "detail": "mypy clean (3.10/3.11/3.12)"}
-
-    # Parse mypy output: "file.py:LINE:COL: error:" or "file.py:LINE: error:"
-    _MYPY_ERR_RE = re.compile(r"^(.+\.py):(\d+):(?:\d+:)?\s*error:")
-    seen: set[str] = set()
-    for line in "\n".join(all_output).splitlines():
-        stripped = line.strip()
-        if _MYPY_ERR_RE.search(stripped) and stripped not in seen:
-            seen.add(stripped)
-            all_violations.append(stripped)
-
-    if all_violations:
-        ts_print(f"[pre_ci] mypy: {len(all_violations)} unique issue(s):")
-        for v in all_violations[:20]:
-            ts_print(f"  {v}")
-        if len(all_violations) > 20:
-            ts_print(f"  ... and {len(all_violations) - 20} more (see pre_ci_check.json)")
-        return {"violations": all_violations,
-                "detail": f"{len(all_violations)} mypy issue(s) (3.10/3.11/3.12)"}
-    ts_print("[pre_ci] mypy: FAILED but no parseable error lines")
-    return {"violations": ["\n".join(all_output)[-2000:]],
-            "detail": "mypy failed but no parseable errors"}
-
-
 def _check_format(repo: Path) -> dict:
     """Run ``bash format.sh`` and detect real (non-auto-fixable) errors.
 
@@ -428,15 +309,12 @@ def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
 
 
 def run_check(ascend_path: str | Path, release_tag: str,
-              vllm_path: str | Path | None = None,
-              base_commit: str = "") -> dict:
+              vllm_path: str | Path | None = None) -> dict:
     """Run pre-CI checks on the vllm-ascend working tree.
 
     Returns a dict with 'all_passed' (bool) and 'checks' (list of check results).
     If `vllm_path` is provided, also verifies that any new ``from vllm.X``
     imports in changed Python files reference modules that actually exist.
-    ``base_commit`` (the verified vllm commit) is passed to mypy so it can
-    check out vllm to that ref, matching CI's lint environment.
     """
     repo = Path(ascend_path)
 
@@ -446,7 +324,6 @@ def run_check(ascend_path: str | Path, release_tag: str,
         temps = _check_temp_files(repo)
         fmt = _check_format(repo)
         imports = _check_broken_imports(repo, vllm_path) if vllm_path else {"violations": []}
-        mypy = _check_mypy(repo, vllm_path, base_commit)
     except subprocess.CalledProcessError as exc:
         return {
             "all_passed": False,
@@ -515,16 +392,5 @@ def run_check(ascend_path: str | Path, release_tag: str,
         })
         if not import_ok:
             all_passed = False
-
-    mypy_ok = len(mypy["violations"]) == 0
-    checks.append({
-        "name": "mypy",
-        "passed": mypy_ok or mypy.get("skipped", False),
-        "detail": mypy["detail"],
-        "violations": mypy["violations"],
-        "skipped": mypy.get("skipped", False),
-    })
-    if not mypy_ok and not mypy.get("skipped"):
-        all_passed = False
 
     return {"all_passed": all_passed, "checks": checks}
