@@ -70,11 +70,25 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
 
     Sets ``PRE_COMMIT_HOME`` to a persistent cache path so pre-commit hooks
     don't re-download environments on every invocation.
+
+    After format.sh, removes the ``gitleaks`` binary that ``gitleaks.sh``
+    downloads to the repo root when the system has no gitleaks in PATH.
+    This 22MB binary is a tool artifact, not an adaptation change - leaving
+    it would pollute ``git add -N`` / ``git diff`` / ``git add -A`` and end
+    up in the PR.
     """
     fmt_script = repo / "format.sh"
     env = os.environ.copy()
     env["PRE_COMMIT_HOME"] = "/root/.cache/main2main-pre-commit"
-    return subprocess.run(
+    r = subprocess.run(
         ["bash", str(fmt_script)], cwd=str(repo),
         capture_output=True, text=True, env=env,
     )
+    gitleaks_bin = repo / "gitleaks"
+    if gitleaks_bin.exists():
+        try:
+            gitleaks_bin.unlink()
+            ts_print("[format] removed downloaded gitleaks binary (tool artifact, not code)")
+        except OSError:
+            pass
+    return r
