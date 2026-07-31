@@ -918,4 +918,5 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             draft=draft,
             labels=labels,
             branch_name=branch_name,
+            base_ref=self.state.original_ascend_ref,
         )

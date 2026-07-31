@@ -215,33 +215,33 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
                                         output="", stderr=last_error)
 
 
-def _git_push(ascend_path: Path, branch: str) -> None:
+def _git_push(ascend_path: Path, branch: str, base_ref: str = "") -> None:
     # Final safety net: guarantee exactly 1 commit before push.
     # If generate_final_post squash failed for any reason, force-squash here.
+    # Use base_ref (original_ascend_ref from flow init) as the squash baseline -
+    # same as generate_final_post.  DO NOT use origin/main: when
+    # MAIN2MAIN_KEEP_BRANCH=true reuses a branch, origin/main (the fork's main)
+    # lags behind upstream main, so origin/main..HEAD includes thousands of
+    # upstream commits, and squashing them all produces a multi-GB commit that
+    # git push rejects with HTTP 413.
+    if not base_ref:
+        ts_print("[push] No base_ref provided, skipping force-squash safety net")
+        _push_via_proxy(ascend_path, os.environ.get("HEAD_FORK", ""),
+                        branch, "--force-with-lease")
+        return
     try:
         count = subprocess.run(
-            ["git", "rev-list", "--count", "origin/main..HEAD"],
+            ["git", "rev-list", "--count", f"{base_ref}..HEAD"],
             cwd=str(ascend_path), capture_output=True, text=True,
         )
         if count.returncode == 0 and int(count.stdout.strip() or "0") > 1:
-            # Find the merge-base with origin/main or use the first commit's parent
-            base = subprocess.run(
-                ["git", "merge-base", "HEAD", "origin/main"],
-                cwd=str(ascend_path), capture_output=True, text=True,
-            ).stdout.strip()
-            if not base:
-                base = subprocess.run(
-                    ["git", "rev-list", "--max-parents=0", "HEAD"],
-                    cwd=str(ascend_path), capture_output=True, text=True,
-                ).stdout.strip()
-            if base:
-                subprocess.run(["git", "reset", "--soft", base],
-                               cwd=str(ascend_path), capture_output=True)
-                subprocess.run(["git", "add", "-A"], cwd=str(ascend_path), capture_output=True)
-                subprocess.run(
-                    ["git", "commit", "-m", f"main2main: sync vllm upstream [{branch}]"],
-                    cwd=str(ascend_path), capture_output=True)
-                ts_print(f"[push] Force-squashed {count.stdout.strip()} commits into 1")
+            subprocess.run(["git", "reset", "--soft", base_ref],
+                           cwd=str(ascend_path), capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=str(ascend_path), capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", f"main2main: sync vllm upstream [{branch}]"],
+                cwd=str(ascend_path), capture_output=True)
+            ts_print(f"[push] Force-squashed {count.stdout.strip()} commits into 1 (base={base_ref[:8]})")
     except (ValueError, subprocess.CalledProcessError):
         pass
     _push_via_proxy(ascend_path, os.environ.get("HEAD_FORK", ""),
@@ -371,6 +371,7 @@ def push_and_create_pr(
     draft: bool = True,
     labels: list[str] | None = None,
     branch_name: str = "",
+    base_ref: str = "",
 ) -> str:
     """Create a branch (or reuse current), push to fork, and open a GitHub PR.
 
@@ -475,7 +476,7 @@ def push_and_create_pr(
             fork_url = f"https://github.com/{head_fork}.git"
             run_git(ascend_path, "remote", "set-url", "origin", fork_url)
             ts_print(f"[push] Set origin to {fork_url}")
-            _git_push(ascend_path, branch)
+            _git_push(ascend_path, branch, base_ref=base_ref)
             head_ref = f"{head_fork.split('/')[0]}:{branch}"
             ts_print(f"[push] Pushed to {fork_url}")
             run_git(ascend_path, "remote", "set-url", "origin", _saved_origin_url)
