@@ -79,7 +79,11 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
     """
     fmt_script = repo / "format.sh"
     env = os.environ.copy()
-    env["PRE_COMMIT_HOME"] = "/root/.cache/main2main-pre-commit"
+    # setdefault: respect an explicitly-set PRE_COMMIT_HOME (workflow sets
+    # /tmp/main2main-pre-commit), don't override it with /root/... which
+    # fails on non-root runners.
+    env.setdefault("PRE_COMMIT_HOME",
+                   str(Path.home() / ".cache" / "main2main-pre-commit"))
     r = subprocess.run(
         ["bash", str(fmt_script)], cwd=str(repo),
         capture_output=True, text=True, env=env,

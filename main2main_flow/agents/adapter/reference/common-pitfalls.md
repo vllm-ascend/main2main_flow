@@ -272,13 +272,107 @@ These are caught by the QA reviewer but should be applied proactively:
 - **Document default value changes**: when changing a parameter's default (e.g.
   `swiglu_limit: 0 → None`), explain the reason in step_summary.md.
 
+## Environment compatibility stubs (vllm main vs pinned deps)
+
+vllm-ascend pins dependencies (e.g. `triton-ascend==3.2.1`) that lag behind
+vllm main. When vllm main adds an import that the pinned dep can't satisfy,
+E2E tests fail with `ImportError` at vllm import time. **This is NOT an env
+flake to skip** - it is a real adaptation gap. The standard fix is a compat
+stub in `vllm_ascend/__init__.py` (runs at module-import time, before vllm's
+`triton_utils` import).
+
+**Classic case: triton.experimental.gluon**
+vllm main's `vllm/triton_utils/__init__.py` does `from triton.experimental
+import gluon`. triton-ascend 3.2.1's gluon module references `constexpr_type`
+which doesn't exist in its `triton.language.core` -> ImportError on every
+vllm import -> all E2E tests fail.
+
+**Fix** (see PR #13137): add to `vllm_ascend/__init__.py` at module level:
+```python
+import importlib.util
+import os
+import sys
+from types import ModuleType
+
+_triton_available = importlib.util.find_spec("triton") is not None
+
+if os.getenv("VLLM_VERSION", "") != "0.26.0":  # skip if release already has gluon
+    for _stub in ("triton.experimental.gluon", "triton.experimental.gluon.language"):
+        if _stub not in sys.modules:
+            sys.modules[_stub] = ModuleType(_stub)
+    if _triton_available:
+        try:
+            import triton.language.core as _tl_core  # type: ignore[import-untyped]
+        except Exception:
+            pass
+        else:
+            if not hasattr(_tl_core, "_aggregate"):  # vllm main post-0.26.0
+                _tl_core._aggregate = lambda *a, **kw: None
+```
+
+**Decision rule**: when E2E fails with `ImportError: cannot import name 'X'
+from 'Y'` where Y is a third-party dep (triton, torch, etc.) and X is a
+symbol vllm main newly references, do NOT mark as no-op/env-flake. Add a
+compat stub in `vllm_ascend/__init__.py` (module-level, before vllm imports).
+Use `vllm_version_is()` guard if the stub should only apply to certain
+versions.
+
+## mypy error codes (final quality gate)
+
+When the final quality gate runs mypy, failures carry error codes in `[...]`.
+Fix per-code:
+
+| Code | Meaning | Fix |
+|------|---------|-----|
+| `[override]` | subclass method signature incompatible with base | update subclass signature to match base (add missing params, fix types) |
+| `[call-arg]` | wrong number/type of arguments at call site | fix call site; use keyword args for new params |
+| `[arg-type]` | argument type mismatch | fix argument type, add cast, or guard by version |
+| `[return-value]` | return type mismatch | fix return type or add cast |
+| `[assignment]` | incompatible assignment | fix variable type or add cast |
+| `[import-not-found]` | module not found (version-guarded import) | add `# type: ignore[import-not-found]` on the import line |
+| `[import-untyped]` | module installed but missing `py.typed` (triton, torch_npu) | add `# type: ignore[import-untyped]` on the import line |
+| `[attr-defined]` | attribute not found | fix attribute name, or `# type: ignore[attr-defined]` if dynamic |
+| `[no-redef]` | redefinition of name | use different name or guard with version |
+| `[misc]` | other | read the message, fix accordingly |
+| `[valid-type]` | invalid type annotation | fix the annotation |
+| `[func-returns-value]` | function declared no return but returns value | fix return annotation or remove return |
+
+**Decision rule**:
+- `[import-not-found]` / `[import-untyped]`: use `# type: ignore[<code>]`
+  (the module genuinely lacks stubs or doesn't exist at this version).
+- All other codes: **fix the code**.  `# type: ignore` is a last resort
+  and will be flagged in review - it masks real type errors.  Only use it
+  when the type system genuinely can't express the runtime behavior (e.g.
+  dynamic attribute injection), and add a comment explaining why.
+
+**Common pattern**: `[override]` on a subclass method usually means upstream
+changed the base class signature - grep for ALL overrides of that method
+and update every one (see §"Missing override in sibling class").
+
 ## Fix mode workflow
 
+**Branch A - final quality gate (push-time format + mypy)**:
+If `error_logs` contains `quality_gate.json` (not `pre_ci_check.json`):
+1. Read `quality_gate.json` -> `checks[].violations` (format + mypy sections)
+2. For each format violation: fix `file:LINE:CODE` directly (E501 break line,
+   F401 delete import, F841 remove var). No upstream analysis needed.
+3. For each mypy violation: fix per error code (see mypy error codes above).
+   `[import-not-found]`/`[import-untyped]` -> `# type: ignore`; others -> fix code.
+4. Do NOT re-analyze upstream patch - these are mechanical fixes.
+5. After fixing, the gate re-runs format+mypy; if still failing, retry (max 3).
+   Then e2e re-runs to confirm no functional regression.
+
+**Branch B - per-step pre_ci / e2e failure**:
 1. Extract search term from error (method name, config field, class name)
 2. Search upstream patch (`{patch_path}`) for that term
 3. Identify upstream intent: rename, removal, new parameter, new method
-4. Map to vllm-ascend code that depends on it
+4. Map to vllm-ascend code that depends on it - use MCP tools if the
+   mapping is unclear:
+   - `get_cross_project_mapping()` for full vllm<->ascend path/class map
+   - `get_interface_surface(repo="vllm-ascend")` for inheritable interfaces
+   - `search_analysis(keywords=["<search term>"])` for similar past commits
+   - `get_adaptation_guide(sha=<end_commit>)` if vllm-report analyzed it
 5. Decide if `vllm_version_is` guard is needed
-6. Open pre_ci_check.json → read violations → fix each file:line:col:CODE
-   (do NOT run `bash format.sh` yourself — pre_ci runs it mechanically;
-   if it still fails, the new `pre_ci_check.json` will be fed back next round)
+6. Open pre_ci_check.json -> read violations -> fix each file:line:col:CODE
+   (format is NOT checked per-step anymore - it runs at push time via
+   Branch A. Only version_strings/temp_files/broken_imports run per-step.)

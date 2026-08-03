@@ -4,6 +4,29 @@
 > upstream-main code in the `else`/`not` branch and OLD release code in the
 > `if` branch. If you write a guard the other way around, it is **wrong**.
 
+## Using MCP tools to identify the right pattern
+
+Before picking a pattern below, use vllm-report MCP tools to confirm the
+upstream change type and find affected vllm-ascend code:
+
+- **Unsure which files are affected?** -> `get_cross_project_mapping()` for
+  vllm path -> ascend patch file mapping; `get_interface_surface()` for
+  inheritance chains.
+- **Need a step-by-step guide for this commit?** ->
+  `get_adaptation_guide(sha=<end_commit>)` returns line-numbered adaptation
+  steps if vllm-report has analyzed the commit.
+- **Seen a similar change before?** -> `search_analysis(keywords=["<changed
+  symbol>"])` finds past commits with the same pattern and their
+  `ascend_impact` analysis.
+- **Need to know how a patch category works?** ->
+  `get_patch_catalog(category="platform"|"worker")` returns known patch
+  patterns with `targets`, `why`, `how`, `related_pr`.
+- **Need to understand the subsystem architecture?** ->
+  `get_key_abstractions(repo="vllm-ascend")` for core abstractions;
+  `get_development_workflows()` for how to add patches/models.
+
+Limit to 2-3 MCP calls per step. If a tool fails, fall back to grep.
+
 ## 1. Upstream adds a parameter
 
 **Rule**: Add the parameter as a keyword argument with a default value.

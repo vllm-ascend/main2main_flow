@@ -146,9 +146,9 @@ SKIP_AI_ANALYSIS=true kickoff \
 
 路径规范化逻辑：优先使用 CLI 参数，其次读取对应环境变量，最后使用默认值（`workspace/repos/<name>`）。如果最终得到的路径是一个 GitHub URL（以 `https://` 或 `git@` 开头），则自动执行 `git clone`。
 
-`initialize` 还会保存 `original_vllm_ref` / `original_ascend_ref` 与 `branch_base_ref`（HEAD at init，用作 squash 基线），并修复 `.github/workflows/scripts/gitleaks.sh` 的可执行权限（git 不追踪 +x，checkout 后需要 `chmod 755`，否则 format.sh 会误报失败）。
+`initialize` 还会保存 `original_vllm_ref` / `original_ascend_ref`（HEAD at init，用作 squash 基线），并修复 `.github/workflows/scripts/gitleaks.sh` 的可执行权限（git 不追踪 +x，checkout 后需要 `chmod 755`，否则 format.sh 会误报失败）。
 
-**输出 state 字段**：`vllm_path`、`vllm_ascend_path`、`target_commit`、`test_log_dir`、`original_vllm_ref`、`original_ascend_ref`、`branch_base_ref`。
+**输出 state 字段**：`vllm_path`、`vllm_ascend_path`、`target_commit`、`original_vllm_ref`、`original_ascend_ref`。
 
 ---
 
@@ -305,7 +305,7 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 
 无论升级成功还是中途失败都会执行。做三件事：
 
-1. **Squash step commits**：把 `process_steps` 期间累积的 per-step checkpoint commits 用 `git reset --soft branch_base_ref` + `git commit` 压成单个 commit，确保 PR 只有一个 commit
+1. **Squash step commits**：把 `process_steps` 期间累积的 per-step checkpoint commits 用 `git reset --soft original_ascend_ref` + `git commit` 压成单个 commit，确保 PR 只有一个 commit
 2. **生成 PR body**：从各步 `step_summary.md` 提取 `Files`/`Upstream vLLM change`/`vllm-ascend adaptation` 三列表格，PR 日期取自 vllm target commit 的合入时间（非当前时间）
 3. **回滚 verified.commit**：若 `last_verified_commit != target`，把 `.github/vllm-main-verified.commit` 回滚到最后一个 e2e 通过的 commit，确保失败运行不会把 baseline 指向未验证 commit
 
@@ -323,7 +323,7 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 2. 创建新分支 `main2main_auto_<timestamp>`（或 `MAIN2MAIN_KEEP_BRANCH=true` 时复用现有分支）
 3. 应用 patch（若需），跑 `format.sh`，`git commit`（已有分支则 `--amend --no-edit`，把 format 修复合进现有 commit）
 4. 推送到 fork 仓库（`HEAD_FORK`，默认 `vllm-ascend-ci/vllm-ascend`），`--force-with-lease`
-5. 最后的安全网：`_git_push` 若检测到 `origin/main..HEAD` 多于 1 个 commit，会再次 force-squash 成单个 commit
+5. 最后的安全网：`_git_push` 若检测到 `original_ascend_ref..HEAD` 多于 1 个 commit，会再次 force-squash 成单个 commit
 6. `gh pr create` 创建 draft PR（最多重试 5 次），body 取自 `final_summary.md`
 7. 添加 PR labels（默认 `ready`）
 8. 关闭旧的 main2main auto PR（按 title pattern 匹配）

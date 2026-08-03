@@ -164,13 +164,18 @@ _PROXY_HOST = "gh-proxy.test.osinfra.cn"
 
 
 def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
-                    *extra_args: str) -> None:
+                    *extra_args: str, lease_branch: str = "") -> None:
     """Push a refspec through the CI proxy with token embedded in the URL.
 
     The CI runner has ``url.*.insteadOf`` rewrites that route
     ``https://github.com/`` through ``gh-proxy.test.osinfra.cn``.  The proxy
     allows anonymous fetch but needs a PAT token in the URL for push.
     Retries up to 5 times with linear backoff.
+
+    If ``lease_branch`` is given, re-fetch that branch to
+    ``refs/remotes/m2m-lease/<branch>`` before EACH attempt - the lease ref
+    must be fresh, or a stale ref makes --force-with-lease fail with
+    "stale info" on every retry.
     """
     token = os.environ.get("GH_TOKEN") or ""
     if not token:
@@ -187,6 +192,12 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
 
     last_error = ""
     for attempt in range(1, 6):
+        if lease_branch:
+            subprocess.run(
+                ["git", "fetch", f"https://github.com/{head_fork}.git",
+                 f"refs/heads/{lease_branch}:refs/remotes/m2m-lease/{lease_branch}"],
+                cwd=cwd, capture_output=True, text=True,
+            )
         subprocess.run(["git", "remote", "remove", push_remote],
                        cwd=cwd, capture_output=True, text=True)
         subprocess.run(["git", "remote", "add", push_remote, proxy_url],
@@ -226,8 +237,7 @@ def _git_push(ascend_path: Path, branch: str, base_ref: str = "") -> None:
     # git push rejects with HTTP 413.
     if not base_ref:
         ts_print("[push] No base_ref provided, skipping force-squash safety net")
-        _push_via_proxy(ascend_path, os.environ.get("HEAD_FORK", ""),
-                        branch, "--force-with-lease")
+        _push_with_lease(ascend_path, branch)
         return
     try:
         count = subprocess.run(
@@ -244,8 +254,24 @@ def _git_push(ascend_path: Path, branch: str, base_ref: str = "") -> None:
             ts_print(f"[push] Force-squashed {count.stdout.strip()} commits into 1 (base={base_ref[:8]})")
     except (ValueError, subprocess.CalledProcessError):
         pass
-    _push_via_proxy(ascend_path, os.environ.get("HEAD_FORK", ""),
-                    branch, "--force-with-lease")
+
+    _push_with_lease(ascend_path, branch)
+
+
+def _push_with_lease(ascend_path: Path, branch: str) -> None:
+    """Force-push with --force-with-lease, re-fetching the lease ref per attempt.
+
+    --force-with-lease requires a remote-tracking ref (refs/remotes/<remote>/<branch>).
+    On KEEP_BRANCH reuse the fork branch exists but the local repo has no
+    tracking ref for it (actions/checkout doesn't fetch it), so a bare
+    --force-with-lease would be rejected with "stale info".  _push_via_proxy
+    fetches the fork's ref to refs/remotes/m2m-lease/<branch> before each
+    attempt so the lease stays fresh.
+    """
+    head_fork = os.environ.get("HEAD_FORK", "")
+    _push_via_proxy(ascend_path, head_fork,
+                    branch, f"--force-with-lease=m2m-lease/{branch}",
+                    lease_branch=branch)
 
 
 def _close_old_main2main_prs(github_repo: str, current_pr_number: str) -> None:

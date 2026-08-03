@@ -52,9 +52,21 @@ The step_target.patch is cumulative (git diff HEAD).
   **Key question**: does vllm-ascend subclass, override, call, import, or read
   anything this patch changed? Internal upstream changes only need adaptation
   when vllm-ascend directly depends on the behavior.
-- Use the File Mapping Table in code-structure-guide.md to route changed
-  upstream paths to likely vllm-ascend files. If codegraph tools are available,
-  prefer them; if not, use grep/glob/file reads. Do not stall on missing tools.
+- **vllm-report impact map (this step's commit)**: {vllm_report_context}
+  Read this FIRST - it names the specific vllm-ascend classes/files affected by
+  this step's upstream commit (from per-commit analysis + cross-project maps).
+  The `patch_impact_map` and `definitely_affected_paths` are extracted from
+  vllm-ascend's `patch/__init__.py` registration code, so they reflect the
+  actual patch wiring. Verify each with a quick read; fall back to grep only
+  for gaps vllm-report didn't cover. If vllm-report says "no ascend impact"
+  but you find a base-class attribute change via grep, trust the grep -
+  vllm-report may not have analyzed this commit yet (only ~6 days of history,
+  older commits have no analysis).
+- Use the Key Areas in code-structure-guide.md as an
+  architecture-level supplement to vllm-report. When vllm-report is
+  unavailable (clone failed or commit not covered), use Key Areas to manually
+  route changed upstream paths to vllm-ascend files via grep. If codegraph
+  tools are available, prefer them; if not, use grep/glob/file reads.
 - Read enough of the vllm-ascend code to understand how the subsystem works —
   subclass chains, registration patterns, import structure. Skimming the
   relevant module is better than making a wrong assumption.
@@ -74,15 +86,17 @@ The step_target.patch is cumulative (git diff HEAD).
 ### adapt mode
 
 1. Read the upstream patch and changed file list from `{patch_path}` and `{changed_files_path}`
-2. Use targeted search to find the impacted vllm-ascend code (see Code Exploration)
+2. Read the vllm-report impact map in Code Exploration above FIRST, then use targeted search to verify and fill gaps
 3. Apply minimal changes — do not refactor unrelated code
 4. **Apply the Format rules and mypy prevention rules below WHILE editing**
-   (do NOT run `bash format.sh` or `tools/mypy.sh` yourself — pre_ci runs
-   them mechanically after you finish; if they fail, the exact
-   `file:LINE:CODE` is fed back via `pre_ci_check.json` in fix mode).
-   - **Ignore env noise in pre_ci output**: gitleaks "is not executable",
+   (format + mypy are NOT checked per-step - they run once at push time on
+   the cumulative diff. Fix format/mypy issues while editing to minimize
+   final quality-gate fix rounds. If the final gate fails, the exact
+   `file:LINE:CODE` is fed back via `quality_gate.json` in fix mode).
+   - **Ignore env noise in format output**: gitleaks "is not executable",
      shellcheck missing, "Exec format error" are infrastructure issues.
      Do NOT modify `.github/workflows/scripts/` to fix these.
+
 
 **Guard decision tree**:
 
@@ -155,6 +169,34 @@ scratch. Make minimal targeted fixes to the specific errors reported.
 → open failed tests from `suite_results[test_name]`. Read both `-summary.json`
 (structured code_bugs/env_flakes) and `.log` (raw traceback).
 
+**ImportError is NOT an env flake** - it is a real adaptation gap. When E2E
+fails with `ImportError: cannot import name 'X' from 'Y'` where Y is a
+pinned dep (triton, torch, etc.) and X is a symbol vllm main newly
+references, add a compat stub in `vllm_ascend/__init__.py` (module-level,
+before vllm imports). See `reference/common-pitfalls.md` §"Environment
+compatibility stubs" for the triton.experimental.gluon case (PR #13137).
+Do NOT mark the step as no-op/env-flake in this case.
+When the stub imports a third-party module without `py.typed` (e.g. triton),
+add `# type: ignore[import-untyped]` to the import - otherwise CI mypy fails
+with `[import-untyped]` on the stub code itself.
+
+**Final quality gate failures (push-time format + mypy)**: after all steps
+complete, format and mypy run once on the cumulative diff.  If they fail,
+`error_logs` contains `quality_gate.json` (NOT `pre_ci_check.json`).  Its
+shape:
+```json
+{{"all_passed": false, "checks": [
+  {{"name": "format", "violations": ["file.py:LINE:CODE ..."]}},
+  {{"name": "mypy",  "violations": ["file.py:LINE:COL: error: ... [override]"]}}
+]}}
+```
+Fix format violations by `file:LINE:CODE` (E501 break line, F401 delete
+import).  Fix mypy violations per error code - see
+`reference/common-pitfalls.md` §"mypy error codes".  These are mechanical
+fixes - do NOT re-analyze the upstream patch.  After fixing, e2e re-runs
+to confirm functional correctness; if e2e fails, the fix introduced a
+regression - revert and try a different approach.
+
 ## Output
 
 Write to {step_dir}/:
@@ -188,6 +230,76 @@ Do NOT write the same text for both fields.
 ## Last Step Only
 
 If {is_last_step}: check code-structure-guide.md freshness. If stale, write updated version as {step_dir}/{code_structure_guide_file}.
+
+## vllm-report MCP Tools (on-demand)
+
+A vllm-report MCP server is registered. You can call these **read-only** tools
+during adaptation to query deeper information not in the injected impact map.
+
+### How to use MCP tools - decision flow
+
+```
+1. Read {vllm_report_context} (injected, always available)
+   ├─ Has the commit been analyzed by vllm-report?
+   │   ├─ YES + has adaptation_guide -> Follow the guide, skip MCP calls
+   │   ├─ YES + says "no ascend impact" -> VERIFY with grep (may be wrong)
+   │   └─ NO (commit not covered) -> Call MCP tools to fill gaps
+   │
+2. Need to find which vllm-ascend files are affected?
+   ├─ {vllm_report_context} has patch_impact_map + definitely_affected_paths
+   ├─ Need FULL mapping (not just matched paths)? -> get_cross_project_mapping()
+   └─ Need interface inheritance details? -> get_interface_surface()
+   │      (returns 8 inheritable interfaces with ascend_impl + key_methods)
+   │
+3. Need to know HOW to adapt a specific change?
+   ├─ Call get_adaptation_guide(sha=<end_commit>)
+   │   -> Returns step-by-step guide with line numbers (if vllm-report analyzed it)
+   ├─ Call get_patch_catalog(category="platform"|"worker")
+   │   -> Returns known patch patterns (targets/why/how/related_pr)
+   └─ Call search_analysis(keywords=["<symbol_name>"], tags=["high-risk"])
+       -> Find similar past commits and how they were adapted
+   │
+4. Need to understand a subsystem before adapting?
+   ├─ Call get_key_abstractions(repo="vllm-ascend")
+   │   -> Core abstractions with inheritance chains
+   ├─ Call get_module_info(repo="vllm-ascend", module_name="<module>")
+   │   -> Module details (files, classes, dependencies)
+   └─ Call get_development_workflows()
+       -> How to add platform patch / worker patch / new model / attention backend
+   │
+5. In fix mode, need to understand why a test failed?
+   ├─ Call search_analysis(keywords=["<error keyword from traceback>"])
+   │   -> Find commits that caused similar errors
+   └─ Call get_commit_arch_delta(repo="vllm", sha="<end_commit>")
+       -> Architecture delta: what modules/abstractions changed
+```
+
+### Tool quick reference
+
+| Tool | Key parameters | What it returns |
+|------|---------------|-----------------|
+| `get_adaptation_guide` | `sha` | Step-by-step guide with line numbers |
+| `get_cross_project_mapping` | (none) | patch_impact_map + vllm_to_ascend_map + impact_judgment_rules |
+| `get_interface_surface` | `repo` | 8 inheritable interfaces with ascend_impl + key_methods |
+| `get_patch_catalog` | `category` (platform\|worker, optional) | Patches with targets/why/how/related_pr |
+| `search_analysis` | `keywords[]`, `tags[]`, `date_from`, `date_to` | Matching commits with ascend_impact |
+| `get_key_abstractions` | `repo` | Core abstractions with inheritance info |
+| `get_module_info` | `repo`, `module_name` | Module details (files, classes, deps) |
+| `get_commit_arch_delta` | `repo`, `sha` | Affected modules + change summary |
+| `get_ascend_impact_summary` | (auto from baseline) | Per-commit ascend impact for pending commits |
+| `get_development_workflows` | (none) | How to add patches/models/attention backends |
+| `get_pending_adaptations` | (none) | Commits pending adaptation (status, tags, impact) |
+
+### Rules
+
+- MCP tools are SUPPLEMENTARY to `{vllm_report_context}`. The injected impact
+  map already covers the basics. Call tools only when you need deeper info.
+- Do NOT call `update_adaptation_status` or `advance_baseline` - these are
+  write tools. main2main is a read-only consumer.
+- Limit to 2-3 tool calls per step. Each call takes ~1-2s; don't over-query.
+- If a tool call fails or times out, fall back to grep/file reads immediately.
+- When vllm-report says "no ascend impact" but grep finds a base-class change,
+  trust grep (vllm-report may not have analyzed this commit).
 
 ## Reference
 

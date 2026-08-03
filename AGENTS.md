@@ -26,7 +26,7 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
 - `main2main_flow/scripts/utils/` — deterministic helpers and shared utilities:
   - `utils.py` — filename constants, git helpers, `ts_print`
   - `detect_commits.py`, `plan_steps.py`, `update_commit_reference.py` — commit detection and planning
-  - `pre_ci_check.py` — version strings, temp files, format, broken imports checks
+  - `pre_ci_check.py` — per-step: version strings, temp files, broken imports; final gate: format + mypy (venv-isolated, numpy aligned to lint image)
   - `run_tests.py` — e2e test runner with parallel scheduling
   - `push_to_github.py` — push branch + create PR + add labels
   - `ci_log_summary.py` — test log parsing
@@ -47,10 +47,13 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
 
 Inside `_ai_analysis`, the attempt loop (up to 3×):
 1. **adapter** (role=adapter) — generates adaptations
-2. `format.sh` — lint + format
-3. `run_check` — pre-CI: version_strings, temp_files, format, broken_imports
-4. **adapter-qa** — independent AI review (separate opencode session, no generator context)
-5. All pass → break. Any fail → retry with **adapter-fix** (role=adapter-fix, with error_logs inlined).
+2. `run_check` — per-step pre-CI: version_strings, temp_files, broken_imports
+3. **adapter-qa** — independent AI review (separate opencode session, no generator context)
+4. All pass → break. Any fail → retry with **adapter-fix** (role=adapter-fix, with error_logs inlined).
+
+format + mypy are NOT run per-step - they run once at push time in the
+final quality gate (`final_quality_gate.py`), which fixes failures via
+adapter-fix (max 3 rounds) and re-runs e2e to confirm no regression.
 
 ## Env flags worth knowing
 

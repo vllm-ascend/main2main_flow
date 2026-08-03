@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -17,6 +18,8 @@ from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr
 from main2main_flow.scripts.utils.run_tests import run_tests
 from main2main_flow.scripts.utils.update_commit_reference import run_update
+from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
+from main2main_flow.scripts.utils.vllm_report import load_vllm_report_context
 from main2main_flow.scripts.utils.utils import (
     UpgradeCompleted, UpgradeFailed,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
@@ -68,7 +71,6 @@ class Main2MainState(BaseModel):
     vllm_path: str = ""
     vllm_ascend_path: str = ""
     target_commit: str = ""
-    test_log_dir: str = ""
 
     steps: list = []
     release_tag: str = ""
@@ -97,16 +99,16 @@ class Main2MainState(BaseModel):
     # Persistent opencode session ID for full conversational context
     session_id: str = ""
 
-    # Branch baseline ref (saved at init, before any step commits).
-    # Used as the squash baseline — always available, no remote ref needed.
-    branch_base_ref: str = ""
-
     # Persistent QA session — reused across retries so the reviewer doesn't
     # re-read the entire codebase from scratch on every attempt.
     qa_session_id: str = ""
 
     # Last vllm commit that actually passed e2e tests (not just was adapted)
     last_verified_commit: str = ""
+
+    # Local path to vllm-report checkout (cloned in initialize). Empty if
+    # clone failed - adapter degrades to grep-based code exploration.
+    vllm_report_path: str = ""
 
 
 class Main2MainFlow:
@@ -232,8 +234,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         self.state.target_commit = (
             self.state.target_commit or os.getenv("VLLM_TARGET_COMMIT", "")
         )
-        if not self.state.test_log_dir:
-            self.state.test_log_dir = str(WORKSPACE_DIR / "test-logs")
 
         vllm_branch = run_git(self.state.vllm_path, "branch", "--show-current").strip()
         self.state.original_vllm_ref = vllm_branch or run_git(self.state.vllm_path, "rev-parse", "HEAD").strip()
@@ -243,7 +243,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # Save current HEAD as the branch baseline — no remote ref needed.
         # Any subsequent step commits will be squashed relative to this ref.
         ascend_head = run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
-        self.state.branch_base_ref = ascend_head
         self.state.original_ascend_ref = ascend_head
 
         # Fix pre-commit hook permissions: git doesn't track +x, so gitleaks.sh
@@ -251,6 +250,87 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         gitleaks_script = Path(self.state.vllm_ascend_path) / ".github/workflows/scripts/gitleaks.sh"
         if gitleaks_script.exists():
             gitleaks_script.chmod(0o755)
+
+        # Clone vllm-report knowledge base (shallow) for adapter context.
+        # Non-fatal: if clone fails, adapter degrades to grep-based exploration.
+        try:
+            report_url = "https://github.com/vllm-ascend/vllm-report.git"
+            report_target = WORKSPACE_DIR / "repos" / "vllm-report"
+            if report_target.exists():
+                shutil.rmtree(report_target)
+            report_target.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["git", "clone", "--depth", "1", report_url, str(report_target)],
+                check=True, capture_output=True, text=True,
+            )
+            self.state.vllm_report_path = str(report_target)
+            ts_print(f"[init] vllm-report cloned to {report_target}")
+
+            # Install mcp dependency for vllm-report's MCP server.
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q",
+                 "mcp>=2.0.0", "anyio>=4.0.0"],
+                capture_output=True, text=True,
+            )
+
+            # Write opencode.jsonc to vllm-ascend repo root (flow's cwd),
+            # registering vllm-report MCP server.  opencode auto-reads this
+            # config file from cwd, so the adapter can call vllm-report's
+            # MCP tools (get_adaptation_guide, get_cross_project_mapping,
+            # search_analysis, etc.) on-demand during adaptation.
+            mcp_config = {
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {
+                    "vllm-report": {
+                        "type": "local",
+                        "command": [
+                            sys.executable,
+                            str(report_target / "src" / "mcp_server_app.py"),
+                            "--data-dir",
+                            str(report_target / "data"),
+                            "--ascend-repo-path",
+                            str(self.state.vllm_ascend_path),
+                        ],
+                        "enabled": True,
+                    }
+                }
+            }
+            # Write opencode.jsonc into the vllm-ascend repo root (opencode
+            # reads it from its cwd).  The MCP command embeds absolute /tmp
+            # paths, so this file MUST NOT be committed into the adaptation
+            # PR.  The first step commit runs `git add -A`, which would stage
+            # it — append to .git/info/exclude so git never tracks it.
+            opencode_config_path = Path(self.state.vllm_ascend_path) / "opencode.jsonc"
+            opencode_config_path.write_text(
+                json.dumps(mcp_config, indent=2) + "\n", encoding="utf-8"
+            )
+            # .git/info/exclude (not .gitignore) - local-only, doesn't pollute
+            # the repo or the PR diff.
+            exclude_file = Path(self.state.vllm_ascend_path) / ".git" / "info" / "exclude"
+            try:
+                exclude_content = exclude_file.read_text(encoding="utf-8")
+                if "opencode.jsonc" not in exclude_content:
+                    exclude_file.write_text(
+                        exclude_content.rstrip() + "\nopencode.jsonc\n", encoding="utf-8"
+                    )
+            except OSError:
+                # .git/info/exclude not writable - append to .gitignore instead
+                # so opencode.jsonc still doesn't get committed into the PR.
+                gitignore_path = Path(self.state.vllm_ascend_path) / ".gitignore"
+                try:
+                    gi_content = gitignore_path.read_text(encoding="utf-8")
+                    if "opencode.jsonc" not in gi_content:
+                        gitignore_path.write_text(
+                            gi_content.rstrip() + "\nopencode.jsonc\n", encoding="utf-8"
+                        )
+                        ts_print("[init] added opencode.jsonc to .gitignore (exclude not writable)")
+                except OSError:
+                    ts_print("[init] WARNING could not ignore opencode.jsonc - "
+                             "it may be committed into the PR!")
+            ts_print(f"[init] vllm-report MCP server registered in {opencode_config_path}")
+        except (subprocess.CalledProcessError, OSError) as e:
+            self.state.vllm_report_path = ""
+            ts_print(f"[init] vllm-report clone failed (adapter will use grep): {e}")
 
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
         vllm_path = Path(self.state.vllm_path)
@@ -319,9 +399,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 # generate_final_post / push with whatever passed in prior steps.
                 ts_print(f"[process_steps] {step_id}: ai_analysis exhausted retries, "
                          f"reverting to last committed state")
-                run_git(ascend_path, "checkout", "--", ".")
-                subprocess.run(["git", "clean", "-fd"],
-                               cwd=ascend_path, capture_output=True)
+                self._revert_working_tree(f"step {step_id} ai_analysis exhausted")
                 self.state.final_status = UpgradeFailed
                 return
 
@@ -340,10 +418,216 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             else:
                 self.state.retry_count += 1
                 if self.state.retry_count >= 3:
+                    # Revert the broken adaptation (passed pre_ci/critic but
+                    # failed e2e) so it doesn't leak into generate_final_post's
+                    # squash via `git add -A`. Same revert as Path A above.
+                    ts_print(f"[process_steps] {step_id}: e2e exhausted retries, "
+                             f"reverting to last committed state")
+                    self._revert_working_tree(f"step {step_id} e2e exhausted")
                     self.state.final_status = UpgradeFailed
                     return
                 continue
         self.state.final_status = UpgradeCompleted
+
+        # Final quality gate: format + mypy on the cumulative diff, before push.
+        # Failures enter adapter-fix mode (max 3 rounds); each fix re-runs e2e
+        # to confirm functional correctness wasn't broken by format/mypy edits.
+        if self.state.final_status == UpgradeCompleted:
+            if not self._final_quality_gate():
+                self.state.final_status = UpgradeFailed
+
+    def _capture_step_patch(self, ascend_path: str, step_dir: Path,
+                            step_id: str) -> None:
+        """Capture the working-tree diff as step_target.patch and set state.
+
+        Used by the no-adaptation branches (SKIP_AI_ANALYSIS / empty upstream
+        patch) where cur_patch_path must point at an existing file - run_tests'
+        setup_env exits if the patch is missing.
+        """
+        subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                       capture_output=True)
+        adaptation_patch = run_git(ascend_path, "diff", "HEAD")
+        (step_dir / EACH_STEP_TARGET_PATCH_FILE).write_text(
+            adaptation_patch, encoding="utf-8")
+        ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
+        step = self.state.steps[self.state.current_step]
+        self.state.cur_vllm_commit = step["end_commit"]
+        self.state.cur_ascend_commit = ascend_head
+        self.state.cur_patch_path = str(step_dir / EACH_STEP_TARGET_PATCH_FILE)
+        # No adaptation changes - clear stale changed_files from a prior step
+        # so e2e test selection doesn't filter by the wrong files.
+        self.state.changed_files = []
+
+    def _revert_working_tree(self, reason: str) -> None:
+        """Discard uncommitted working-tree changes (broken adaptations or
+        failed gate fixes) so they don't leak into generate_final_post's
+        squash via `git add -A`."""
+        ts_print(f"[flow] reverting working tree: {reason}")
+        # reset -q clears the index (staged content + `git add -N` intent-to-add
+        # entries) that checkout/clean don't remove.
+        run_git(self.state.vllm_ascend_path, "reset", "-q")
+        run_git(self.state.vllm_ascend_path, "checkout", "--", ".")
+        subprocess.run(["git", "clean", "-fd"],
+                       cwd=self.state.vllm_ascend_path, capture_output=True)
+
+    def _final_quality_gate(self) -> bool:
+        """Run format + mypy on final diff; fix + re-run e2e on failure.
+
+        Returns True if quality gate passes (possibly after fixes), False if
+        3 fix rounds exhausted without passing.
+        """
+        ascend_path = self.state.vllm_ascend_path
+        vllm_path = self.state.vllm_path
+        # Use a dedicated dir under workspace for quality_gate artifacts.
+        gate_dir = WORKSPACE_DIR / "quality_gate"
+        gate_dir.mkdir(parents=True, exist_ok=True)
+
+        error_logs: list[str] = []
+        for attempt in range(1, 4):
+            passed, new_error_logs = run_final_quality_gate(
+                ascend_path=ascend_path,
+                vllm_path=vllm_path,
+                release_tag=self.state.release_tag,
+                log_dir=gate_dir,
+            )
+            if passed:
+                if attempt > 1:
+                    # We fixed something - re-run e2e to confirm functional
+                    # correctness wasn't broken by format/mypy edits.
+                    ts_print(f"[final_quality_gate] fix attempt {attempt}: passed, "
+                             f"re-running e2e to confirm functionality")
+                    if not self._run_e2e_test_for_final_gate():
+                        # Revert the regression-inducing fix so it doesn't get
+                        # pushed (KEEP_BRANCH mode does `git add -A` + amend),
+                        # then continue the fix loop with remaining rounds.
+                        # The gate will re-run format+mypy on the reverted tree.
+                        ts_print(f"[final_quality_gate] e2e regression after fix - "
+                                 f"reverting fix, continuing to next round")
+                        self._revert_working_tree("gate fix caused e2e regression")
+                        error_logs = [str(Path(gate_dir) / "quality_gate.json")]
+                        continue
+                ts_print(f"[final_quality_gate] PASSED (attempt {attempt})")
+                # Regenerate the cumulative patch from the CURRENT working
+                # tree so it includes format/mypy fixes made by the gate.
+                # Use `git diff <original_ascend_ref>` (baseline -> working
+                # tree): `git diff HEAD` would only contain uncommitted fixes
+                # (steps are already committed).  Write to a dedicated file;
+                # generate_final_post prefers it over the pre-gate step patch.
+                subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                               capture_output=True)
+                gate_patch = run_git(
+                    ascend_path, "diff", self.state.original_ascend_ref)
+                (WORKSPACE_DIR / "gate_final_patch").write_text(
+                    gate_patch, encoding="utf-8")
+                ts_print(f"[final_quality_gate] regenerated gate_final_patch "
+                         f"({len(gate_patch.splitlines())} lines) with gate fixes")
+                return True
+
+            error_logs = new_error_logs
+            ts_print(f"[final_quality_gate] fix attempt {attempt}/3: FAILED "
+                     f"-> adapter-fix")
+
+            role = "adapter-fix"
+            ts_print(f"[final_quality_gate] opencode attempt {attempt}, role={role}")
+            adapt_result = run_opencode_adapter({
+                "step_id": "final-quality-gate",
+                "previous_step_id": "",
+                "previous_step_summary_path": "",
+                "is_last_step": "true",
+                "step_dir": str(gate_dir),
+                "patch_path": "",
+                "changed_files_path": "",
+                "ascend_path": ascend_path,
+                "release_tag": self.state.release_tag,
+                "vllm_path": vllm_path,
+                "role": role,
+                "error_logs": json.dumps(error_logs, ensure_ascii=False),
+                "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
+                "mode": role,
+                "vllm_report_context": "",
+            }, session_id=self.state.session_id)
+            if adapt_result.session_id:
+                self.state.session_id = adapt_result.session_id
+
+        ts_print("[final_quality_gate] exhausted 3 fix rounds, still failing")
+        # Revert the last failed fix round so it doesn't leak into
+        # generate_final_post's squash via `git add -A` and get pushed
+        # (KEEP_BRANCH mode does add -A + amend at push time).
+        self._revert_working_tree("final quality gate exhausted 3 fix rounds")
+        return False
+
+    def _run_e2e_test_for_final_gate(self) -> bool:
+        """Re-run e2e after final-quality-gate fixes to confirm no regression.
+
+        Key differences from per-step _run_e2e_test:
+        - SKIP_PIP_INSTALL=true: vllm package didn't change (only vllm-ascend
+          code was edited by format/mypy fixes), skip the 2-3min reinstall.
+        - Regenerate patch from current working tree (format/mypy fixes are
+          in the working tree, not in the old step_target.patch).
+        - Force MAIN2MAIN_KEEP_BRANCH=true so setup_env doesn't reset
+          vllm-ascend (which would discard the format/mypy fixes).
+        """
+        if not self.state.steps:
+            return True
+        if os.getenv("SKIP_E2E_TEST", "false").lower() == "true":
+            ts_print("[final_quality_gate] SKIP_E2E_TEST=true, skipping regression e2e")
+            return True
+
+        ascend_path = self.state.vllm_ascend_path
+        vllm_path = self.state.vllm_path
+        step = self.state.steps[-1]
+        step_id = step["id"]
+
+        # Regenerate patch from current working tree (post format/mypy fix).
+        subprocess.run(["git", "add", "-N", "."], cwd=ascend_path, capture_output=True)
+        new_patch = run_git(ascend_path, "diff", "HEAD")
+        gate_dir = WORKSPACE_DIR / "quality_gate"
+        patch_path = gate_dir / "final_gate.patch"
+        patch_path.write_text(new_patch, encoding="utf-8")
+        ts_print(f"[final_quality_gate] regenerated patch ({len(new_patch)} bytes) "
+                 f"for regression e2e")
+
+        # Use the CUMULATIVE changed files (baseline -> final tree) for test
+        # selection.  The last step's changed_files only covers that step, but
+        # gate format/mypy fixes can touch ANY file in the repo (mypy runs the
+        # whole tree), so the regression e2e must cover all accumulated changes.
+        cumulative_files = run_git(
+            ascend_path, "diff", "--name-only", self.state.original_ascend_ref
+        ).strip().splitlines()
+        cumulative_files = [f for f in cumulative_files if f]
+
+        # Save and override env vars to skip vllm reinstall + preserve ascend tree.
+        saved_skip_pip = os.environ.get("SKIP_PIP_INSTALL", "")
+        saved_keep_branch = os.environ.get("MAIN2MAIN_KEEP_BRANCH", "")
+        os.environ["SKIP_PIP_INSTALL"] = "true"
+        os.environ["MAIN2MAIN_KEEP_BRANCH"] = "true"
+        try:
+            result = run_tests(
+                vllm_path=vllm_path,
+                vllm_commit=self.state.cur_vllm_commit,
+                ascend_path=ascend_path,
+                ascend_commit=self.state.cur_ascend_commit,
+                patch_path=str(patch_path),
+                step_id=step_id,
+                select_by_files=cumulative_files or None,
+                test_cases=_resolve_test_cases(),
+                remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
+                round_number=0,
+                log_dir=str(WORKSPACE_DIR / STEPS_DIR),
+            )
+        finally:
+            if saved_skip_pip:
+                os.environ["SKIP_PIP_INSTALL"] = saved_skip_pip
+            else:
+                os.environ.pop("SKIP_PIP_INSTALL", None)
+            if saved_keep_branch:
+                os.environ["MAIN2MAIN_KEEP_BRANCH"] = saved_keep_branch
+            else:
+                os.environ.pop("MAIN2MAIN_KEEP_BRANCH", None)
+
+        test_passed = result.get("can_commit", False)
+        ts_print(f"[final_quality_gate] regression e2e: {'PASSED' if test_passed else 'FAILED'}")
+        return test_passed
 
     def _ai_analysis(self) -> bool:
         step = self.state.steps[self.state.current_step]
@@ -362,12 +646,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ascend_path = self.state.vllm_ascend_path
             if self.state.retry_count == 0:
                 run_git(vllm_path, "checkout", step["end_commit"])
-                run_update(ascend_path=Path(ascend_path), old_commit=step["start_commit"],
-                           new_commit=step["end_commit"])
-            ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
-            self.state.cur_vllm_commit = step["end_commit"]
-            self.state.cur_ascend_commit = ascend_head
-            self.state.cur_patch_path = str(step_dir / EACH_STEP_TARGET_PATCH_FILE)
+                try:
+                    run_update(ascend_path=Path(ascend_path), old_commit=step["start_commit"],
+                               new_commit=step["end_commit"])
+                except ValueError:
+                    ts_print(f"[ai_analysis] {step_id}: commit ref already updated, skipping")
+            self._capture_step_patch(ascend_path, step_dir, step_id)
             return True
 
         # When upstream_patch is empty and this is the first attempt, skip the
@@ -391,10 +675,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                       f"{ref_result['files_updated']}")
             except ValueError:
                 ts_print(f"[ai_analysis] {step_id}: commit ref already updated, skipping")
-            subprocess.run(["git", "add", "-N", "."], cwd=ascend_path, capture_output=True)
-            adaptation_patch = run_git(ascend_path, "diff", "HEAD")
-            (step_dir / EACH_STEP_TARGET_PATCH_FILE).write_text(
-                adaptation_patch, encoding="utf-8")
             summary_path = step_dir / EACH_STEP_SUMMARY_FILE
             if not summary_path.exists():
                 summary_path.write_text(
@@ -407,10 +687,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 ["git", "checkout", "--", "."], cwd=vllm_path, capture_output=True, text=True)
             if reset_r.returncode != 0:
                 ts_print(f"[ai_analysis] {step_id}: failed to reset vllm: {reset_r.stderr.strip()}")
-            ascend_head = run_git(ascend_path, "rev-parse", "HEAD").strip()
-            self.state.cur_vllm_commit = step["end_commit"]
-            self.state.cur_ascend_commit = ascend_head
-            self.state.cur_patch_path = str(step_dir / EACH_STEP_TARGET_PATCH_FILE)
+            self._capture_step_patch(ascend_path, step_dir, step_id)
             return True
 
         previous_step = self.state.steps[self.state.current_step - 1] if self.state.current_step > 0 else None
@@ -451,6 +728,25 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         pre_ci_passed = False
         review_passed = False
 
+        # Load vllm-report impact context once per step (not per attempt).
+        # Same step's end_commit + changed_files -> same context; attempt 2/3
+        # (fix mode) reuses it via session, so _build_prompt skips re-sending.
+        vllm_report_context = ""
+        if self.state.vllm_report_path:
+            changed = [f for f in step.get("changed_files", "").strip().splitlines() if f]
+            vllm_report_context = load_vllm_report_context(
+                Path(self.state.vllm_report_path),
+                step["end_commit"],
+                changed,
+                ascend_path=self.state.vllm_ascend_path,
+            )
+            if vllm_report_context:
+                ts_print(f"[ai_analysis] {step_id}: vllm-report context loaded "
+                         f"({len(vllm_report_context.splitlines())} lines) for {step['end_commit'][:8]}")
+            else:
+                ts_print(f"[ai_analysis] {step_id}: vllm-report no data for {step['end_commit'][:8]} "
+                         f"(commit not covered or no path match)")
+
         for attempt in range(1, 4):
             role = "adapter-fix" if error_logs else "adapter"
             ts_print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, role={role}")
@@ -469,6 +765,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 "error_logs": json.dumps(error_logs, ensure_ascii=False),
                 "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
                 "mode": role,
+                "vllm_report_context": vllm_report_context,
             }, session_id=self.state.session_id)
             if adapt_result.session_id:
                 self.state.session_id = adapt_result.session_id
@@ -718,8 +1015,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         step_dir = WORKSPACE_DIR / STEPS_DIR / last_step["id"]
         final_summary_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
         step_patch = step_dir / EACH_STEP_TARGET_PATCH_FILE
-        has_patch = step_patch.exists()
-        if has_patch:
+        # Prefer the gate-regenerated cumulative patch (includes format/mypy
+        # fixes made by the final quality gate).  The step patch was captured
+        # BEFORE the gate, so it lacks those fixes.
+        gate_patch = WORKSPACE_DIR / "gate_final_patch"
+        if gate_patch.exists() and gate_patch.stat().st_size > 0:
+            shutil.copy2(gate_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
+            ts_print("[generate_final_post] Using gate-regenerated patch (with gate fixes) as final_target.patch")
+        elif step_patch.exists():
             shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
 
         # Build PR body: concise numbered list matching PR #5595 style.

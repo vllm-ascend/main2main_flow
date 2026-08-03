@@ -48,6 +48,10 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     refs_loaded: list[str] = []
     if role == "adapter-fix":
         ref_content = "(reference docs already in session context — see previous messages)"
+        # vllm-report context is per-step; in fix mode (same step, retry) it is
+        # already in session - do not re-send.
+        if ctx.get("vllm_report_context"):
+            ctx["vllm_report_context"] = "(vllm-report impact map already in session context — see previous messages)"
     else:
         ref_names = ["adaptation-patterns.md",
                      "common-pitfalls.md"]
@@ -63,6 +67,9 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
         ref_content = "\n\n".join(parts)
 
     ctx["reference_content"] = ref_content
+    # Ensure vllm_report_context placeholder is never empty (avoids KeyError
+    # in format_map if flow did not pass it, e.g. CLI/debug invocations).
+    ctx.setdefault("vllm_report_context", "(vllm-report unavailable, use grep)")
 
     # Inline error content from error_logs files (if any).
     # error_logs is a JSON array of file paths, e.g. ["/path/a.txt", "/path/b.json"].
@@ -190,7 +197,17 @@ def run_opencode_adapter(inputs: dict[str, Any],
                     ts_print(f"[opencode] stderr tail:\n{err_text.strip()}", flush=True)
             last_reason = last_reason or "hard_failure"
             if attempt < _MAX_STALE_RETRIES:
-                prompt = _build_continue_prompt(inputs, attempt + 1)
+                if session_id:
+                    # Session exists - continue it with a short prompt.
+                    prompt = _build_continue_prompt(inputs, attempt + 1)
+                else:
+                    # No session was ever established (launch crash before
+                    # sessionID event).  A continue prompt would tell the model
+                    # to "re-read from session history" that doesn't exist.
+                    # Re-send the full base prompt so the model has context.
+                    ts_print(f"\n[opencode] no session established - re-sending full prompt "
+                             f"(retry {attempt + 1})", flush=True)
+                    prompt = base_prompt
                 continue
             break
 

@@ -28,10 +28,13 @@ import argparse
 import concurrent.futures
 import json
 import os
+import queue
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -416,15 +419,64 @@ def _build_setup_script(vllm_path: Path, vllm_commit: str, ascend_path: Path,
 def _run_to_log(command: list[str], cwd: Path, log_path: Path,
                 env: dict[str, str]) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # start_new_session=True puts the child (pytest + its vllm workers) in a
+    # separate process group so we can kill the entire group on timeout.
+    # Without this, a vllm worker that hangs after pytest exits keeps stdout
+    # open and `for line in proc.stdout` never sees EOF — the flow hangs
+    # forever (see runs 30502548494 and 30645455161, both hung 4-36 hours).
+    proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            close_fds=True, start_new_session=True)
+    assert proc.stdout is not None
+
+    # Per-suite timeout (env-configurable, default 30 min).
+    timeout_s = int(os.environ.get("MAIN2MAIN_TEST_TIMEOUT", "1800"))
+    deadline = time.monotonic() + timeout_s
+
     with log_path.open("w", encoding="utf-8") as f:
-        proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, bufsize=1,
-                                close_fds=True)
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            f.write(line)
-            ts_print(line, end="", flush=True)
-        return proc.wait()
+        lines_queue: queue.Queue[str | None] = queue.Queue()
+
+        def _reader():
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                lines_queue.put(line)
+            lines_queue.put(None)
+
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+
+        killed = False
+        try:
+            while True:
+                try:
+                    line = lines_queue.get(timeout=1.0)
+                except queue.Empty:
+                    now = time.monotonic()
+                    if now > deadline:
+                        ts_print(f"\n  [TIMEOUT] suite exceeded {timeout_s}s, killing process group",
+                                 flush=True)
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            proc.kill()
+                        killed = True
+                        continue
+                    continue
+                if line is None:
+                    break
+                f.write(line)
+                ts_print(line, end="", flush=True)
+        finally:
+            if killed:
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            else:
+                proc.wait()
+
+    return proc.returncode
 
 
 def _run_summary(ci_log_summary: Path, log_path: Path, summary_path: Path,
