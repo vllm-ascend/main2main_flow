@@ -317,6 +317,52 @@ compat stub in `vllm_ascend/__init__.py` (module-level, before vllm imports).
 Use `vllm_version_is()` guard if the stub should only apply to certain
 versions.
 
+## `device_index` must be passed explicitly (not ambient)
+
+When calling NPU device APIs (e.g. `npu_generate_uuid()`,
+`torch.npu.current_device()`), always pass `device_index` explicitly from
+`self.device.index` or the caller-provided index. The ambient current
+device (`torch.accelerator.current_device_index()`) is NOT guaranteed to
+match `self.device` - in multi-card or DP scenarios the ambient device
+can be wrong, causing `ValueError` (wrong UUID) or silent corruption.
+
+```python
+# Wrong - uses ambient device, may not match self.device
+device_index = self.device.index
+uuid = npu_generate_uuid()  # falls back to torch.accelerator.current_device_index()
+
+# Right - pass device_index explicitly
+uuid = npu_generate_uuid(device_index)
+```
+
+This applies to ALL NPU device-specific calls inside version-guarded
+branches - both the `if vllm_version_is(...)` (old) and `else` (new)
+branches must pass `device_index` consistently.
+
+## Variable name shadowing
+
+Do not name a local variable the same as a variable in an enclosing
+scope (module-level, class-level, or outer function). The inner variable
+silently overrides the outer one, causing `AttributeError` or wrong-type
+errors at the call site that uses the outer variable.
+
+```python
+# Wrong - local `client` shadows the global `client` (OpenAI client)
+client = HTTPVLLMWeightSyncClient(base_url=BASE_URL)
+# ... later ...
+generate_completions(client, ...)  # uses HTTPVLLMWeightSyncClient, not OpenAI!
+
+# Right - rename the local
+sync_client = HTTPVLLMWeightSyncClient(base_url=BASE_URL)
+```
+
+When adding version-guarded code, check that new local variables don't
+shadow existing names in the same file - grep for the variable name
+before introducing it:
+```bash
+grep -n "client" <file>.py  # check for existing uses
+```
+
 ## mypy error codes (final quality gate)
 
 When the final quality gate runs mypy, failures carry error codes in `[...]`.

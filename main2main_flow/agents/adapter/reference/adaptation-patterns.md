@@ -157,6 +157,16 @@ Adapter marks step as no-op ("ReplaySSM is NVIDIA-only"). But
 `NPUInputBatch` (which doesn't set it) crashes with `AttributeError:
 'NPUInputBatch' object has no attribute 'use_replayssm'` on every request.
 
+When the new parameter is accepted but vllm-ascend does NOT implement the
+feature (the kwarg exists only for interface alignment), add a comment:
+```python
+# main2main compat: `use_replayssm` and `slot_mapping_modes` were added
+# to upstream InputBatch.__init__() in vllm main after 0.26.0.
+# NPU does not implement Mamba replay-SSM, so the kwargs are only
+# accepted for interface alignment.
+# Remove the version guard once 0.26.0 support is dropped.
+```
+
 ## 10. Upstream changes a method signature — check ALL overrides
 
 **Rule**: After changing a method signature, grep for ALL overrides:
@@ -187,6 +197,75 @@ layer = next(l for l in model.layers if l.name == target)
 
 # Right
 layer = next((l for l in model.layers if l.name == target), None)
+```
+
+## 13. Upstream adds parameters to a method that vllm-ascend overrides
+
+**Rule**: When upstream adds new parameters to a method signature and
+vllm-ascend overrides that method, define TWO versions of the method
+via `if vllm_version_is()` instead of using `**kwargs`.  The `else`
+branch (new signature) must carry `# type: ignore[misc]` because mypy
+sees two different signatures for the same method name.
+
+This pattern is better than `**kwargs` because:
+- Type checkers can see the new parameters (call sites are validated)
+- Call sites don't need to change
+- The old branch preserves the exact pre-change signature
+
+```python
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.26.0"):
+    def _maybe_reduce_shared_expert_output(self, hidden_states, ...):
+        # Old signature - no shared_experts_input param
+        ...
+else:
+    def _maybe_reduce_shared_expert_output(  # type: ignore[misc]
+        self, hidden_states, ..., shared_experts_input=None,
+    ):
+        # New signature - param accepted but may be unused
+        # if vllm-ascend handles shared experts differently
+        ...
+```
+
+When the new parameter is accepted but NOT used (vllm-ascend doesn't
+implement the feature), add a comment explaining why:
+```python
+# main2main compat: `shared_experts_input` was added to upstream
+# MoERunnerInterface.forward in vllm main after 0.26.0.
+# vllm-ascend handles shared expert TP internally in
+# _forward_shared_experts, so the kwarg is unused here.
+```
+
+## 14. Upstream changes a Triton kernel signature - match the call site
+
+**Rule**: When upstream adds parameters to a Triton kernel that
+vllm-ascend monkey-patches (via `ops.X = ascend_X`), the Ascend kernel's
+signature MUST match the upstream call site exactly.  Triton validates
+argument count at launch time - a mismatch causes a runtime crash, not a
+compile error.
+
+```python
+# Upstream added temperature/seeds params to _prepare_dflash_inputs_kernel
+# Ascend's patched version must accept them too:
+if vllm_version_is("0.26.0"):
+    @triton.jit
+    def _prepare_dflash_inputs_kernel_ascend(..., temperature_ptr, seeds_ptr):
+        # Old signature without temperature/seeds
+        ...
+else:
+    @triton.jit
+    def _prepare_dflash_inputs_kernel_ascend(
+        ..., out_temperature_ptr, out_seeds_ptr,
+        temperature_ptr, seeds_ptr,  # new params from upstream #50000
+    ):
+        ...
+```
+
+After changing the kernel signature, grep for the call site to verify
+the caller passes the new arguments:
+```bash
+grep -rn "_prepare_dflash_inputs_kernel_ascend" vllm_ascend/
 ```
 
 ## Mypy prevention

@@ -144,6 +144,25 @@ Does this code path need to support BOTH the release version AND upstream main?
     changes what a method returns (e.g. `list` → `tuple[list, int]`), grep
     every `return` in that method.  A single leftover `return old_list`
     causes `AttributeError` at runtime — pre_ci and mypy cannot catch it.
+17. **Conditional method definition**: when using `if vllm_version_is()`
+    to define two versions of the same method (old vs new signature), the
+    `else` branch (new signature) MUST carry `# type: ignore[misc]` -
+    mypy sees two different signatures for the same name.  See
+    `reference/adaptation-patterns.md` §13.
+18. **Triton kernel signature match**: when upstream changes a Triton
+    kernel that vllm-ascend monkey-patches, the Ascend kernel's signature
+    MUST match the upstream call site exactly (Triton validates arg count
+    at launch, not at definition).  Grep the call site after changing the
+    signature.  See `reference/adaptation-patterns.md` §14.
+19. **`device_index` passed explicitly**: NPU device APIs (e.g.
+    `npu_generate_uuid()`) must receive `device_index` from
+    `self.device.index`, not rely on the ambient current device.  See
+    `reference/common-pitfalls.md` §"`device_index` must be passed
+    explicitly".
+20. **No variable name shadowing**: new local variables must not shadow
+    names in enclosing scopes (module/class/outer function).  Grep the
+    file for the name before introducing it.  See
+    `reference/common-pitfalls.md` §"Variable name shadowing".
 
 **Format rules — apply WHILE editing, not after:**
 
