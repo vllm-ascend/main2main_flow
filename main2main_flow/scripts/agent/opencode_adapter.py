@@ -430,7 +430,10 @@ def _print_event(line: str, state: _EventState) -> None:
         elif status == "completed":
             output = st.get("output", "")
             if output:
-                agent = state._tool_by_call.get(call_id, "")
+                # Try callID map first (set by pending event); fall back to
+                # the tool name in the completed event itself (MCP tools may
+                # not emit a pending event, so the map is empty).
+                agent = state._tool_by_call.get(call_id, "") or tool
                 label = f"agent: {agent}" if agent else "agent"
                 # Truncate very long outputs for display
                 display = output if len(output) <= 3000 else output[:3000] + "\n... [truncated]"
