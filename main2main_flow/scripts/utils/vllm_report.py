@@ -226,11 +226,16 @@ def load_vllm_report_context(
         # relevant, keeping prompt size bounded (vs. unconditional all-4 which
         # injected ~28K chars/step, most of it noise for the step).
         categories = _classify_changed_files(changed_files)
-        ts_print(f"[vllm_report] changed_files classified as: {categories or '(none)'}")
+        ts_print(f"\n[vllm_report] changed_files classified as: {categories or '(none)'}")
 
         if vllm_target_commit:
+            ts_print(f"[vllm_report] → calling MCP tool: "
+                     f"tool_get_adaptation_guide({vllm_target_commit[:8]})")
             guide = _asyncio.run(
                 mcp_server_app.tool_get_adaptation_guide(vllm_target_commit))
+            guide_lines = len(guide.splitlines()) if guide else 0
+            ts_print(f"[vllm_report] ← tool_get_adaptation_guide returned "
+                     f"{guide_lines} lines")
             if guide and "未找到" not in guide:
                 sections.append("### Commit adaptation guide")
                 sections.append(guide)
@@ -242,26 +247,46 @@ def load_vllm_report_context(
         # platform patches - the mapping tells the adapter where.
         if any(c in categories for c in ("platform", "distributed", "config",
                                          "compilation", "multimodal", "models")):
+            ts_print("[vllm_report] → calling MCP tool: "
+                     "tool_get_cross_project_mapping()")
             mapping = _asyncio.run(mcp_server_app.tool_get_cross_project_mapping())
+            map_lines = len(mapping.splitlines()) if mapping else 0
+            ts_print(f"[vllm_report] ← tool_get_cross_project_mapping returned "
+                     f"{map_lines} lines")
             if mapping:
                 sections.append("### Cross-project mapping")
                 sections.append(mapping)
 
         if "attention" in categories:
+            ts_print('[vllm_report] → calling MCP tool: '
+                     'tool_get_interface_surface("vllm-ascend")')
             iface = _asyncio.run(
                 mcp_server_app.tool_get_interface_surface("vllm-ascend"))
+            iface_lines = len(iface.splitlines()) if iface else 0
+            ts_print(f"[vllm_report] ← tool_get_interface_surface returned "
+                     f"{iface_lines} lines")
             if iface:
                 sections.append("### Interface surface")
                 sections.append(iface)
 
         if "worker" in categories or "moe" in categories:
+            ts_print('[vllm_report] → calling MCP tool: '
+                     'tool_get_patch_catalog("worker")')
             catalog = _asyncio.run(mcp_server_app.tool_get_patch_catalog("worker"))
+            cat_lines = len(catalog.splitlines()) if catalog else 0
+            ts_print(f"[vllm_report] ← tool_get_patch_catalog(worker) returned "
+                     f"{cat_lines} lines")
             if catalog:
                 sections.append("### Patch catalog (worker)")
                 sections.append(catalog)
 
         if "platform" in categories:
+            ts_print('[vllm_report] → calling MCP tool: '
+                     'tool_get_patch_catalog("platform")')
             catalog = _asyncio.run(mcp_server_app.tool_get_patch_catalog("platform"))
+            cat_lines = len(catalog.splitlines()) if catalog else 0
+            ts_print(f"[vllm_report] ← tool_get_patch_catalog(platform) returned "
+                     f"{cat_lines} lines")
             if catalog:
                 sections.append("### Patch catalog (platform)")
                 sections.append(catalog)
@@ -275,7 +300,7 @@ def load_vllm_report_context(
                             "(may be too recent). Use grep to verify impact.")
 
     except Exception as e:
-        ts_print(f"[vllm_report] MCP tool call failed ({e}), falling back to JSON direct-read")
+        ts_print(f"\n[vllm_report] MCP tool call failed ({e}), falling back to JSON direct-read")
 
     # JSON direct-read fallback: only runs when MCP produced NOTHING (import
     # failure or all tool calls raised).  If MCP partially succeeded, the

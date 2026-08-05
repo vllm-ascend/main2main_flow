@@ -301,7 +301,7 @@ def _close_old_main2main_prs(github_repo: str, current_pr_number: str) -> None:
         if num == current_pr_number:
             continue
         title = pr.get("title", "")
-        ts_print(f"[push] Closing old main2main PR #{num}: {title}")
+        ts_print(f"\n[push] Closing old main2main PR #{num}: {title}")
         cr = subprocess.run(
             ["gh", "pr", "close", num, "--repo", github_repo],
             capture_output=True, text=True,
@@ -471,7 +471,7 @@ def push_and_create_pr(
                 ts = datetime.now().strftime("%Y%m%d-%H%M%S")
                 branch = branch_name or f"update/main2main-{ts}"
                 run_git(ascend_path, "checkout", "-b", branch)
-                ts_print(f"[push] Created branch '{branch}', applying patch: {patch_file}")
+                ts_print(f"\n[push] Created branch '{branch}', applying patch: {patch_file}")
                 run_git(ascend_path, "apply", str(patch_file))
                 _run_format(ascend_path)
                 run_git(ascend_path, "add", "-A")
@@ -576,7 +576,7 @@ def push_and_create_pr(
                     1, gh_cmd, output="", stderr=last_pr_error)
         finally:
             run_git(ascend_path, "remote", "set-url", "origin", saved_origin)
-        ts_print(f"[push] PR created: {pr_url}")
+        ts_print(f"\n[push] PR created: {pr_url}")
 
         # ---- labels ----
         pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]

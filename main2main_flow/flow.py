@@ -28,6 +28,57 @@ from main2main_flow.scripts.utils.utils import (
     FINAL_CODE_STRUCTURE_GUIDE_FILE, run_git, ts_print
 )
 
+# Files that are tracking/metadata, not real adaptation changes — excluded
+# from the PR description's file list.
+_TRACKING_FILES_FOR_DESC: frozenset[str] = frozenset({
+    ".github/vllm-main-verified.commit",
+})
+
+
+def _extract_diff_files(patch_text: str,
+                        exclude: frozenset[str] = _TRACKING_FILES_FOR_DESC
+                        ) -> list[str]:
+    """Return de-duplicated file paths from a unified diff, in first-seen order.
+
+    Parses ``diff --git a/<path> b/<path>`` headers.  Skips paths in *exclude*
+    (default: tracking/metadata files).  Used by ``generate_final_post`` to
+    read the cumulative patch's file list as the source of truth — per-step
+    patches are incremental (last-retry-wins) and lose earlier retries' files.
+    """
+    files: list[str] = []
+    seen: set[str] = set()
+    for line in patch_text.splitlines():
+        if not line.startswith("diff --git a/"):
+            continue
+        # Format: "diff --git a/<path> b/<path>"
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        fname = parts[-1][2:]  # strip leading "b/"
+        if fname in exclude or fname in seen:
+            continue
+        seen.add(fname)
+        files.append(fname)
+    return files
+
+
+def _parse_summary_files(summary_text: str, step_id: str) -> set[str]:
+    """Extract backtick-quoted file paths from a step_summary.md header.
+
+    The SKILL.md format specifies ``- {step_id}: Adapted — <files>`` where
+    ``<files>`` is a comma-separated list of backtick-quoted paths.  This
+    header line was previously ignored by ``generate_final_post``'s parser.
+    Returns the set of paths mentioned on the header line; empty set if the
+    header is missing or contains no backticks.
+    """
+    pattern = re.compile(rf"^- {re.escape(step_id)}:\s*Adapted\s*—\s*(.*)$")
+    for line in summary_text.splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            return set(re.findall(r"`([^`]+)`", m.group(1)))
+    return set()
+
+
 def _resolve_test_cases() -> list[str] | None:
     """Merge test cases from env, allowlist, and blocklist.
 
@@ -264,7 +315,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 check=True, capture_output=True, text=True,
             )
             self.state.vllm_report_path = str(report_target)
-            ts_print(f"[init] vllm-report cloned to {report_target}")
+            ts_print(f"\n[init] vllm-report cloned to {report_target}")
 
             # Install mcp dependency for vllm-report's MCP server.
             subprocess.run(
@@ -327,10 +378,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 except OSError:
                     ts_print("[init] WARNING could not ignore opencode.jsonc - "
                              "it may be committed into the PR!")
-            ts_print(f"[init] vllm-report MCP server registered in {opencode_config_path}")
+            ts_print(f"\n[init] vllm-report MCP server registered in {opencode_config_path}")
         except (subprocess.CalledProcessError, OSError) as e:
             self.state.vllm_report_path = ""
-            ts_print(f"[init] vllm-report clone failed (adapter will use grep): {e}")
+            ts_print(f"\n[init] vllm-report clone failed (adapter will use grep): {e}")
 
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
         vllm_path = Path(self.state.vllm_path)
@@ -506,7 +557,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         self._revert_working_tree("gate fix caused e2e regression")
                         error_logs = [str(Path(gate_dir) / "quality_gate.json")]
                         continue
-                ts_print(f"[final_quality_gate] PASSED (attempt {attempt})")
+                ts_print(f"\n[final_quality_gate] PASSED (attempt {attempt})")
                 # Regenerate the cumulative patch from the CURRENT working
                 # tree so it includes format/mypy fixes made by the gate.
                 # Use `git diff <original_ascend_ref>` (baseline -> working
@@ -524,7 +575,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 return True
 
             error_logs = new_error_logs
-            ts_print(f"[final_quality_gate] fix attempt {attempt}/3: FAILED "
+            ts_print(f"\n[final_quality_gate] fix attempt {attempt}/3: FAILED "
                      f"-> adapter-fix")
 
             role = "adapter-fix"
@@ -549,7 +600,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             if adapt_result.session_id:
                 self.state.session_id = adapt_result.session_id
 
-        ts_print("[final_quality_gate] exhausted 3 fix rounds, still failing")
+        ts_print("\n[final_quality_gate] exhausted 3 fix rounds, still failing")
         # Revert the last failed fix round so it doesn't leak into
         # generate_final_post's squash via `git add -A` and get pushed
         # (KEEP_BRANCH mode does add -A + amend at push time).
@@ -626,7 +677,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 os.environ.pop("MAIN2MAIN_KEEP_BRANCH", None)
 
         test_passed = result.get("can_commit", False)
-        ts_print(f"[final_quality_gate] regression e2e: {'PASSED' if test_passed else 'FAILED'}")
+        ts_print(f"\n[final_quality_gate] regression e2e: {'PASSED' if test_passed else 'FAILED'}")
         return test_passed
 
     def _ai_analysis(self) -> bool:
@@ -741,10 +792,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 ascend_path=self.state.vllm_ascend_path,
             )
             if vllm_report_context:
-                ts_print(f"[ai_analysis] {step_id}: vllm-report context loaded "
+                ts_print(f"\n[ai_analysis] {step_id}: vllm-report context loaded "
                          f"({len(vllm_report_context.splitlines())} lines) for {step['end_commit'][:8]}")
             else:
-                ts_print(f"[ai_analysis] {step_id}: vllm-report no data for {step['end_commit'][:8]} "
+                ts_print(f"\n[ai_analysis] {step_id}: vllm-report no data for {step['end_commit'][:8]} "
                          f"(commit not covered or no path match)")
 
         for attempt in range(1, 4):
@@ -958,6 +1009,183 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         return test_passed
 
+    def _fill_unattributed_analysis(self, unattributed: list[str],
+                                     cumulative_patch_path: Path) -> list[dict]:
+        """Invoke description-fill agent to analyze unattributed files.
+
+        Returns a list of dicts (same shape as ``step_items`` entries) with
+        ``files``, ``cause``, ``change``, ``upstream_links`` populated by the
+        agent.  Returns an empty list if the agent fails or produces no
+        parseable output — caller falls back to a catch-all row.
+        """
+        if not unattributed:
+            return []
+        import tempfile
+        # Write unattributed file list + concatenate existing step summaries
+        # for context.  Use a dedicated step_dir so the agent's step_summary.md
+        # output doesn't clobber real step summaries.
+        fill_dir = Path(tempfile.mkdtemp(prefix="description_fill_"))
+        try:
+            unattributed_set = set(unattributed)
+            unattributed_files_path = fill_dir / "unattributed_files.txt"
+            unattributed_files_path.write_text(
+                "\n".join(unattributed) + "\n", encoding="utf-8")
+            # Build a FILTERED patch containing only the unattributed files'
+            # diffs.  Passing the full cumulative patch wastes tokens on files
+            # the agent doesn't need to analyze (those already attributed to
+            # steps).  If filtering fails, fall back to the full patch.
+            filtered_patch_path = fill_dir / "unattributed.patch"
+            try:
+                full_patch = cumulative_patch_path.read_text(encoding="utf-8")
+                filtered_lines: list[str] = []
+                in_hunk = False
+                current_file: str = ""
+                for line in full_patch.splitlines():
+                    if line.startswith("diff --git a/"):
+                        # Start of a new file's diff.  Extract path and decide
+                        # whether to include this section.
+                        parts = line.split()
+                        current_file = parts[-1][2:] if len(parts) >= 4 else ""
+                        in_hunk = current_file in unattributed_set
+                    if in_hunk:
+                        filtered_lines.append(line)
+                filtered_patch_path.write_text(
+                    "\n".join(filtered_lines) + "\n", encoding="utf-8")
+                patch_for_agent = filtered_patch_path
+                ts_print(f"[generate_final_post] filtered patch: "
+                         f"{len(filtered_lines)} lines for {len(unattributed)} "
+                         f"unattributed files (full patch was "
+                         f"{len(full_patch.splitlines())} lines)")
+            except Exception as e:
+                ts_print(f"[generate_final_post] patch filtering failed ({e}), "
+                         f"using full cumulative patch")
+                patch_for_agent = cumulative_patch_path
+            # Concatenate all existing step summaries as previous context.
+            prev_summaries: list[str] = []
+            for i in range(self.state.current_step):
+                s = self.state.steps[i]
+                ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
+                if ssp.exists():
+                    prev_summaries.append(
+                        f"--- {s['id']} ---\n"
+                        + ssp.read_text(encoding="utf-8"))
+            prev_summary_path = fill_dir / "previous_summaries.md"
+            prev_summary_path.write_text(
+                "\n\n".join(prev_summaries) or "(no prior summaries)",
+                encoding="utf-8")
+            release_tag = self.state.release_tag or "0.0.0"
+            ts_print(f"\n[generate_final_post] invoking description-fill agent "
+                     f"({len(unattributed)} files, release_tag={release_tag})")
+            adapt_result = run_opencode_adapter({
+                "role": "description-fill",
+                "step_id": "unattributed",
+                "step_dir": str(fill_dir),
+                "ascend_path": str(self.state.vllm_ascend_path),
+                "vllm_path": str(self.state.vllm_path),
+                "patch_path": str(patch_for_agent),
+                "changed_files_path": str(unattributed_files_path),
+                "previous_step_summary_path": str(prev_summary_path),
+                "release_tag": release_tag,
+                "is_last_step": "true",
+                "mode": "description-fill",
+            })
+            out_summary = fill_dir / EACH_STEP_SUMMARY_FILE
+            if not out_summary.exists():
+                ts_print("[generate_final_post] description-fill produced no "
+                         f"step_summary.md at {out_summary}")
+                return []
+            out_text = out_summary.read_text(encoding="utf-8")
+            ts_print(f"[generate_final_post] description-fill output: "
+                     f"{len(out_text.splitlines())} lines")
+            # Parse each `- unattributed-N: Adapted — <files>` entry.
+            items = self._parse_unattributed_entries(out_text)
+            if items:
+                ts_print(f"\n[generate_final_post] description-fill produced "
+                         f"{len(items)} analysis entries for "
+                         f"{sum(len(it['files']) for it in items)} files")
+            else:
+                ts_print("[generate_final_post] description-fill produced no "
+                         "parseable entries")
+            return items
+        except Exception as e:
+            ts_print(f"[generate_final_post] description-fill agent failed: {e}")
+            return []
+        finally:
+            shutil.rmtree(fill_dir, ignore_errors=True)
+
+    def _parse_unattributed_entries(self, summary_text: str) -> list[dict]:
+        """Parse `- unattributed-N: Adapted — <files>` entries from the
+        description-fill agent's output.
+
+        Returns list of dicts: ``{files, cause, change, upstream_links}``.
+        Mirrors the per-step parser in ``generate_final_post`` but keyed on
+        ``unattributed-N`` headers instead of ``step-N``.
+        """
+        commit_url = "https://github.com/vllm-project/vllm/commit"
+        items: list[dict] = []
+        # Match `- unattributed-N: Adapted — ...` headers (N is any digit).
+        header_re = re.compile(r"^- unattributed-\d+:\s*Adapted\s*—\s*(.*)$")
+        # Split on header lines — each section starts with a header.
+        sections: list[tuple[str, list[str]]] = []
+        current_header: str = ""
+        current_lines: list[str] = []
+        for line in summary_text.splitlines():
+            m = header_re.match(line.strip())
+            if m:
+                if current_header:
+                    sections.append((current_header, current_lines))
+                current_header = m.group(1)
+                current_lines = []
+            elif current_header:
+                current_lines.append(line)
+        if current_header:
+            sections.append((current_header, current_lines))
+        for header_tail, body_lines in sections:
+            files = list(re.findall(r"`([^`]+)`", header_tail))
+            if not files:
+                continue
+            cause = ""
+            change = ""
+            upstream_links: list[str] = []
+            collecting = ""
+            parts: list[str] = []
+            for dline in body_lines:
+                dl = dline.strip()
+                if dl.startswith("Cause:"):
+                    if collecting == "change":
+                        change = " ".join(parts)
+                    collecting = "cause"
+                    parts = [dl.removeprefix("Cause:").strip()]
+                    continue
+                if dl.startswith("Change:"):
+                    if collecting == "cause":
+                        cause = " ".join(parts)
+                    collecting = "change"
+                    parts = [dl.removeprefix("Change:").strip()]
+                    continue
+                if dl.startswith("Upstream source:") or dl.startswith("Upstream commit:"):
+                    m = re.search(r"\[([^\]]+)\]\(([^\)]+)\)", dl)
+                    if m:
+                        upstream_links.append(f"[{m.group(1)[:8]}]({m.group(2)})")
+                    else:
+                        sha = dl.split(":", 1)[1].strip()
+                        if sha:
+                            upstream_links.append(f"[{sha[:8]}]({commit_url}/{sha})")
+                    continue
+                if collecting and parts and dline.startswith(("  ", "\t")):
+                    parts.append(dl)
+            if collecting == "cause":
+                cause = " ".join(parts)
+            elif collecting == "change":
+                change = " ".join(parts)
+            items.append({
+                "files": files,
+                "cause": cause,
+                "change": change,
+                "upstream_links": upstream_links,
+            })
+        return items
+
     def generate_final_post(self):
         # The last successful step's patch is cumulative: git diff HEAD after all
         # successful adaptations. Prefer its cumulative summary, and fall back to
@@ -984,7 +1212,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 f"({self.state.base_commit[:8]}...{target[:8]}) [{ts}]"
             )
             run_git(ascend_path, "commit", "-s", "-m", commit_msg)
-            ts_print(f"[generate_final_post] Squashed step commits into: "
+            ts_print(f"\n[generate_final_post] Squashed step commits into: "
                      f"{commit_msg}")
         else:
             ts_print("[generate_final_post] No step commits to squash (branch at baseline)")
@@ -1021,39 +1249,52 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         gate_patch = WORKSPACE_DIR / "gate_final_patch"
         if gate_patch.exists() and gate_patch.stat().st_size > 0:
             shutil.copy2(gate_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
-            ts_print("[generate_final_post] Using gate-regenerated patch (with gate fixes) as final_target.patch")
+            ts_print("\n[generate_final_post] Using gate-regenerated patch (with gate fixes) as final_target.patch")
         elif step_patch.exists():
             shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
 
         # Build PR body: concise numbered list matching PR #5595 style.
         # Each item: "Adapt <files> due to [commit](link) — <cause>"
-        TRACKING_FILE = ".github/vllm-main-verified.commit"
         commit_url = "https://github.com/vllm-project/vllm/commit"
 
-        # Collect per-step: adapted files, cause, and triggering commit
+        # Source of truth for the file list: the cumulative patch
+        # (gate_final_patch or fall-back step patch) copied to
+        # FINAL_TARGET_PATCH_FILE above.  Per-step EACH_STEP_TARGET_PATCH_FILE
+        # is incremental (captured via `git diff HEAD` at adapt time), so when
+        # step-1 is retried multiple times only the last retry's files survive
+        # — earlier retries' files would be lost from the description.  The
+        # cumulative patch captures all changes since original_ascend_ref.
+        cumulative_patch_path = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
+        cumulative_files: list[str] = []
+        if cumulative_patch_path.exists():
+            cumulative_files = _extract_diff_files(
+                cumulative_patch_path.read_text(encoding="utf-8"))
+            ts_print(f"\n[generate_final_post] cumulative patch has "
+                     f"{len(cumulative_files)} file(s) for PR description")
+        else:
+            ts_print("[generate_final_post] WARNING: cumulative patch file "
+                     "missing — PR description will have no file list")
+
+        # Collect per-step: adapted files, cause, and triggering commit.
+        # Files per step are attributed via the step_summary.md header
+        # ("- {step_id}: Adapted — <files>") plus backtick-quoted paths in the
+        # Change: field.  Files in the cumulative patch not mentioned in any
+        # step summary are surfaced in a separate "Unattributed" row.
         step_items: list[dict] = []
+        seen_files: set[str] = set()
         for i in range(self.state.current_step):
             s = self.state.steps[i]
-            sp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_TARGET_PATCH_FILE
-            if not sp.exists():
-                continue
-            files = []
-            for line in sp.read_text(encoding="utf-8").splitlines():
-                if line.startswith("diff --git a/"):
-                    fname = line.split()[-1][2:]
-                    if fname != TRACKING_FILE:
-                        files.append(fname)
-            if not files:
-                continue
             cause = ""
             change = ""
             upstream_links: list[str] = []
             ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
+            ssp_text = ""
             if ssp.exists():
+                ssp_text = ssp.read_text(encoding="utf-8")
                 in_our_step = False
                 parts: list[str] = []
                 collecting: str = ""  # "cause" or "change"
-                for dline in ssp.read_text(encoding="utf-8").strip().splitlines():
+                for dline in ssp_text.strip().splitlines():
                     dl = dline.strip()
                     # Per-step section: e.g. "- step-2: Adapted — ..."
                     if dl.startswith(f"- {s['id']}:"):
@@ -1095,13 +1336,45 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     cause = " ".join(parts)
                 elif collecting == "change":
                     change = " ".join(parts)
+            # Attribute cumulative files to this step via the summary header
+            # and the Change: field's backtick-quoted paths.  Falls back to
+            # mentioning all cumulative files for the step if the adapter
+            # didn't follow the SKILL.md header format but the step is the
+            # only one (single-step flow).
+            header_files = _parse_summary_files(ssp_text, s["id"])
+            change_files = set(re.findall(r"`([^`]+)`", change))
+            mentioned = header_files | change_files
+            if mentioned:
+                step_files = [f for f in cumulative_files if f in mentioned]
+            else:
+                # No file attribution from summary — leave empty; cumulative
+                # files will surface in the Unattributed row below.
+                step_files = []
+            seen_files.update(step_files)
             step_items.append({
-                "files": files,
+                "files": step_files,
                 "commit": s["end_commit"][:8],
                 "cause": cause,
                 "change": change,
                 "upstream_links": upstream_links,
             })
+
+        # Files changed in the cumulative patch but not mentioned in any
+        # step summary.  These are real adaptations (or sync-commit changes)
+        # that the adapter didn't attribute to a step.  Invoke the
+        # description-fill agent to analyze each one and produce proper
+        # Cause/Change entries, so the PR description has full analysis
+        # (not just a catch-all file list).
+        unattributed = [f for f in cumulative_files if f not in seen_files]
+        unattributed_items: list[dict] = []
+        if unattributed:
+            ts_print(f"[generate_final_post] {len(unattributed)} file(s) in "
+                     "cumulative patch but not mentioned in any step summary — "
+                     "invoking description-fill agent to analyze them")
+            unattributed_items = self._fill_unattributed_analysis(
+                unattributed, cumulative_patch_path)
+
+        # Get the commit date of the target vllm commit for the PR description.
 
         # Get the commit date of the target vllm commit for the PR description.
         target = self.state.target_commit or self.state.cur_vllm_commit
@@ -1138,6 +1411,28 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # Change, show the files touched instead.
             adapt = item.get("change") or ""
             parts.append(f"| {files_str} | {upstream} | {adapt} |")
+        # Unattributed rows: each has full Cause/Change from the
+        # description-fill agent.  Falls back to a catch-all row only if the
+        # agent failed to produce analysis (e.g., opencode unavailable).
+        for item in unattributed_items:
+            files_str = "<br>".join(f"`{f}`" for f in item["files"])
+            links = item.get("upstream_links") or []
+            if links:
+                upstream = " · ".join(links)
+                if item.get("cause"):
+                    upstream = f"{upstream} — {item['cause']}"
+            else:
+                upstream = item.get("cause") or "(unattributed)"
+            adapt = item.get("change") or ""
+            parts.append(f"| {files_str} | {upstream} | {adapt} |")
+        if unattributed and not unattributed_items:
+            # Agent produced no analysis — surface files in a catch-all row
+            # so reviewers still see the full scope.
+            files_str = "<br>".join(f"`{f}`" for f in unattributed)
+            parts.append(
+                f"| {files_str} | (unattributed) "
+                f"| see cumulative patch — description-fill agent produced no analysis |"
+            )
         parts.append("")
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")

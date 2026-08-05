@@ -41,7 +41,11 @@ if not shutil.which("opencode"):
 
 def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     role = inputs.get("role", "adapter")
-    agent_dir = "adapter"
+    # description-fill is a read-only analysis role with its own SKILL.md.
+    if role == "description-fill":
+        agent_dir = "description-fill"
+    else:
+        agent_dir = "adapter"
     template = (_AGENT_DIR / agent_dir / "SKILL.md").read_text(encoding="utf-8")
     ctx = {k: str(v) for k, v in inputs.items()}
 
@@ -52,6 +56,12 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
         # already in session - do not re-send.
         if ctx.get("vllm_report_context"):
             ctx["vllm_report_context"] = "(vllm-report impact map already in session context — see previous messages)"
+    elif role == "description-fill":
+        # description-fill is self-contained — no reference docs needed.
+        # vllm-report context is not passed (role is invoked at description
+        # generation time, not per-step).
+        ref_content = "(no reference docs for description-fill role)"
+        ctx["vllm_report_context"] = "(vllm-report unavailable, use grep on vllm source)"
     else:
         ref_names = ["adaptation-patterns.md",
                      "common-pitfalls.md"]
