@@ -52,16 +52,12 @@ The step_target.patch is cumulative (git diff HEAD).
   **Key question**: does vllm-ascend subclass, override, call, import, or read
   anything this patch changed? Internal upstream changes only need adaptation
   when vllm-ascend directly depends on the behavior.
-- **vllm-report impact map (this step's commit)**: {vllm_report_context}
-  Read this FIRST - it names the specific vllm-ascend classes/files affected by
-  this step's upstream commit (from per-commit analysis + cross-project maps).
-  The `patch_impact_map` and `definitely_affected_paths` are extracted from
-  vllm-ascend's `patch/__init__.py` registration code, so they reflect the
-  actual patch wiring. Verify each with a quick read; fall back to grep only
-  for gaps vllm-report didn't cover. If vllm-report says "no ascend impact"
-  but you find a base-class attribute change via grep, trust the grep -
-  vllm-report may not have analyzed this commit yet (only ~6 days of history,
-  older commits have no analysis).
+- **vllm-report impact map**: {vllm_report_context}
+  The vllm-report MCP server is registered in opencode.jsonc. Call its tools
+  DYNAMICALLY during analysis (see "vllm-report MCP Tools" section below) —
+  do NOT grep for files the MCP tools already cover. MCP results are
+  authoritative (extracted from vllm-ascend's actual patch wiring); grepping
+  is a fallback for files MCP didn't mention.
 - Use the Key Areas in code-structure-guide.md as an
   architecture-level supplement to vllm-report. When vllm-report is
   unavailable (clone failed or commit not covered), use Key Areas to manually
@@ -258,21 +254,22 @@ during adaptation to query deeper information not in the injected impact map.
 ### How to use MCP tools - decision flow
 
 ```
-1. Read {vllm_report_context} (injected, always available)
-   ├─ Has the commit been analyzed by vllm-report?
-   │   ├─ YES + has adaptation_guide -> Follow the guide, skip MCP calls
-   │   ├─ YES + says "no ascend impact" -> VERIFY with grep (may be wrong)
-   │   └─ NO (commit not covered) -> Call MCP tools to fill gaps
+1. START HERE — call MCP tools BEFORE grepping:
+   ├─ Call get_adaptation_guide(sha=<end_commit>) FIRST
+   │   -> Returns step-by-step impact analysis with line numbers
+   ├─ Call get_cross_project_mapping()
+   │   -> Returns patch_impact_map (vllm path -> ascend file) +
+   │      definitely_affected_paths. Adapt THESE files; don't grep for them.
+   └─ Only if both return empty/no-data → fall back to grep
    │
 2. Need to find which vllm-ascend files are affected?
-   ├─ {vllm_report_context} has patch_impact_map + definitely_affected_paths
-   ├─ Need FULL mapping (not just matched paths)? -> get_cross_project_mapping()
-   └─ Need interface inheritance details? -> get_interface_surface()
+   ├─ get_cross_project_mapping() already covers this (call it)
+   ├─ Need interface inheritance details? -> get_interface_surface(repo="vllm-ascend")
    │      (returns 8 inheritable interfaces with ascend_impl + key_methods)
+   └─ DO NOT grep "vllm_ascend/" for files — MCP mapping is authoritative
    │
 3. Need to know HOW to adapt a specific change?
-   ├─ Call get_adaptation_guide(sha=<end_commit>)
-   │   -> Returns step-by-step guide with line numbers (if vllm-report analyzed it)
+   ├─ get_adaptation_guide(sha=<end_commit>) already covers this (call it)
    ├─ Call get_patch_catalog(category="platform"|"worker")
    │   -> Returns known patch patterns (targets/why/how/related_pr)
    └─ Call search_analysis(keywords=["<symbol_name>"], tags=["high-risk"])
@@ -292,6 +289,12 @@ during adaptation to query deeper information not in the injected impact map.
    └─ Call get_commit_arch_delta(repo="vllm", sha="<end_commit>")
        -> Architecture delta: what modules/abstractions changed
 ```
+
+**CRITICAL**: Call MCP tools FIRST, before any grep. The tools return
+authoritative impact maps extracted from vllm-ascend's actual patch wiring.
+Grepping is a FALLBACK for files the MCP tools didn't mention — don't
+grep for files that MCP already identified. Typical savings: 31 greps → 3-4
+MCP calls + 2-3 targeted greps (for gaps).
 
 ### Tool quick reference
 

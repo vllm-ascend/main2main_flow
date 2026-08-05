@@ -398,6 +398,22 @@ class _EventState:
 
 # ── event printer ─────────────────────────────────────────────────────────────
 
+# Built-in opencode tools — NOT MCP tools.  When a tool_use event's tool
+# name is in this set, it's a native tool (bash/read/edit/write/Agent/etc.).
+# Any other tool name is an MCP tool call — surface it with a clear [MCP]
+# marker so CI logs show the dynamic MCP calls at a glance.
+_BUILTIN_TOOLS = frozenset({
+    "bash", "read", "edit", "write", "grep", "glob",
+    "Agent", "TeamCreate", "SendMessage", "TaskCreate", "TaskUpdate",
+    "TaskStop", "TodoWrite", "WebFetch", "WebSearch",
+})
+
+
+def _is_mcp_tool(tool: str) -> bool:
+    """True if tool is an MCP server tool (not a built-in opencode tool)."""
+    return tool not in _BUILTIN_TOOLS
+
+
 def _print_event(line: str, state: _EventState) -> None:
     try:
         ev = json.loads(line)
@@ -418,6 +434,7 @@ def _print_event(line: str, state: _EventState) -> None:
         st = part.get("state", {})
         status = st.get("status", "")
         inp = st.get("input", {})
+        is_mcp = _is_mcp_tool(tool)
 
         if status == "pending":
             state._tool_by_call[call_id] = tool
@@ -433,19 +450,32 @@ def _print_event(line: str, state: _EventState) -> None:
                 to = inp.get("to", "?")
                 summary = inp.get("summary", "")
                 ts_print(f"\n▶ [agent] → {to}: {summary}", flush=True)
+            elif is_mcp:
+                # MCP tool call — surface with clear [MCP] marker so CI
+                # logs show the dynamic vllm-report calls at a glance.
+                brief = json.dumps(inp, ensure_ascii=False)[:300]
+                ts_print(f"\n[MCP] → {tool}({brief})", flush=True)
             else:
                 brief = json.dumps(inp, ensure_ascii=False)[:200]
-                ts_print(f"\n[agent: {tool}] ← {brief}", flush=True)
+                ts_print(f"\n[tool: {tool}] ← {brief}", flush=True)
 
         elif status == "completed":
             output = st.get("output", "")
-            if output:
-                # Try callID map first (set by pending event); fall back to
-                # the tool name in the completed event itself (MCP tools may
-                # not emit a pending event, so the map is empty).
-                agent = state._tool_by_call.get(call_id, "") or tool
+            agent = state._tool_by_call.get(call_id, "") or tool
+            if is_mcp:
+                # MCP tool completed — show return size (lines/chars) so
+                # the user can see what the MCP server returned without
+                # dumping the full output (which can be 200+ lines).
+                if output:
+                    lines = len(output.splitlines())
+                    chars = len(output)
+                    preview = output[:200].replace("\n", " ").strip()
+                    ts_print(f"\n[MCP] ← {tool} returned {lines} lines "
+                             f"({chars} chars): {preview}...", flush=True)
+                else:
+                    ts_print(f"\n[MCP] ← {tool} returned empty", flush=True)
+            elif output:
                 label = f"agent: {agent}" if agent else "agent"
-                # Truncate very long outputs for display
                 display = output if len(output) <= 3000 else output[:3000] + "\n... [truncated]"
                 ts_print(f"\n{'─'*60}\n[{label}] output:\n{display}\n{'─'*60}", flush=True)
 

@@ -19,7 +19,6 @@ from main2main_flow.scripts.utils.push_to_github import push_and_create_pr
 from main2main_flow.scripts.utils.run_tests import run_tests
 from main2main_flow.scripts.utils.update_commit_reference import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
-from main2main_flow.scripts.utils.vllm_report import load_vllm_report_context
 from main2main_flow.scripts.utils.utils import (
     UpgradeCompleted, UpgradeFailed,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
@@ -336,49 +335,107 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         "type": "local",
                         "command": [
                             sys.executable,
-                            str(report_target / "src" / "mcp_server_app.py"),
+                            "-m",
+                            "src.mcp_server_app",
                             "--data-dir",
                             str(report_target / "data"),
                             "--ascend-repo-path",
                             str(self.state.vllm_ascend_path),
                         ],
+                        # cwd must be the vllm-report repo root so Python
+                        # finds the `src` package (python -m src.mcp_server_app
+                        # requires the package to be importable from cwd).
+                        # Per vllm-report/docs/mcp-usage-guide.md.
+                        "cwd": str(report_target),
                         "enabled": True,
                     }
                 }
             }
-            # Write opencode.jsonc into the vllm-ascend repo root (opencode
-            # reads it from its cwd).  The MCP command embeds absolute /tmp
-            # paths, so this file MUST NOT be committed into the adaptation
-            # PR.  The first step commit runs `git add -A`, which would stage
-            # it — append to .git/info/exclude so git never tracks it.
-            opencode_config_path = Path(self.state.vllm_ascend_path) / "opencode.jsonc"
+            # Write opencode config to BOTH the global config dir and the
+            # vllm-ascend repo root:
+            #  1. ~/.config/opencode/opencode.jsonc — opencode's global config
+            #     (user-verified locally: .jsonc works in this location).
+            #  2. <repo root>/opencode.json + OPENCODE_CONFIG env var —
+            #     belt-and-suspenders; OPENCODE_CONFIG is opencode's explicit
+            #     custom-config path, guaranteeing the file is read.
+            # The MCP command embeds absolute /tmp paths, so the repo-root
+            # file MUST NOT be committed into the adaptation PR.  The first
+            # step commit runs `git add -A`, which would stage it — append to
+            # .git/info/exclude so git never tracks it.
+            # Global config: merge (don't clobber) any existing user config.
+            global_cfg_dir = Path.home() / ".config" / "opencode"
+            global_cfg_path = global_cfg_dir / "opencode.jsonc"
+            global_cfg_dir.mkdir(parents=True, exist_ok=True)
+            if global_cfg_path.exists():
+                try:
+                    global_cfg = json.loads(global_cfg_path.read_text(encoding="utf-8"))
+                    if not isinstance(global_cfg, dict):
+                        global_cfg = {}
+                except (json.JSONDecodeError, OSError):
+                    global_cfg = {}
+            else:
+                global_cfg = {}
+            global_cfg.setdefault("mcp", {})
+            global_cfg["mcp"]["vllm-report"] = mcp_config["mcp"]["vllm-report"]
+            global_cfg_path.write_text(
+                json.dumps(global_cfg, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            # Project root config (belt-and-suspenders + OPENCODE_CONFIG).
+            opencode_config_path = Path(self.state.vllm_ascend_path) / "opencode.json"
             opencode_config_path.write_text(
                 json.dumps(mcp_config, indent=2) + "\n", encoding="utf-8"
             )
+            # Set OPENCODE_CONFIG so opencode definitely reads this file
+            # (opencode's custom-config path, highest precedence).
+            os.environ["OPENCODE_CONFIG"] = str(opencode_config_path)
             # .git/info/exclude (not .gitignore) - local-only, doesn't pollute
             # the repo or the PR diff.
             exclude_file = Path(self.state.vllm_ascend_path) / ".git" / "info" / "exclude"
             try:
                 exclude_content = exclude_file.read_text(encoding="utf-8")
-                if "opencode.jsonc" not in exclude_content:
+                if "opencode.json" not in exclude_content:
                     exclude_file.write_text(
-                        exclude_content.rstrip() + "\nopencode.jsonc\n", encoding="utf-8"
+                        exclude_content.rstrip() + "\nopencode.json\n", encoding="utf-8"
                     )
             except OSError:
                 # .git/info/exclude not writable - append to .gitignore instead
-                # so opencode.jsonc still doesn't get committed into the PR.
+                # so opencode.json still doesn't get committed into the PR.
                 gitignore_path = Path(self.state.vllm_ascend_path) / ".gitignore"
                 try:
                     gi_content = gitignore_path.read_text(encoding="utf-8")
-                    if "opencode.jsonc" not in gi_content:
+                    if "opencode.json" not in gi_content:
                         gitignore_path.write_text(
-                            gi_content.rstrip() + "\nopencode.jsonc\n", encoding="utf-8"
+                            gi_content.rstrip() + "\nopencode.json\n", encoding="utf-8"
                         )
-                        ts_print("[init] added opencode.jsonc to .gitignore (exclude not writable)")
+                        ts_print("[init] added opencode.json to .gitignore (exclude not writable)")
                 except OSError:
-                    ts_print("[init] WARNING could not ignore opencode.jsonc - "
+                    ts_print("[init] WARNING could not ignore opencode.json - "
                              "it may be committed into the PR!")
-            ts_print(f"\n[init] vllm-report MCP server registered in {opencode_config_path}")
+            ts_print(f"\n[init] vllm-report MCP server registered in "
+                     f"{global_cfg_path} (global) + {opencode_config_path} "
+                     f"(OPENCODE_CONFIG={os.environ['OPENCODE_CONFIG']})")
+            # Verify the MCP server actually starts with the same command
+            # opencode will use (python -m src.mcp_server_app from the
+            # vllm-report root).  A stdio server stays alive waiting on stdin
+            # — exit code 0 within timeout means the module imported + tools
+            # registered.  This catches a broken cwd/command/import at init
+            # time instead of failing silently (0 MCP calls) later.
+            try:
+                vr = subprocess.run(
+                    [sys.executable, "-m", "src.mcp_server_app",
+                     "--data-dir", str(report_target / "data"),
+                     "--ascend-repo-path", str(self.state.vllm_ascend_path)],
+                    cwd=str(report_target), capture_output=True, text=True,
+                    timeout=8,
+                )
+            except subprocess.TimeoutExpired:
+                # Server stayed alive 8s waiting on stdin = startup OK.
+                ts_print("[init] vllm-report MCP server startup verified OK "
+                         "(alive 8s waiting on stdio)")
+            else:
+                ts_print(f"[init] WARNING vllm-report MCP server FAILED to start "
+                         f"(exit={vr.returncode}): {vr.stderr.strip()[:300]}")
         except (subprocess.CalledProcessError, OSError) as e:
             self.state.vllm_report_path = ""
             ts_print(f"\n[init] vllm-report clone failed (adapter will use grep): {e}")
@@ -779,24 +836,27 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         pre_ci_passed = False
         review_passed = False
 
-        # Load vllm-report impact context once per step (not per attempt).
-        # Same step's end_commit + changed_files -> same context; attempt 2/3
-        # (fix mode) reuses it via session, so _build_prompt skips re-sending.
+        # vllm-report MCP tools are called dynamically by the adapter during
+        # analysis (not pre-loaded as static context here).  The MCP server
+        # is registered in opencode.jsonc (see initialize), so the adapter
+        # can call tool_get_adaptation_guide / tool_get_cross_project_mapping
+        # / tool_get_patch_catalog on-demand.  This avoids the 151-line static
+        # context dump that previously inflated prompt size and led the adapter
+        # to re-grep everything (it ignored the static context and verified via
+        # grep anyway — 0 MCP calls, 31 greps in step-1 of PR #13515's run).
+        # Pass only a short pointer so the adapter knows the MCP server is
+        # available and which commit to query.
         vllm_report_context = ""
         if self.state.vllm_report_path:
-            changed = [f for f in step.get("changed_files", "").strip().splitlines() if f]
-            vllm_report_context = load_vllm_report_context(
-                Path(self.state.vllm_report_path),
-                step["end_commit"],
-                changed,
-                ascend_path=self.state.vllm_ascend_path,
-            )
-            if vllm_report_context:
-                ts_print(f"\n[ai_analysis] {step_id}: vllm-report context loaded "
-                         f"({len(vllm_report_context.splitlines())} lines) for {step['end_commit'][:8]}")
-            else:
-                ts_print(f"\n[ai_analysis] {step_id}: vllm-report no data for {step['end_commit'][:8]} "
-                         f"(commit not covered or no path match)")
+            vllm_report_context = (
+                f"vllm-report MCP server is registered in opencode.jsonc. "
+                f"Call its tools dynamically (see \"vllm-report MCP Tools\" "
+                f"section below). This step's upstream vLLM commit is "
+                f"{step['end_commit'][:8]} — call "
+                f"tool_get_adaptation_guide(sha=\"{step['end_commit']}\") "
+                f"FIRST to get the impact map.")
+            ts_print(f"\n[ai_analysis] {step_id}: vllm-report MCP available "
+                     f"(dynamic mode, no static context) for {step['end_commit'][:8]}")
 
         for attempt in range(1, 4):
             role = "adapter-fix" if error_logs else "adapter"
