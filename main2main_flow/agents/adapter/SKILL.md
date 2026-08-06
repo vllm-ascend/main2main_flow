@@ -239,6 +239,28 @@ scratch. Make minimal targeted fixes to the specific errors reported.
 **E2E test failures**: open `round-N-result.json` → check `code_bugs_count` > 0
 → open failed tests from `suite_results[test_name]`. Read both `-summary.json`
 (structured code_bugs/env_flakes) and `.log` (raw traceback).
+1. Read the FULL traceback first — identify the exact failing path
+   (normal vs cache, with-data vs no-data, batch vs single, etc.). Do
+   NOT guess.
+2. **MUST call `get_adaptation_lessons(keywords=["<error message / test name>"])`
+   BEFORE making any fix.** This is mandatory, not optional. If it
+   returns a lesson, follow its fix_guidance directly — do NOT
+   re-analyze from scratch. Lessons are auto-recorded from past
+   main2main runs that needed E2E fix rounds; skipping the query means
+   you may repeat a mistake that is already documented. (If the MCP
+   call itself fails or the tool is unavailable, log it and continue.)
+3. Also check `reference/common-pitfalls.md` for a KNOWN failure with
+   this exact error message. If one matches, follow its fix
+   requirements directly.
+4. **Multi-path check (the #1 reason E2E fixes fail on first attempt)**:
+   upstream code often reaches the same invariant via MULTIPLE paths
+   (cache path skips normal-path code; no-data path skips wrapping;
+   a different call site). Before fixing, ask: does the patched
+   function get CALLED on the failing path? Does the fix cover ALL
+   paths that reach the asserted invariant, or just the one you looked
+   at? Verify your fix against the failing path specifically. See
+   `reference/common-pitfalls.md` §"Fix covers only ONE of multiple
+   code paths".
 
 **ImportError is NOT an env flake** - it is a real adaptation gap. When E2E
 fails with `ImportError: cannot import name 'X' from 'Y'` where Y is a

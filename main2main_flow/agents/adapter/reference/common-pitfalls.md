@@ -199,6 +199,69 @@ attributes (e.g. `hf_processor.image_token`), register those tokens on the
 tokenizer BEFORE calling `ctx.get_hf_processor()` — use
 `getattr(self.ctx, "tokenizer", None)` to access the tokenizer early.
 
+## Fix covers only ONE of multiple code paths (RECURRING — HunyuanVL case)
+
+**Symptom**: E2E fails with an assertion/error from an upstream processor
+or patch helper. The SAME failure recurs across runs — your first fix
+looks correct (you fixed the function the traceback names) but E2E still
+fails.
+
+**Root cause (the trap)**: upstream code often has MULTIPLE paths that
+reach the same invariant. You fixed one path; the failing path is
+another. Common path splits:
+
+- **Normal vs cache**: upstream caches tokenization/processing results
+  (e.g. `_cached_apply_hf_processor`). The cache path reuses a previous
+  result and SKIPS the normal-path code your patch lives in. A patch
+  that only hooks the normal path misses every cached call.
+- **With-data vs no-data**: a processor wraps placeholders only when
+  data is present (`if mm_data.get("images") is not None:`). The
+  text-only / no-data path never gets the wrapping → downstream match
+  asserts.
+- **Multimodal vs single-modality, batch vs single, prefetch vs lazy**:
+  any condition that branches around your patched function is a
+  potential missed path.
+
+**Diagnosis — ask BEFORE fixing**:
+1. Read the FULL traceback. Which path was executing? (cache?
+   text-only? no-data? a different module than the assert line?)
+2. Does the patched function get CALLED on that path? If not, your
+   patch there is useless for this failure.
+3. Grep for every call site / branch that reaches the invariant the
+   traceback asserts. Each one needs the fix.
+
+**Fix requirements — check ALL paths, not just one**:
+1. Patch the function at the deepest common point both paths reach —
+   or patch EACH path separately if they don't share code.
+2. For cache paths: invalidate or update the cache when the patch
+   changes behavior, or apply the transformation at the point where
+   both cached and fresh results flow through.
+3. Version guards must cover the failing branch on the target version,
+   not just the version you tested.
+4. Verify by re-reading the E2E test: what input does it send, and
+   which path does that input take?
+
+**Concrete case — HunyuanVL prompt replacement (PR #13657, main2main
+08-05/08-06)**: `test_vlm.py::test_multimodal_vl[hunyuan-vl]` failed
+3 runs in a row with `AssertionError: Failed to apply prompt replacement
+for mm_items['image'][0]`. On vllm main, `_get_prompt_updates` targets
+the 3-token sequence `[image_start, image_token, image_end]`
+(`[120118, 120120, 120119]`). Two paths:
+- with-image: `_call_hf_processor` wraps the bare placeholder when
+  `mm_data.get("images")` is not None → compat patch works.
+- text-only cache path: the prompt is tokenized without images, the
+  bare `<no_102>` is NEVER wrapped → assert. Main's native wrapping
+  misses this path entirely.
+
+Fix points (all three): compat patch must wrap in BOTH paths (test the
+cache path explicitly); the test prompt (`hunyuan_prompt` in
+`tests/e2e/conftest.py`) must supply the wrapped placeholder on main;
+version guard must cover main's cache path (0.26.0 target was the bare
+token, main is wrapped).
+
+**When this error message appears, do NOT re-diagnose from scratch** —
+apply the multi-path checklist above.
+
 ## Patching symbols from deleted upstream modules
 
 **Symptom**: A patch file patches `vllm.X.Y` but `vllm.X` was deleted upstream.

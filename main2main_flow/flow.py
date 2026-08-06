@@ -15,6 +15,7 @@ from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_openc
 from main2main_flow.scripts.utils.detect_commits import detect
 from main2main_flow.scripts.utils.plan_steps import run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
+from main2main_flow.scripts.utils.lessons import persist_lessons, submit_step_lesson
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr
 from main2main_flow.scripts.utils.run_tests import run_tests
 from main2main_flow.scripts.utils.update_commit_reference import run_update
@@ -264,6 +265,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             return
         self.process_steps()
         self.generate_final_post()
+        # Persist adaptation lessons (E2E fix rounds) back to vllm-report
+        # before push — the clone is recreated every run, so unsaved
+        # lessons would be lost.
+        persist_lessons(self.state.vllm_report_path)
         self.push_to_github()
 
     def initialize(self):
@@ -531,6 +536,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
             test_pass = self._run_e2e_test()
             if test_pass:
+                # The step needed >=1 E2E fix round (retry_count >= 1): the
+                # first adaptation wasn't right — record it as a lesson so
+                # future runs fix it in one pass (persisted + pushed at the
+                # end of the run by persist_lessons).
+                if self.state.retry_count >= 1:
+                    submit_step_lesson(self.state.vllm_report_path, step_id)
                 # Commit the successful adaptations so they survive a future
                 # step failure and become part of the baseline for the next run.
                 run_git(ascend_path, "add", "-A")
