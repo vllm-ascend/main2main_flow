@@ -12,18 +12,23 @@ Algorithm:
      or the step reaches the commit-count budget
   5. A single commit with vllm_changed_lines > LINE_BUDGET becomes its own step
 
+Overridable via env for tuning:
+  MAIN2MAIN_LINE_BUDGET   (default 1000 vllm/ changed lines per step)
+  MAIN2MAIN_COMMIT_BUDGET (default 20 commits per step)
+
 Output:
   - <workspace>/steps.json  — machine-readable plan
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 from main2main_flow.scripts.utils.utils import run_git
 
-LINE_BUDGET = 1000
-BASE_COMMIT_COUNT_BUDGET = 10
+LINE_BUDGET = int(os.environ.get("MAIN2MAIN_LINE_BUDGET", "1000"))
+BASE_COMMIT_COUNT_BUDGET = int(os.environ.get("MAIN2MAIN_COMMIT_BUDGET", "20"))
 
 
 def _commit_count_budget() -> int:

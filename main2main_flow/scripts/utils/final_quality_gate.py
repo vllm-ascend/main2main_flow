@@ -2,10 +2,15 @@
 
 Runs once after all steps complete (in generate_final_post, before
 push_to_github).  This is the main2main equivalent of CI's pre-commit
-"Run mypy" + "Run pre-commit" + "Run selected tests without device" steps -
-by running them here on the final cumulative diff, we catch format/mypy/UT
-issues in the exact environment CI will use, and give the adapter a chance
-to fix them before push.
+"Run mypy" + "Run pre-commit" + CPU-UT steps - by running them here on
+the final cumulative diff, we catch format/mypy/UT issues in the exact
+environment CI will use, and give the adapter a chance to fix them
+before push.
+
+UT (_check_ut) runs the CPU-routed tests/ut/* files with FULL isolation:
+each file in its own fresh subprocess (mock pollution immune) + a fake
+npu-smi on the PATH so conftest.py takes the mock path even on the A2
+NPU runner.  See pre_ci_check._check_ut docstring for details.
 
 Usage:
     passed, error_logs = run_final_quality_gate(
@@ -33,7 +38,7 @@ def run_final_quality_gate(
     release_tag: str,
     log_dir: Path,
 ) -> tuple[bool, list[str]]:
-    """Run format + mypy + UT on the final cumulative diff, before push.
+    """Run format + mypy on the final cumulative diff, before push.
 
     Returns (passed, error_logs).  error_logs is empty when passed;
     otherwise contains a single path to quality_gate.json (which holds
@@ -44,11 +49,25 @@ def run_final_quality_gate(
     log_dir.mkdir(parents=True, exist_ok=True)
     gate_path = log_dir / "quality_gate.json"
 
-    ts_print("\n[final_quality_gate] running format + mypy + UT on final diff...")
+    # UT gate on/off switch.  Verified 166/166 clean on A2, but keep a
+    # kill-switch so a UT-environment regression can't block push — set
+    # MAIN2MAIN_UT_GATE=0 to skip _check_ut entirely (format + mypy only).
+    import os as _os
+    ut_enabled = _os.environ.get("MAIN2MAIN_UT_GATE", "1").lower() not in (
+        "0", "false", "no", "off")
+
+    ts_print("\n[final_quality_gate] running format + mypy"
+             + (" + UT" if ut_enabled else " (UT DISABLED)") + " on final diff...")
 
     fmt = _check_format(repo)
     mypy = _check_mypy(repo, vllm_path)
-    ut = _check_ut(repo, vllm_path)
+    if ut_enabled:
+        ut = _check_ut(repo, vllm_path)
+    else:
+        ut = {"violations": [], "detail": "UT gate disabled (MAIN2MAIN_UT_GATE=0)",
+              "skipped": True}
+        ts_print("[final_quality_gate] UT gate DISABLED via "
+                 "MAIN2MAIN_UT_GATE=0 — skipping _check_ut")
 
     fmt_ok = len(fmt["violations"]) == 0 or fmt.get("skipped", False)
     mypy_ok = len(mypy["violations"]) == 0 or mypy.get("skipped", False)

@@ -417,25 +417,43 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                      f"(OPENCODE_CONFIG={os.environ['OPENCODE_CONFIG']})")
             # Verify the MCP server actually starts with the same command
             # opencode will use (python -m src.mcp_server_app from the
-            # vllm-report root).  A stdio server stays alive waiting on stdin
-            # — exit code 0 within timeout means the module imported + tools
-            # registered.  This catches a broken cwd/command/import at init
-            # time instead of failing silently (0 MCP calls) later.
+            # vllm-report root).  A stdio server stays alive waiting on stdin.
+            # IMPORTANT: pipe stdin (stdin=PIPE) — if the child inherits the
+            # parent's stdin (closed /dev/null in CI), the stdio server reads
+            # EOF and exits 0 immediately, falsely reporting "FAILED".  With
+            # stdin held open, an alive process after a few seconds = OK.
+            # NOTE: do NOT use communicate() here — it CLOSES the stdin
+            # pipe, the stdio server reads EOF and exits 0 (the false
+            # "FAILED" we saw in the first PR #13657 run).  wait() keeps
+            # stdin open; a TimeoutExpired means the server is alive.
             try:
-                vr = subprocess.run(
+                vproc = subprocess.Popen(
                     [sys.executable, "-m", "src.mcp_server_app",
                      "--data-dir", str(report_target / "data"),
                      "--ascend-repo-path", str(self.state.vllm_ascend_path)],
-                    cwd=str(report_target), capture_output=True, text=True,
-                    timeout=8,
+                    cwd=str(report_target), stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    text=True,
                 )
-            except subprocess.TimeoutExpired:
-                # Server stayed alive 8s waiting on stdin = startup OK.
-                ts_print("[init] vllm-report MCP server startup verified OK "
-                         "(alive 8s waiting on stdio)")
-            else:
-                ts_print(f"[init] WARNING vllm-report MCP server FAILED to start "
-                         f"(exit={vr.returncode}): {vr.stderr.strip()[:300]}")
+                try:
+                    rc = vproc.wait(timeout=5)
+                    # Process exited within 5s = startup FAILED.
+                    vstderr = ""
+                    if vproc.stderr:
+                        vstderr = vproc.stderr.read().strip()
+                    ts_print(f"[init] WARNING vllm-report MCP server FAILED "
+                             f"to start (exit={rc}): {vstderr[:300]}")
+                except subprocess.TimeoutExpired:
+                    # Still alive after 5s waiting on stdin = startup OK.
+                    ts_print("[init] vllm-report MCP server startup verified "
+                             "OK (alive 5s waiting on stdio)")
+                    vproc.kill()
+                    vproc.wait()
+                    if vproc.stderr:
+                        vproc.stderr.close()
+            except OSError as e:
+                ts_print(f"[init] WARNING vllm-report MCP server FAILED to "
+                         f"start: {e}")
         except (subprocess.CalledProcessError, OSError) as e:
             self.state.vllm_report_path = ""
             ts_print(f"\n[init] vllm-report clone failed (adapter will use grep): {e}")
@@ -1311,7 +1329,30 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             shutil.copy2(gate_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
             ts_print("\n[generate_final_post] Using gate-regenerated patch (with gate fixes) as final_target.patch")
         elif step_patch.exists():
-            shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
+            # Fall back to the last step's patch — but verify it has real
+            # files beyond .github/vllm-main-verified.commit.  When the final
+            # quality gate FAILED (e.g. 131 UT env failures in PR #13657),
+            # gate_final_patch is never written; and if the last step was a
+            # noop, its step_target.patch only contains the tracking file
+            # (`git diff HEAD` after commits = uncommitted delta only).
+            # Copying that produces an EMPTY file list in the PR description.
+            # Detect this and regenerate the true cumulative diff from git.
+            step_patch_text = step_patch.read_text(encoding="utf-8")
+            if _extract_diff_files(step_patch_text):
+                shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
+            else:
+                ts_print("[generate_final_post] last step patch has no real "
+                         "files — regenerating cumulative diff from git "
+                         "(gate_final_patch missing)")
+                subprocess.run(["git", "add", "-N", "."], cwd=str(ascend_path),
+                               capture_output=True)
+                cumulative_patch = run_git(
+                    ascend_path, "diff", self.state.original_ascend_ref)
+                (WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE).write_text(
+                    cumulative_patch, encoding="utf-8")
+                ts_print(f"[generate_final_post] regenerated cumulative diff "
+                         f"({len(cumulative_patch.splitlines())} lines) as "
+                         f"final_target.patch")
 
         # Build PR body: concise numbered list matching PR #5595 style.
         # Each item: "Adapt <files> due to [commit](link) — <cause>"

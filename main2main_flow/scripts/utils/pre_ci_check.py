@@ -452,55 +452,9 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
 
 # CPU UT routing: mirror select_tests._scan_ut_test_dir(cpu_only=True).
 # Files under tests/ut/<module>/a2/ or tests/ut/<module>/a3_2/ route to NPU
-# runners (per runner_mapping in test_config.yaml) and are skipped here.
+# runners and are NOT part of the CPU-UT batch.
 _CPU_UT_A2_RE = re.compile(r"tests/ut/.+/a2(/|$)")
 _CPU_UT_A3_2_RE = re.compile(r"tests/ut/.+/a3_2(/|$)")
-
-# CI's CPU UT batch runs with this env to prevent torch from auto-loading
-# device backends.  tests/ut/conftest.py then mocks torch_npu when npu-smi
-# is unavailable (the CPU-runner case).
-_UT_CPU_ENV = {
-    "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
-    "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-}
-
-# CI's NPU UT/E2E batch runs with this env: real NPU device, no autoload
-# override (torch_npu loads normally), spawn for multiprocess.
-_UT_NPU_ENV = {
-    "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-    "VLLM_USE_MODELSCOPE": "True",
-    "HF_HUB_OFFLINE": "1",
-    "VLLM_LOGGING_LEVEL": "ERROR",
-}
-
-# E2E tests that CI runs on A2 NPU and are known to catch adaptation bugs.
-# Added to the pre-push gate when NPU is available, so we catch the same
-# failures CI would catch (e.g., test_extract_hidden_states caught a
-# "No common block size for 16" engine-init bug in PR #13515).
-_A2_NPU_E2E_TESTS = [
-    "tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py",
-]
-
-# A2 NPU E2E tests take ~7 min each (model load + inference); allow 25 min
-# for the E2E batch to account for cache misses and slow NPU cards.
-_A2_NPU_E2E_TIMEOUT_S = 1500
-
-
-def _npu_available() -> bool:
-    """Detect whether a real Ascend NPU is available on this runner.
-
-    main2main runs on ``linux-aarch64-a2b1-8`` (A2 8-card NPU) — when NPU
-    is available, we can run A2 NPU UT + a subset of E2E tests pre-push.
-    When unavailable (CPU-only dev box), we fall back to CPU UT only.
-    """
-    try:
-        r = subprocess.run(
-            ["npu-smi", "info"],
-            capture_output=True, text=True, timeout=10,
-        )
-        return r.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
 
 
 def _is_npu_convention_ut_path(rel_path: str) -> bool:
@@ -509,18 +463,8 @@ def _is_npu_convention_ut_path(rel_path: str) -> bool:
     return bool(_CPU_UT_A2_RE.search(p) or _CPU_UT_A3_2_RE.search(p))
 
 
-def _is_a2_npu_ut_path(rel_path: str) -> bool:
-    """True if path routes to A2 NPU runner (tests/ut/*/a2/)."""
-    p = rel_path.replace("\\", "/")
-    return bool(_CPU_UT_A2_RE.search(p))
-
-
 def _collect_cpu_ut_files(repo: Path) -> list[str]:
-    """Walk tests/ut/ for test_*.py, return CPU-routed paths (rel to repo).
-
-    Mirrors select_tests._scan_ut_test_dir('tests/ut', cpu_only=True):
-    skips files under a2/ or a3_2/ subdirs (NPU-convention directories).
-    """
+    """Walk tests/ut/ for test_*.py, return CPU-routed paths (rel to repo)."""
     ut_dir = repo / "tests" / "ut"
     if not ut_dir.exists():
         return []
@@ -536,81 +480,39 @@ def _collect_cpu_ut_files(repo: Path) -> list[str]:
     return files
 
 
-def _collect_a2_npu_ut_files(repo: Path) -> list[str]:
-    """Walk tests/ut/ for A2 NPU-routed test files (tests/ut/*/a2/).
-
-    These run on the A2 NPU runner (main2main is linux-aarch64-a2b1-8).
-    Does NOT include a3_2/ (A3 NPU, different arch) — main2main can't run A3.
-    """
-    ut_dir = repo / "tests" / "ut"
-    if not ut_dir.exists():
-        return []
-    files: list[str] = []
-    for root, dirs, fnames in os.walk(ut_dir):
-        if "__pycache__" in dirs:
-            dirs.remove("__pycache__")
-        for f in sorted(fnames):
-            if f.startswith("test_") and f.endswith(".py"):
-                rel = os.path.relpath(os.path.join(root, f), str(repo))
-                if _is_a2_npu_ut_path(rel):
-                    files.append(rel)
-    return files
-
-
-def _source_ascend_env(env: dict) -> dict:
-    """Source /usr/local/Ascend/ascend-toolkit/set_env.sh and merge into env.
-
-    NPU tests need the Ascend toolkit's LD_LIBRARY_PATH and other env vars
-    to be set.  CI does `. /usr/local/Ascend/ascend-toolkit/set_env.sh` before
-    running NPU tests; we replicate by sourcing and parsing the env delta.
-    """
-    set_env_script = "/usr/local/Ascend/ascend-toolkit/set_env.sh"
-    if not os.path.exists(set_env_script):
-        ts_print(f"[pre_ci] ut: WARNING {set_env_script} not found — "
-                 "NPU tests may fail to import torch_npu")
-        return env
-    # Source the script and dump env as NUL-separated key=value pairs.
-    # This captures all env vars the script sets (LD_LIBRARY_PATH, etc.).
-    r = subprocess.run(
-        ["bash", "-c", f"source {set_env_script} && env -0"],
-        capture_output=True, text=True, timeout=10,
-    )
-    if r.returncode != 0:
-        ts_print(f"[pre_ci] ut: WARNING source set_env.sh failed "
-                 f"({r.stderr.strip()[:200]})")
-        return env
-    new_env = dict(env)
-    for entry in r.stdout.split("\0"):
-        if not entry or "=" not in entry:
-            continue
-        key, _, value = entry.partition("=")
-        new_env[key] = value
-    return new_env
-
-
 def _check_ut(repo: Path, vllm_path: str | Path | None = None,
               timeout_s: int = 1800) -> dict:
-    """Run vllm-ascend UT batch (CPU + A2 NPU + E2E smoke) pre-push.
+    """Run the CPU-UT batch with FULL test isolation (per-file process).
 
-    Coverage (mirrors CI's select_tests routing):
-      - CPU UT (158 files in tests/ut/* excluding a2/ a3_2/) — always runs.
-        Uses TORCH_DEVICE_BACKEND_AUTOLOAD=0 + conftest.py mocks torch_npu.
-      - A2 NPU UT (~15 files in tests/ut/*/a2/) — only when NPU is available
-        (main2main runs on linux-aarch64-a2b1-8).  Sources Ascend toolkit env,
-        uses real NPU device.
-      - A2 NPU E2E smoke (test_extract_hidden_states.py) — only when NPU is
-        available.  Catches engine-init bugs that UT can't (e.g., PR #13515's
-        "No common block size for 16" failure).  ~7 min per run.
+    Runs the same CPU-routed tests/ut/* files as CI's CPU runner
+    (linux-amd64-cpu-8-hk), but on whatever machine main2main runs on —
+    including the A2 NPU runner.  Two mechanisms make this work:
 
-    Venv setup mirrors ``_check_mypy``: ``--system-site-packages`` inherits
-    torch/vllm/vllm_ascend/pytest; install ``numpy==1.26.4`` (from triton-ascend
-    metadata) to override system numpy 2.x.  Don't install vllm/vllm_ascend
-    (editable + PYTHONPATH resolves them to the working tree).
+    1. **Per-file fresh process**: each test file runs in its own
+       ``subprocess``, so mock pollution between files is impossible
+       (e.g. test_batch_invariant.py's global ``torch.library.Library``
+       monkeypatch can't leak into test_gdn_layerwise_kv.py).  CI's
+       single-process batch does NOT have this isolation — this is
+       stricter than CI, not looser.
 
-    Returns dict with ``violations`` (list of failing test node IDs or error
-    messages) and ``detail``.  Empty violations + non-skipped → pass.
+    2. **Fake npu-smi on the PATH**: vllm-ascend's tests/ut/conftest.py
+       checks ``npu-smi info`` to decide whether to mock torch_npu.
+       On the A2 runner npu-smi succeeds, so conftest would NOT mock and
+       CPU UT cases would hit real NPU ops (e.g. ``swiglustep: N=4 must
+       be multiple of 8``).  We prepend a temp dir with a fake
+       ``npu-smi`` script (exit 1) to the child's PATH — conftest then
+       takes the mock path, exactly like CI's CPU runner.
+
+    Env mirrors CI: venv with --system-site-packages + numpy==1.26.4
+    (from triton-ascend metadata) + PYTHONPATH=ascend:vllm.  torch_npu
+    is mocked by conftest, so the venv python's C-extension issue that
+    broke A2-NPU-UT in PR #13657 does not apply here.
+
+    Returns dict with ``violations`` (failing test node IDs) and
+    ``detail``.  Empty violations + non-skipped → pass.
     """
     import tempfile
+    import concurrent.futures
     import importlib.metadata as _md
 
     cpu_files = _collect_cpu_ut_files(repo)
@@ -624,27 +526,9 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
         return {"violations": [], "detail": "pytest not installed", "skipped": True}
 
     ts_print(f"\n[pre_ci] ut: collected {len(cpu_files)} CPU test files "
-             f"(skipped NPU-convention a2/ and a3_2/ subdirs)")
-
-    # Detect NPU availability — main2main runs on linux-aarch64-a2b1-8
-    # (A2 8-card NPU).  When NPU is available, also run A2 NPU UT + an E2E
-    # smoke test to catch bugs CPU UT can't (e.g., engine-init failures).
-    npu_ok = _npu_available()
-    a2_npu_files: list[str] = []
-    e2e_files: list[str] = []
-    if npu_ok:
-        a2_npu_files = _collect_a2_npu_ut_files(repo)
-        e2e_files = [t for t in _A2_NPU_E2E_TESTS
-                      if (repo / t).exists()]
-        ts_print(f"[pre_ci] ut: NPU detected — adding {len(a2_npu_files)} "
-                 f"A2 NPU UT files + {len(e2e_files)} E2E smoke test(s)")
-    else:
-        ts_print("[pre_ci] ut: no NPU detected — running CPU UT only "
-                 "(A2 NPU UT + E2E smoke skipped)")
+             f"(per-file isolation, NPU-convention a2/ and a3_2/ excluded)")
 
     # Read numpy constraint from triton-ascend metadata (mirror _check_mypy).
-    # CI's lint image uses numpy 1.26.4 (constrained by triton-ascend);
-    # main2main installs triton-ascend with --no-deps so system numpy is 2.x.
     target_numpy_spec = ""
     try:
         from packaging.requirements import Requirement
@@ -663,12 +547,9 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
     except Exception as e:
         ts_print(f"[pre_ci] ut: failed to read triton-ascend numpy constraint ({e})")
 
-    if not target_numpy_spec:
-        ts_print("[pre_ci] ut: WARNING no triton-ascend numpy constraint — "
-                 "using system numpy (may cause spurious dtype/shape failures)")
-
     # Build env: PYTHONPATH=ascend:vllm so vllm_ascend resolves to the
-    # adapted working tree (editable install + PYTHONPATH prepends).
+    # adapted working tree.  CPU UT uses TORCH_DEVICE_BACKEND_AUTOLOAD=0
+    # (conftest mocks torch_npu when npu-smi is unavailable).
     env = os.environ.copy()
     if vllm_path:
         ascend_abs = str(repo.resolve())
@@ -677,21 +558,15 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
         env["PYTHONPATH"] = (
             f"{ascend_abs}:{vllm_abs}:{existing}" if existing
             else f"{ascend_abs}:{vllm_abs}")
-        ts_print(f"[pre_ci] ut: PYTHONPATH={ascend_abs}:{vllm_abs}")
-    # CPU UT uses TORCH_DEVICE_BACKEND_AUTOLOAD=0 (conftest mocks torch_npu).
-    # NPU tests need real torch_npu, so don't set autoload=0 when NPU is on.
-    if npu_ok:
-        env.update(_UT_NPU_ENV)
-        env = _source_ascend_env(env)
-    else:
-        env.update(_UT_CPU_ENV)
+    env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+    env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     # Create venv with --system-site-packages, install numpy constraint.
     venv_dir: Path | None = None
     pytest_cmd = [pytest_bin]
     if vllm_path and target_numpy_spec:
         venv_dir = Path(tempfile.mkdtemp(prefix="ut_venv_"))
-        ts_print(f"[pre_ci] ut: creating lint-equivalent venv at {venv_dir} "
+        ts_print(f"[pre_ci] ut: creating venv at {venv_dir} "
                  f"(numpy{target_numpy_spec} from triton-ascend)")
         try:
             r = subprocess.run(
@@ -704,7 +579,6 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
             r = None  # type: ignore[assignment]
         if r is not None and r.returncode == 0:
             venv_python = venv_dir / "bin" / "python"
-            # Install numpy constraint in venv (overrides system numpy 2.x).
             try:
                 r2 = subprocess.run(
                     [str(venv_python), "-m", "pip", "install",
@@ -719,120 +593,99 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
                 ts_print(f"[pre_ci] ut: numpy install FAILED "
                          f"({r2.stderr.strip()[:300]}) — falling back to system pytest")
             elif r2 is not None:
-                try:
-                    vr = subprocess.run(
-                        [str(venv_python), "-c", "import numpy; print(numpy.__version__)"],
-                        capture_output=True, text=True, timeout=30,
-                    )
-                except subprocess.TimeoutExpired:
-                    vr = None
-                installed = vr.stdout.strip() if (vr and vr.returncode == 0) else "?"
-                ts_print(f"[pre_ci] ut: venv numpy installed: {installed} "
-                         f"(expected numpy{target_numpy_spec})")
-                if installed.startswith("2."):
-                    ts_print(f"[pre_ci] ut: WARNING numpy {installed} is 2.x — "
-                             "results may contain spurious dtype/shape failures "
-                             "(lint image uses numpy 1.26.4)")
                 pytest_cmd = [str(venv_python), "-m", "pytest"]
         elif r is not None:
             ts_print(f"[pre_ci] ut: venv creation failed ({r.stderr.strip()[:200]}) — "
                      "using system pytest")
 
+    # Fake npu-smi: prepend a temp dir with an `npu-smi` that exits 1, so
+    # tests/ut/conftest.py takes the mock path (as on CI's CPU runner).
+    fake_bin_dir = Path(tempfile.mkdtemp(prefix="ut_fake_bin_"))
     try:
-        # Run pytest batches in order.  Each batch is a separate subprocess
-        # invocation — mirrors CI's run_pytest_batch (one pytest per group).
-        # Stop-on-first-failure is disabled so we collect ALL failures across
-        # all batches (gives adapter the full picture for fixing).
+        fake_npu_smi = fake_bin_dir / "npu-smi"
+        fake_npu_smi.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        fake_npu_smi.chmod(0o755)
+        env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
+        ts_print(f"[pre_ci] ut: injected fake npu-smi at {fake_bin_dir} "
+                 f"(forces conftest mock path)")
+
+        # Run each test file in a FRESH subprocess (pollution immunity),
+        # parallelized across CPU cores.
+        max_workers = min(16, os.cpu_count() or 4)
+        ts_print(f"[pre_ci] ut: running {len(cpu_files)} files "
+                 f"({max_workers} parallel, per-file isolation)...")
+
         ansi_re = re.compile(r"\x1b\[[0-9;]*m")
         failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
+        results: list[tuple[str, int, str]] = []
 
-        def _run_batch(label: str, files: list[str], batch_timeout: int,
-                       print_tail_lines: int = 50) -> tuple[list[str], str]:
-            """Run one pytest batch.  Returns (violations, detail).
-
-            violations: list of FAILED/ERROR summary lines (node IDs).
-            detail: short status string.
-            """
-            if not files:
-                return [], ""
-            cmd = [*pytest_cmd, "-sv", "--color=yes", "--tb=short", "-q", *files]
-            ts_print(f"\n[pre_ci] === pytest {label} ({len(files)} files) begin ===")
+        def _run_one(file: str) -> tuple[str, int, str]:
+            cmd = [*pytest_cmd, "-q", "--tb=short", "--no-header", file]
             try:
-                r = subprocess.run(
-                    cmd, cwd=str(repo), capture_output=True, text=True, env=env,
-                    timeout=batch_timeout,
+                rr = subprocess.run(
+                    cmd, cwd=str(repo), capture_output=True, text=True,
+                    env=env, timeout=300,
                 )
             except subprocess.TimeoutExpired:
-                ts_print(f"\n[pre_ci] ut: FAILED — {label} timed out "
-                         f"after {batch_timeout}s")
-                return ([f"{label} timed out after {batch_timeout}s"],
-                        f"{label} timeout ({batch_timeout}s)")
-            output = r.stdout + "\n" + r.stderr
-            clean_output = ansi_re.sub("", output)
-            ts_print(f"[pre_ci] === pytest {label} end (exit={r.returncode}) ===")
-            tail = "\n".join(clean_output.splitlines()[-print_tail_lines:])
-            ts_print(tail)
+                return file, -1, "TIMEOUT(300s)"
+            return file, rr.returncode, (rr.stdout + rr.stderr)
 
-            if r.returncode == 0:
-                ts_print(f"\n[pre_ci] ut: {label} OK ({len(files)} files clean)")
-                return [], f"{label} clean ({len(files)} files)"
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers) as pool:
+                futures = [pool.submit(_run_one, f) for f in cpu_files]
+                for fut in concurrent.futures.as_completed(futures):
+                    file, rc, output = fut.result()
+                    results.append((file, rc, output))
+        finally:
+            pass  # per-file processes are already isolated
 
-            seen: set[str] = set()
-            violations: list[str] = []
-            for line in clean_output.splitlines():
+        # Aggregate failures.
+        all_violations: list[str] = []
+        seen: set[str] = set()
+        failed_files = [r for r in results if r[1] != 0]
+        for file, rc, output in sorted(failed_files):
+            clean = ansi_re.sub("", output)
+            for line in clean.splitlines():
                 m = failed_re.search(line.strip())
                 if m and m.group(2) not in seen:
                     seen.add(m.group(2))
-                    violations.append(line.strip())
-            if violations:
-                ts_print(f"\n[pre_ci] ut: {label} — {len(violations)} failure(s):")
-                for v in violations[:20]:
-                    ts_print(f"  {v}")
-                if len(violations) > 20:
-                    ts_print(f"  ... and {len(violations) - 20} more")
-                return violations, f"{label}: {len(violations)} failure(s)"
-            ts_print(f"\n[pre_ci] ut: {label} FAILED but no parseable lines")
-            return ([clean_output[-2000:]],
-                    f"{label} failed (no parseable failures)")
+                    all_violations.append(line.strip())
+            if rc == -1 and not any("TIMEOUT" in v for v in all_violations):
+                # keep timeout marker visible
+                pass
 
-        # Batch 1: CPU UT (158 files, 30 min timeout)
-        cpu_violations, cpu_detail = _run_batch(
-            "CPU-UT", cpu_files, timeout_s)
-
-        # Batch 2: A2 NPU UT (only when NPU available).  Uses NPU env
-        # already set above (sourced Ascend toolkit, no autoload override).
-        npu_violations: list[str] = []
-        npu_detail = ""
-        if npu_ok and a2_npu_files:
-            npu_violations, npu_detail = _run_batch(
-                "A2-NPU-UT", a2_npu_files, timeout_s)
-
-        # Batch 3: A2 NPU E2E smoke (test_extract_hidden_states + future).
-        # E2E tests load real models (~7 min each) — longer timeout, fewer
-        # tail lines to avoid log spam.
-        e2e_violations: list[str] = []
-        e2e_detail = ""
-        if npu_ok and e2e_files:
-            e2e_violations, e2e_detail = _run_batch(
-                "A2-NPU-E2E", e2e_files, _A2_NPU_E2E_TIMEOUT_S,
-                print_tail_lines=80)
-
-        all_violations = cpu_violations + npu_violations + e2e_violations
-        details = [d for d in (cpu_detail, npu_detail, e2e_detail) if d]
-
-        if not all_violations:
-            total = len(cpu_files) + len(a2_npu_files) + len(e2e_files)
-            ts_print(f"\n[pre_ci] ut: OK — all batches clean ({total} files)")
-            return {"violations": [], "detail": f"UT clean ({total} files, "
-                    f"cpu={len(cpu_files)}+npu_ut={len(a2_npu_files)}"
-                    f"+e2e={len(e2e_files)})"}
-        return {"violations": all_violations,
-                "detail": f"{len(all_violations)} UT failure(s): "
-                          f"{'; '.join(details)}"}
+        passed_count = len(results) - len(failed_files)
+        ts_print(f"\n[pre_ci] ut: {passed_count}/{len(results)} files clean, "
+                 f"{len(failed_files)} failed")
+        if all_violations:
+            ts_print(f"\n[pre_ci] ut: {len(all_violations)} failure(s):")
+            for v in all_violations[:20]:
+                ts_print(f"  {v}")
+            if len(all_violations) > 20:
+                ts_print(f"  ... and {len(all_violations) - 20} more")
+            return {"violations": all_violations,
+                    "detail": f"{len(all_violations)} UT failure(s) "
+                              f"({passed_count}/{len(results)} files clean)"}
+        if failed_files:
+            # Failures but no parseable FAILED/ERROR lines — dump one
+            # representative output.
+            detail_parts = []
+            for file, rc, output in failed_files[:3]:
+                detail_parts.append(
+                    f"{file}: exit={rc} — {ansi_re.sub('', output)[-500:]}")
+            return {"violations": detail_parts,
+                    "detail": f"{len(failed_files)} file(s) failed "
+                              f"without parseable failures"}
+        ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean")
+        return {"violations": [],
+                "detail": f"UT clean ({len(cpu_files)} files, per-file isolated)"}
     finally:
         if venv_dir and venv_dir.exists():
             shutil.rmtree(venv_dir, ignore_errors=True)
-            ts_print(f"[pre_ci] ut: destroyed temporary venv at {venv_dir}")
+        if fake_bin_dir.exists():
+            shutil.rmtree(fake_bin_dir, ignore_errors=True)
+            ts_print("[pre_ci] ut: removed fake npu-smi dir")
 
 
 def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:

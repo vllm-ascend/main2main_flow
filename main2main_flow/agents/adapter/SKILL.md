@@ -34,6 +34,7 @@ description: Adapt vllm-ascend to upstream vLLM changes ({mode} mode).
 - Use `vllm_version_is("{release_tag}")` for version boundaries — never `hasattr` or `try/except`
 - All branches of a version guard must have identical function signatures
 - Static analysis only — do not import vllm/vllm-ascend, run tests, launch models, or require NPU/GPU
+- **DO NOT run mypy, ruff, pre-commit, py_compile, or any linter/checker/compiler command.** Ever. During adaptation, only read code and edit files.
 - Never read raw CI logs — use inlined error content above
 - Do NOT treat ModuleNotFoundError or missing NPU/GPU from local commands as adaptation failures
 
@@ -54,10 +55,12 @@ The step_target.patch is cumulative (git diff HEAD).
   when vllm-ascend directly depends on the behavior.
 - **vllm-report impact map**: {vllm_report_context}
   The vllm-report MCP server is registered in opencode.jsonc. Call its tools
-  DYNAMICALLY during analysis (see "vllm-report MCP Tools" section below) —
-  do NOT grep for files the MCP tools already cover. MCP results are
-  authoritative (extracted from vllm-ascend's actual patch wiring); grepping
-  is a fallback for files MCP didn't mention.
+  DYNAMICALLY during analysis (see "vllm-report MCP Tools" section below).
+  **If `get_adaptation_guide(sha)` returns a guide for this step's commit,
+  it is authoritative — do NOT re-grep what it already identified.  If it
+  returns empty (commit too recent / not covered), the guide is useless —
+  you MUST analyze the upstream diff yourself (grep + read + reason).**
+  Grepping is a fallback for files MCP didn't mention.
 - Use the Key Areas in code-structure-guide.md as an
   architecture-level supplement to vllm-report. When vllm-report is
   unavailable (clone failed or commit not covered), use Key Areas to manually
@@ -77,6 +80,58 @@ The step_target.patch is cumulative (git diff HEAD).
   the same changed symbol. When a method signature changes, grep for ALL
   `def <method_name>(` in the vllm-ascend tree — every override must be updated.
 
+## Efficiency Rules — avoid dead-end exploration
+
+Each tool call (bash/grep/read) costs 10-30s of model time, and each
+"let me think about this" gap costs 1-2 min. A full step should take
+~10 min of work. If you're past that, you are over-exploring. Follow
+these rules to stay on the critical path:
+
+1. **Grep budget: max 5 grep/glob calls per step.** MCP context + 2-3
+   targeted greps covers almost every step. If you've grepped 5 times and
+   are still unsure, STOP grepping — re-read the MCP `get_adaptation_guide`
+   result or the upstream patch instead. The answer is usually there.
+2. **Conclude once, act immediately.** When your analysis reaches a
+   conclusion (e.g. "this is the processor/multimodal trap, the fix is
+   X"), implement X RIGHT AWAY. Do NOT re-state the same conclusion in
+   follow-up text, do NOT grep to "confirm" what you already derived.
+   Each repetition burns 1-2 min with no new information.
+3. **Read files whole, once.** Use `read` or `cat` to load a file ONCE.
+   Do NOT probe small sections with `sed -n '40,75p'` repeatedly — one
+   full read of a 200-line file is faster than 4 partial reads, and the
+   model sees the full context in one shot.
+4. **Batch related checks into one bash command.** Combine multiple greps
+   in a single call: `grep -n "X" file; grep -n "Y" file; ls dir`. Each
+   bash call has fixed overhead (issue + output processing); 3 greps in
+   one command is ~1/3 the cost of 3 separate calls.
+5. **Verify at edit time, not in a verification loop.** Keep every line
+   ≤120 chars AS YOU WRITE IT (the format rules below apply while
+   editing). Do NOT run `git diff | grep '^+' | awk 'length>121'`, do NOT
+   run py_compile/mypy/ruff (banned — see Rules above). Just write clean
+   lines as you go. The final quality gate re-runs format + mypy once at
+   push time and feeds exact violations back — your job is to not leave
+   obvious violations, not to exhaustively prove there are none.
+6. **MCP context is the map — don't re-discover it — BUT only when it
+   covers the commit.** Two cases:
+   a. `get_adaptation_guide(sha)` RETURNED a guide (the commit was
+      analyzed): follow it directly. Do NOT grep the upstream diff hunks
+      for files the guide already identified, do NOT re-verify the
+      guide's conclusions. Grep only for CALL SITES and sibling
+      overrides (rules 9-10 in the checklist below), which the guide
+      may not enumerate.
+   b. `get_adaptation_guide(sha)` returned empty / "commit not covered"
+      (too recent, or vllm-report has no analysis yet): the guide is
+      useless — DO analyze the upstream diff yourself (grep, read,
+      reason) to find what vllm-ascend depends on. This is expected and
+      allowed. The MCP gap is the signal to explore.
+7. **One pass per file.** Read a file, understand it, edit all needed
+   spots, verify once, move on. Do NOT return to an already-edited file
+   unless a later discovery proves your edit wrong.
+8. **In fix mode, fix ONLY what the error says.** Read the traceback /
+   `pre_ci_check.json` violation, fix that exact line, done. Do NOT
+   re-analyze the upstream patch or re-explore the subsystem. The
+   adaptation is done; you are fixing a specific failure.
+
 ## Workflow
 
 ### adapt mode
@@ -86,9 +141,10 @@ The step_target.patch is cumulative (git diff HEAD).
 3. Apply minimal changes — do not refactor unrelated code
 4. **Apply the Format rules and mypy prevention rules below WHILE editing**
    (format + mypy are NOT checked per-step - they run once at push time on
-   the cumulative diff. Fix format/mypy issues while editing to minimize
-   final quality-gate fix rounds. If the final gate fails, the exact
-   `file:LINE:CODE` is fed back via `quality_gate.json` in fix mode).
+   the cumulative diff. Apply the rules BY READING as you edit — NEVER run
+   mypy/ruff/py_compile to check (banned, see Rules above). If the final
+   gate fails, the exact `file:LINE:CODE` is fed back via
+   `quality_gate.json` in fix mode).
    - **Ignore env noise in format output**: gitleaks "is not executable",
      shellcheck missing, "Exec format error" are infrastructure issues.
      Do NOT modify `.github/workflows/scripts/` to fix these.
@@ -165,7 +221,7 @@ Does this code path need to support BOTH the release version AND upstream main?
 - Every line **must** be ≤ 120 characters.
 - No unused imports (F401), unused variables (F841), undefined names (F821).
 - Every `vllm_version_is()` call needs `from vllm_ascend.utils import vllm_version_is`.
-- Imports sorted per `ruff` rules (stdlib → third-party → first-party).
+- Imports sorted: stdlib → third-party → first-party.
 
 **Output-buffer trap**: When upstream changes from `output[:] = result` to
 `return result`, don't just redirect a forward method. You MUST make the
@@ -259,14 +315,18 @@ during adaptation to query deeper information not in the injected impact map.
    │   -> Returns step-by-step impact analysis with line numbers
    ├─ Call get_cross_project_mapping()
    │   -> Returns patch_impact_map (vllm path -> ascend file) +
-   │      definitely_affected_paths. Adapt THESE files; don't grep for them.
-   └─ Only if both return empty/no-data → fall back to grep
+   │      definitely_affected_paths
+   ├─ IF the guide returned DATA: adapt those files, don't grep for them.
+   └─ IF the guide returned EMPTY (commit not covered): the guide is
+      useless — analyze the upstream diff yourself (grep + read + reason).
+      This is the normal path for recent commits vllm-report hasn't
+      analyzed yet.
    │
 2. Need to find which vllm-ascend files are affected?
    ├─ get_cross_project_mapping() already covers this (call it)
    ├─ Need interface inheritance details? -> get_interface_surface(repo="vllm-ascend")
    │      (returns 8 inheritable interfaces with ascend_impl + key_methods)
-   └─ DO NOT grep "vllm_ascend/" for files — MCP mapping is authoritative
+   └─ Only skip grep when MCP data exists; otherwise grep is your analysis
    │
 3. Need to know HOW to adapt a specific change?
    ├─ get_adaptation_guide(sha=<end_commit>) already covers this (call it)
