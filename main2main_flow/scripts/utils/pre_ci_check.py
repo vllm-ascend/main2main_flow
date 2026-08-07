@@ -477,7 +477,40 @@ def _is_npu_convention_ut_path(rel_path: str) -> bool:
 
 
 def _collect_cpu_ut_files(repo: Path) -> list[str]:
-    """Walk tests/ut/ for test_*.py, return CPU-routed paths (rel to repo)."""
+    """Return CPU-routed tests/ut paths (rel to repo).
+
+    Routes from vllm-ascend's OWN ``test_config.yaml`` — the same
+    ``runner_mapping`` + ``skip_tests`` CI's select_tests.py reads — so the
+    set tracks CI automatically when routing changes (new NPU directories,
+    new skip entries).  Reading the config is read-only; vllm-ascend is
+    never modified.  Falls back to the convention regexes when the config
+    is missing or unparseable (old checkouts).
+    """
+    skip_tests: set[str] = set()
+    npu_patterns: list[re.Pattern] = []
+    config_path = repo / ".github/workflows/scripts/test_config.yaml"
+    if config_path.exists():
+        try:
+            import yaml
+            docs = list(yaml.safe_load_all(
+                config_path.read_text(encoding="utf-8")))
+            modules = docs[0] or []
+            meta = docs[1] if len(docs) >= 2 and docs[1] else {}
+            for module in modules:
+                for s in module.get("skip_tests", []):
+                    skip_tests.add(str(s).rstrip("/"))
+            for pattern_str in ((meta or {}).get("runner_mapping", {}) or {}):
+                if pattern_str.startswith("tests/ut"):
+                    npu_patterns.append(re.compile(pattern_str))
+            if npu_patterns:
+                ts_print(f"[pre_ci] ut: routing from test_config.yaml "
+                         f"({len(npu_patterns)} NPU pattern(s), "
+                         f"{len(skip_tests)} skip entry(s))")
+        except Exception as e:
+            ts_print(f"[pre_ci] ut: failed to parse test_config.yaml ({e}), "
+                     "falling back to convention regexes")
+            npu_patterns = []
+
     ut_dir = repo / "tests" / "ut"
     if not ut_dir.exists():
         return []
@@ -488,8 +521,14 @@ def _collect_cpu_ut_files(repo: Path) -> list[str]:
         for f in sorted(fnames):
             if f.startswith("test_") and f.endswith(".py"):
                 rel = os.path.relpath(os.path.join(root, f), str(repo))
-                if not _is_npu_convention_ut_path(rel):
-                    files.append(rel)
+                if skip_tests and rel in skip_tests:
+                    continue
+                if npu_patterns:
+                    if any(p.search(rel) for p in npu_patterns):
+                        continue
+                elif _is_npu_convention_ut_path(rel):
+                    continue
+                files.append(rel)
     return files
 
 
@@ -497,26 +536,22 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
               vllm_release_path: str | Path | None = None,
               release_tag: str = "",
               timeout_s: int = 1800) -> dict:
-    """Run the CPU-UT batch with FULL test isolation (per-file process).
+    """Run the CPU-UT batch, aligned with CI's single-process execution.
 
     Runs the same CPU-routed tests/ut/* files as CI's CPU runner
     (linux-amd64-cpu-8-hk), but on whatever machine main2main runs on —
-    including the A2 NPU runner.  Two mechanisms make this work:
+    including the A2 NPU runner.  Mirrors vllm-ascend's
+    ``run_selected_tests.sh`` cpu-ut batch: ALL files in ONE pytest
+    process (CI runs 2044 tests in ~44s; per-file subprocess isolation
+    cost ~5 min per version).  The key mechanism:
 
-    1. **Per-file fresh process**: each test file runs in its own
-       ``subprocess``, so mock pollution between files is impossible
-       (e.g. test_batch_invariant.py's global ``torch.library.Library``
-       monkeypatch can't leak into test_gdn_layerwise_kv.py).  CI's
-       single-process batch does NOT have this isolation — this is
-       stricter than CI, not looser.
-
-    2. **Fake npu-smi on the PATH**: vllm-ascend's tests/ut/conftest.py
-       checks ``npu-smi info`` to decide whether to mock torch_npu.
-       On the A2 runner npu-smi succeeds, so conftest would NOT mock and
-       CPU UT cases would hit real NPU ops (e.g. ``swiglustep: N=4 must
-       be multiple of 8``).  We prepend a temp dir with a fake
-       ``npu-smi`` script (exit 1) to the child's PATH — conftest then
-       takes the mock path, exactly like CI's CPU runner.
+    **Fake npu-smi on the PATH**: vllm-ascend's tests/ut/conftest.py
+    checks ``npu-smi info`` to decide whether to mock torch_npu.
+    On the A2 runner npu-smi succeeds, so conftest would NOT mock and
+    CPU UT cases would hit real NPU ops (e.g. ``swiglustep: N=4 must
+    be multiple of 8``).  We prepend a temp dir with a fake
+    ``npu-smi`` script (exit 1) to the child's PATH — conftest then
+    takes the mock path, exactly like CI's CPU runner.
 
     Runs the batch against BOTH vllm versions: the target main checkout
     (``vllm_path``) AND the pinned release (``vllm_release_path``, e.g.
@@ -544,7 +579,6 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
     ``detail``.  Empty violations + non-skipped → pass.
     """
     import tempfile
-    import concurrent.futures
     import importlib.metadata as _md
 
     cpu_files = _collect_cpu_ut_files(repo)
@@ -621,7 +655,6 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
     fake_bin_dir = Path(tempfile.mkdtemp(prefix="ut_fake_bin_"))
     ansi_re = re.compile(r"\x1b\[[0-9;]*m")
     failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
-    max_workers = min(16, os.cpu_count() or 4)
 
     try:
         fake_npu_smi = fake_bin_dir / "npu-smi"
@@ -674,64 +707,83 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
             ts_print(f"\n[pre_ci] ut: === batch [{label}] "
                      f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
 
-            results: list[tuple[str, int, str]] = []
+            # CI-aligned: run all files in ONE pytest process, exactly like
+            # vllm-ascend's run_selected_tests.sh cpu-ut batch (2044 tests in
+            # ~44s on CI).  The previous per-file subprocess isolation cost
+            # ~5 min per version (python+torch import per file); a single
+            # process shares those imports and runs in ~2 min.
+            #
+            # Exception: files known to pollute the shared process get their
+            # own subprocess.  Verified on the A2 env: test_batch_invariant.py
+            # installs a global torch.library.Library monkeypatch that breaks
+            # test_gdn_layerwise_kv.py when run in the same process (the
+            # original per-file isolation existed for exactly this pair).
+            isolated = [f for f in cpu_files
+                        if f.endswith("test_batch_invariant.py")]
+            batch = [f for f in cpu_files if f not in isolated]
 
-            def _run_one(file: str) -> tuple[str, int, str]:
-                cmd = [*pytest_cmd, "-q", "--tb=short", "--no-header", file]
-                if file.endswith("test_patch_balance_schedule.py"):
-                    cmd += ["-k", f"not {_BALANCE_TAG_BODY_TEST}"]
-                elif vllm_version and file.endswith("test_utils.py"):
-                    # test_vllm_version_is unit-tests the VLLM_VERSION env
-                    # fallback with a mocked env; the release batch sets
-                    # VLLM_VERSION for real, so its __version__-fallback
-                    # assertions can't hold there.  Main batch runs it as-is.
-                    cmd += ["-k", "not test_vllm_version_is"]
+            exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
+            if vllm_version:
+                # test_vllm_version_is unit-tests the VLLM_VERSION env
+                # fallback with a mocked env; the release batch sets
+                # VLLM_VERSION for real, so its __version__-fallback
+                # assertions can't hold there.  Main batch runs it as-is.
+                exclude_expr += " and not test_vllm_version_is"
+
+            runs: list[tuple[str, subprocess.CompletedProcess]] = []
+            try:
+                rr = subprocess.run(
+                    [*pytest_cmd, "-q", "--tb=short", "--no-header",
+                     *batch, "-k", exclude_expr],
+                    cwd=str(repo), capture_output=True, text=True,
+                    env=env, timeout=1200,
+                )
+                runs.append(("batch", rr))
+            except subprocess.TimeoutExpired:
+                ts_print(f"[pre_ci] ut: [{label}] batch TIMEOUT(1200s)")
+                all_files_clean = False
+                details.append(f"{label}/batch: TIMEOUT(1200s)")
+            for f in isolated:
                 try:
                     rr = subprocess.run(
-                        cmd, cwd=str(repo), capture_output=True, text=True,
+                        [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
+                        cwd=str(repo), capture_output=True, text=True,
                         env=env, timeout=300,
                     )
+                    runs.append((f, rr))
                 except subprocess.TimeoutExpired:
-                    return file, -1, "TIMEOUT(300s)"
-                return file, rr.returncode, (rr.stdout + rr.stderr)
+                    ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
+                    all_files_clean = False
 
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=max_workers) as pool:
-                futures = [pool.submit(_run_one, f) for f in cpu_files]
-                for fut in concurrent.futures.as_completed(futures):
-                    results.append(fut.result())
-
-            failed_files = [r for r in results if r[1] != 0]
-            passed_count = len(results) - len(failed_files)
-            ts_print(f"[pre_ci] ut: [{label}] {passed_count}/{len(results)} "
-                     f"files clean, {len(failed_files)} failed")
-            if failed_files:
-                all_files_clean = False
+            for name, rr in runs:
+                clean = ansi_re.sub("", rr.stdout + rr.stderr)
                 seen: set[str] = set()
-                for file, rc, output in sorted(failed_files):
-                    clean = ansi_re.sub("", output)
-                    for line in clean.splitlines():
-                        m = failed_re.search(line.strip())
-                        if m and m.group(2) not in seen:
-                            seen.add(m.group(2))
-                            all_violations.append(f"[{label}] {line.strip()}")
-                    if rc == -1:
-                        all_violations.append(f"[{label}] {file}: TIMEOUT(300s)")
-                if not any("[{label}]" in v for v in
-                           [a for a in all_violations if label in a]):
-                    # No parseable failures — dump representative output.
-                    for file, rc, output in failed_files[:3]:
+                for line in clean.splitlines():
+                    m = failed_re.search(line.strip())
+                    if m and m.group(2) not in seen:
+                        seen.add(m.group(2))
+                        all_violations.append(f"[{label}] {line.strip()}")
+                if rr.returncode != 0:
+                    all_files_clean = False
+                    if not seen:
+                        # No parseable failures — dump output tail.
                         all_violations.append(
-                            f"[{label}] {file}: exit={rc} — "
-                            f"{ansi_re.sub('', output)[-500:]}")
-            details.append(f"{label}: {passed_count}/{len(results)} clean")
+                            f"[{label}] {name}: exit={rr.returncode} — "
+                            f"{clean[-500:]}")
+                summary_m = re.search(
+                    r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
+                summary = (summary_m.group(1) if summary_m
+                           else f"exit={rr.returncode}")
+                details.append(f"{label}/{name}: {summary}")
+                ts_print(f"[pre_ci] ut: [{label}/{name}] {summary}")
 
         if all_files_clean:
             ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean "
                      f"on all versions")
             return {"violations": [],
                     "detail": f"UT clean ({len(cpu_files)} files × "
-                              f"{len(versions)} versions, per-file isolated)"}
+                              f"{len(versions)} versions, single-process "
+                              f"batch)"}
         ts_print(f"\n[pre_ci] ut: {len(all_violations)} failure(s):")
         for v in all_violations[:20]:
             ts_print(f"  {v}")
