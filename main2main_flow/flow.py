@@ -1545,10 +1545,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         if m:
                             upstream_links.append(f"[{m.group(1)[:8]}]({m.group(2)})")
                         else:
-                            # Plain SHA format: "Upstream commit: <sha>"
+                            # Plain SHA format: "Upstream commit: <sha>".
+                            # Only build a link for a real sha — the agent
+                            # sometimes writes "(unknown ...)" here, which
+                            # must not become a malformed markdown link.
                             sha = dl.split(":", 1)[1].strip()
-                            if sha:
-                                upstream_links.append(f"[{sha[:8]}]({commit_url}/{sha})")
+                            if re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+                                upstream_links.append(
+                                    f"[{sha[:8]}]({commit_url}/{sha})")
                         continue
                     # Continuation lines (indented with 2+ spaces or tab).
                     # Only match indented lines — the old fallback (dl and not
@@ -1567,7 +1571,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # only one (single-step flow).
             header_files = _parse_summary_files(ssp_text, s["id"])
             change_files = set(re.findall(r"`([^`]+)`", change))
-            mentioned = header_files | change_files
+            # The adapter often names the touched files inline in the
+            # Change/Cause text without backticks — extract vllm_ascend/
+            # and tests/ paths so the Files column isn't "—" and the
+            # completeness guard doesn't re-surface them as unattributed.
+            text_files = set(re.findall(
+                r"(?:[\w./-]+/)?(?:vllm_ascend|tests)/[\w./-]+\.py",
+                f"{cause} {change}"))
+            mentioned = header_files | change_files | text_files
             if mentioned:
                 step_files = [f for f in cumulative_files if f in mentioned]
             else:
