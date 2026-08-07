@@ -37,8 +37,13 @@ def run_final_quality_gate(
     vllm_path: str | Path,
     release_tag: str,
     log_dir: Path,
+    vllm_release_path: str | Path | None = None,
 ) -> tuple[bool, list[str]]:
     """Run format + mypy on the final cumulative diff, before push.
+
+    UT gate runs the CPU-UT batch against BOTH the target main checkout
+    and the pinned release tag (vllm_release_path, e.g. v0.26.0) when
+    available.
 
     Returns (passed, error_logs).  error_logs is empty when passed;
     otherwise contains a single path to quality_gate.json (which holds
@@ -62,7 +67,9 @@ def run_final_quality_gate(
     fmt = _check_format(repo)
     mypy = _check_mypy(repo, vllm_path)
     if ut_enabled:
-        ut = _check_ut(repo, vllm_path)
+        ut = _check_ut(repo, vllm_path,
+                       vllm_release_path=vllm_release_path,
+                       release_tag=release_tag)
     else:
         ut = {"violations": [], "detail": "UT gate disabled (MAIN2MAIN_UT_GATE=0)",
               "skipped": True}

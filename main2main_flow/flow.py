@@ -16,7 +16,7 @@ from main2main_flow.scripts.utils.detect_commits import detect
 from main2main_flow.scripts.utils.plan_steps import run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.lessons import persist_lessons, submit_step_lesson
-from main2main_flow.scripts.utils.push_to_github import push_and_create_pr
+from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
 from main2main_flow.scripts.utils.run_tests import run_tests
 from main2main_flow.scripts.utils.update_commit_reference import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
@@ -118,6 +118,24 @@ def _resolve_test_cases() -> list[str] | None:
     return result or None
 
 
+def _has_source_changes(changed_files: list[str]) -> bool:
+    """True if any changed file is real adaptation code.
+
+    Steps that only bump .github/vllm-main-verified.commit (or touch
+    docs/configs) don't need an e2e run — previously they ran the full
+    suite (~40 min) for nothing.
+    """
+    for f in changed_files:
+        if not f:
+            continue
+        if f.startswith(".github/"):
+            continue
+        if f.endswith((".md", ".json", ".txt", ".yaml", ".yml", ".toml", ".cfg")):
+            continue
+        return True
+    return False
+
+
 class Main2MainState(BaseModel):
     vllm_path: str = ""
     vllm_ascend_path: str = ""
@@ -147,6 +165,13 @@ class Main2MainState(BaseModel):
     # Changed files from current adaptation step (for precise test selection)
     changed_files: list[str] = []
 
+    # Whether the LAST step's e2e ran and passed.  The last step's e2e runs
+    # on the cumulative state (all prior steps' commits + this step's patch),
+    # so it subsumes earlier steps.  When the last step skipped its e2e (or
+    # failed), the cumulative state is unvalidated and the final quality gate
+    # must run the regression e2e — the agent's no-op judgment can be wrong.
+    last_step_e2e_passed: bool = False
+
     # Persistent opencode session ID for full conversational context
     session_id: str = ""
 
@@ -160,6 +185,12 @@ class Main2MainState(BaseModel):
     # Local path to vllm-report checkout (cloned in initialize). Empty if
     # clone failed - adapter degrades to grep-based code exploration.
     vllm_report_path: str = ""
+
+    # Second vllm checkout at the pinned release tag (e.g. v0.26.0, read
+    # from vllm-ascend's .github/vllm-release-tag.commit).  Used by the UT
+    # gate to test the release branch alongside main.  Empty if worktree
+    # creation failed — UT gate tests main only.
+    vllm_release_path: str = ""
 
 
 class Main2MainFlow:
@@ -269,6 +300,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # before push — the clone is recreated every run, so unsaved
         # lessons would be lost.
         persist_lessons(self.state.vllm_report_path)
+        self._cleanup_release_worktree()
         self.push_to_github()
 
     def initialize(self):
@@ -292,13 +324,18 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         vllm_branch = run_git(self.state.vllm_path, "branch", "--show-current").strip()
         self.state.original_vllm_ref = vllm_branch or run_git(self.state.vllm_path, "rev-parse", "HEAD").strip()
-        # Use merge-base with upstream/main as the squash baseline, not the
-        # branch name.  git rev-list --count <branch>..HEAD is always 0
-        # because they point to the same ref.
-        # Save current HEAD as the branch baseline — no remote ref needed.
-        # Any subsequent step commits will be squashed relative to this ref.
+        # PR-level squash baseline.  schedule_main2main.yaml pins
+        # refs/remotes/upstream/main to the upstream SHA this run's branch was
+        # rebased onto — exactly the PR base.  Using the checkout HEAD instead
+        # leaves previous runs' sync commits (accumulated one per run on the
+        # reused main2main_baseline) BELOW the baseline, so the PR grows one
+        # commit per run (PR #13767 had 4).  Fall back to HEAD when
+        # upstream/main is unavailable (local runs) or not an ancestor.
         ascend_head = run_git(self.state.vllm_ascend_path, "rev-parse", "HEAD").strip()
-        self.state.original_ascend_ref = ascend_head
+        self.state.original_ascend_ref = resolve_squash_baseline(
+            self.state.vllm_ascend_path, ascend_head)
+        ts_print(f"[init] squash baseline: {self.state.original_ascend_ref[:12]} "
+                 f"(HEAD={ascend_head[:12]})")
 
         # Fix pre-commit hook permissions: git doesn't track +x, so gitleaks.sh
         # is not executable after checkout, causing spurious format.sh failures.
@@ -463,6 +500,60 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             self.state.vllm_report_path = ""
             ts_print(f"\n[init] vllm-report clone failed (adapter will use grep): {e}")
 
+        # Prepare a second vllm checkout at the PINNED RELEASE tag (read from
+        # vllm-ascend's .github/vllm-release-tag.commit, e.g. "v0.26.0"),
+        # so the UT gate can test BOTH the target main and the release
+        # branch.  vllm-ascend carries vllm_version_is("<release_tag>")
+        # guards — a fix that passes on main can break the release branch.
+        # Uses a git worktree (shares objects with the main clone, only
+        # fetches the tag once).  Non-fatal: failure degrades to main-only.
+        self.state.vllm_release_path = ""
+        try:
+            ascend_repo = Path(self.state.vllm_ascend_path)
+            tag_file = ascend_repo / ".github" / "vllm-release-tag.commit"
+            if tag_file.exists():
+                release_tag = tag_file.read_text(encoding="utf-8").strip()
+                vllm_repo = Path(self.state.vllm_path)
+                release_worktree = WORKSPACE_DIR / "repos" / "vllm-release"
+                if release_worktree.exists():
+                    shutil.rmtree(release_worktree)
+                # Fetch the tag if not present (depth 1 keeps it fast).
+                subprocess.run(
+                    ["git", "fetch", "--depth", "1", "origin",
+                     f"refs/tags/{release_tag}:refs/tags/{release_tag}"],
+                    cwd=str(vllm_repo), capture_output=True, text=True,
+                    timeout=300,
+                )
+                subprocess.run(
+                    ["git", "worktree", "add", "-f", "--detach",
+                     str(release_worktree), release_tag],
+                    cwd=str(vllm_repo), capture_output=True, text=True,
+                    timeout=120, check=True,
+                )
+                self.state.vllm_release_path = str(release_worktree)
+                ts_print(f"\n[init] vllm release worktree at {release_worktree} "
+                         f"({release_tag}) for dual-version UT")
+        except (subprocess.CalledProcessError, OSError) as e:
+            self.state.vllm_release_path = ""
+            ts_print(f"[init] WARNING vllm release worktree failed ({e}) — "
+                     "UT gate will test main only")
+
+    def _cleanup_release_worktree(self) -> None:
+        """Remove the vllm release worktree created in initialize."""
+        if not self.state.vllm_release_path:
+            return
+        try:
+            subprocess.run(
+                ["git", "worktree", "remove", "-f",
+                 self.state.vllm_release_path],
+                cwd=self.state.vllm_path, capture_output=True, text=True,
+                timeout=60,
+            )
+            ts_print("[init] removed vllm release worktree")
+        except (subprocess.CalledProcessError, OSError) as e:
+            ts_print(f"[init] WARNING failed to remove release worktree: {e}")
+        self.state.vllm_release_path = ""
+
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
         vllm_path = Path(self.state.vllm_path)
         vllm_ascend_path = Path(self.state.vllm_ascend_path)
@@ -624,23 +715,29 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             passed, new_error_logs = run_final_quality_gate(
                 ascend_path=ascend_path,
                 vllm_path=vllm_path,
+                vllm_release_path=self.state.vllm_release_path,
                 release_tag=self.state.release_tag,
                 log_dir=gate_dir,
             )
             if passed:
-                if attempt > 1:
-                    # We fixed something - re-run e2e to confirm functional
-                    # correctness wasn't broken by format/mypy edits.
-                    ts_print(f"[final_quality_gate] fix attempt {attempt}: passed, "
-                             f"re-running e2e to confirm functionality")
+                if attempt > 1 or not self.state.last_step_e2e_passed:
+                    # attempt > 1: we fixed something — confirm format/mypy
+                    # edits didn't break functionality.  last_step_e2e_passed
+                    # False: the LAST step skipped its per-step e2e (no-op
+                    # judgment may be wrong) or failed — the cumulative state
+                    # is unvalidated, so the regression e2e is the last
+                    # guarantee before push.
+                    ts_print(f"[final_quality_gate] fix attempt {attempt}: passed "
+                             f"(last step e2e={'passed' if self.state.last_step_e2e_passed else 'skipped/failed'}), "
+                             f"running regression e2e")
                     if not self._run_e2e_test_for_final_gate():
                         # Revert the regression-inducing fix so it doesn't get
                         # pushed (KEEP_BRANCH mode does `git add -A` + amend),
                         # then continue the fix loop with remaining rounds.
                         # The gate will re-run format+mypy on the reverted tree.
-                        ts_print(f"[final_quality_gate] e2e regression after fix - "
-                                 f"reverting fix, continuing to next round")
-                        self._revert_working_tree("gate fix caused e2e regression")
+                        ts_print(f"[final_quality_gate] e2e regression - "
+                                 f"reverting, continuing to next round")
+                        self._revert_working_tree("gate e2e regression")
                         error_logs = [str(Path(gate_dir) / "quality_gate.json")]
                         continue
                 ts_print(f"\n[final_quality_gate] PASSED (attempt {attempt})")
@@ -1032,6 +1129,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             return True
 
+        changed = [f for f in (self.state.changed_files or []) if f]
+        if not _has_source_changes(changed):
+            self.state.last_step_e2e_passed = False
+            ts_print(f"[run_e2e_test] {step_id}: only non-source changes "
+                     f"({changed or '(none)'}), skipping e2e")
+            return True
+
         ts_print(f"The adaptation patch is at: {self.state.cur_patch_path}")
         result = run_tests(
             vllm_path=self.state.vllm_path,
@@ -1040,7 +1144,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ascend_commit=self.state.cur_ascend_commit,
             patch_path=self.state.cur_patch_path or None,
             step_id=step_id,
-            select_by_files=self.state.changed_files or None,
+            select_by_files=changed,
             test_cases=_resolve_test_cases(),
             remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
             round_number=self.state.retry_count,
@@ -1061,6 +1165,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 encoding="utf-8",
             )
         ts_print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
+        self.state.last_step_e2e_passed = test_passed
 
         if not test_passed:
             # Collect per-test error details for fix mode: for each failed
@@ -1399,10 +1504,17 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             cause = ""
             change = ""
             upstream_links: list[str] = []
+            is_noop = False
             ssp = WORKSPACE_DIR / STEPS_DIR / s["id"] / EACH_STEP_SUMMARY_FILE
             ssp_text = ""
             if ssp.exists():
                 ssp_text = ssp.read_text(encoding="utf-8")
+                # No-op step: "- step-N: No-op — <reason>" (no adaptation).
+                # Such steps only confirm the upstream range has no
+                # vllm-ascend impact — collapse them into one summary row
+                # instead of an empty table line.
+                if re.search(rf"^- {re.escape(s['id'])}:\s*No-op", ssp_text, re.M):
+                    is_noop = True
                 in_our_step = False
                 parts: list[str] = []
                 collecting: str = ""  # "cause" or "change"
@@ -1463,6 +1575,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 # files will surface in the Unattributed row below.
                 step_files = []
             seen_files.update(step_files)
+            if is_noop and not step_files and not cause and not change:
+                # No-op step: no vllm-ascend impact — exclude from the PR
+                # description entirely (only real adaptations appear).
+                continue
             step_items.append({
                 "files": step_files,
                 "commit": s["end_commit"][:8],
@@ -1509,8 +1625,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             "| Files | Upstream vLLM change | vllm-ascend adaptation |",
             "|-------|---------------------|------------------------|",
         ]
+        # Table rows must never contain empty cells — every row carries
+        # all three columns (Files / Upstream vLLM change / vllm-ascend
+        # adaptation).  Missing values get a "—" placeholder.
         for item in step_items:
-            files_str = "<br>".join(f"`{f}`" for f in item["files"])
+            files_str = "<br>".join(f"`{f}`" for f in item["files"]) or "—"
             # Upstream column: PR/commit links + cause
             links = item.get("upstream_links") or []
             if not links:
@@ -1518,16 +1637,18 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             upstream = " · ".join(links)
             if item.get("cause"):
                 upstream = f"{upstream} — {item['cause']}"
+            if not item.get("cause"):
+                upstream = upstream or "—"
             # Adaptation column: never fall back to cause text — the two
             # columns serve different purposes.  If the adapter didn't write a
             # Change, show the files touched instead.
-            adapt = item.get("change") or ""
+            adapt = item.get("change") or "—"
             parts.append(f"| {files_str} | {upstream} | {adapt} |")
         # Unattributed rows: each has full Cause/Change from the
         # description-fill agent.  Falls back to a catch-all row only if the
         # agent failed to produce analysis (e.g., opencode unavailable).
         for item in unattributed_items:
-            files_str = "<br>".join(f"`{f}`" for f in item["files"])
+            files_str = "<br>".join(f"`{f}`" for f in item["files"]) or "—"
             links = item.get("upstream_links") or []
             if links:
                 upstream = " · ".join(links)
@@ -1535,16 +1656,30 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     upstream = f"{upstream} — {item['cause']}"
             else:
                 upstream = item.get("cause") or "(unattributed)"
-            adapt = item.get("change") or ""
+            adapt = item.get("change") or "—"
             parts.append(f"| {files_str} | {upstream} | {adapt} |")
-        if unattributed and not unattributed_items:
-            # Agent produced no analysis — surface files in a catch-all row
-            # so reviewers still see the full scope.
-            files_str = "<br>".join(f"`{f}`" for f in unattributed)
+        # Completeness guard: EVERY file in the cumulative patch must appear
+        # in the description.  Files covered by neither step attribution nor
+        # the description-fill agent (e.g. agent partially failed) would
+        # otherwise vanish silently — surface them in a catch-all row so
+        # reviewers still see the full scope.
+        covered: set[str] = set()
+        for item in step_items:
+            covered.update(item["files"])
+        for item in unattributed_items:
+            covered.update(item["files"])
+        missing = [f for f in cumulative_files if f not in covered]
+        if missing:
+            files_str = "<br>".join(f"`{f}`" for f in missing) or "—"
             parts.append(
                 f"| {files_str} | (unattributed) "
                 f"| see cumulative patch — description-fill agent produced no analysis |"
             )
+        if not step_items and not cumulative_files:
+            # All steps were no-op (upstream range had no vllm-ascend impact)
+            # and the cumulative patch has no real files — the table would be
+            # header-only, which renders as a broken empty PR description.
+            parts.append("| (no vllm-ascend adaptation in this range) | — | — |")
         parts.append("")
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")

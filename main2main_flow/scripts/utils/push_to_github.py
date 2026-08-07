@@ -137,6 +137,36 @@ def _resolve_upstream_base(ascend_path: Path, base_branch: str) -> str:
     return ""
 
 
+def resolve_squash_baseline(ascend_path: Path | str, fallback: str = "") -> str:
+    """Return the PR-level squash baseline: pinned upstream/main, else fallback.
+
+    schedule_main2main.yaml pins ``refs/remotes/upstream/main`` to the upstream
+    SHA this run's branch was rebased onto — exactly the PR base.  Squashing
+    against the checkout HEAD instead would leave previous runs' sync commits
+    (accumulated one per run on the reused main2main_baseline) BELOW the
+    baseline, so the PR grows one commit every run (PR #13767 had 4).
+    Returns *fallback* when upstream/main is unavailable or not an ancestor of
+    HEAD (the branch is always rebased onto it, so this only happens in
+    degraded/local runs).
+    """
+    if not ascend_path:
+        return fallback
+    r = subprocess.run(
+        ["git", "rev-parse", "--verify", "refs/remotes/upstream/main"],
+        cwd=str(ascend_path), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return fallback
+    base = r.stdout.strip()
+    r = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base, "HEAD"],
+        cwd=str(ascend_path), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return fallback
+    return base
+
+
 def _has_divergent_commits(ascend_path: Path, branch: str, base_sha: str) -> bool:
     """Check whether *branch* has commits that are not in *base_sha*."""
     r = subprocess.run(
@@ -226,35 +256,51 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
                                         output="", stderr=last_error)
 
 
-def _git_push(ascend_path: Path, branch: str, base_ref: str = "") -> None:
-    # Final safety net: guarantee exactly 1 commit before push.
-    # If generate_final_post squash failed for any reason, force-squash here.
-    # Use base_ref (original_ascend_ref from flow init) as the squash baseline -
-    # same as generate_final_post.  DO NOT use origin/main: when
-    # MAIN2MAIN_KEEP_BRANCH=true reuses a branch, origin/main (the fork's main)
-    # lags behind upstream main, so origin/main..HEAD includes thousands of
-    # upstream commits, and squashing them all produces a multi-GB commit that
-    # git push rejects with HTTP 413.
+def _force_squash(ascend_path: Path, base_ref: str, branch: str) -> None:
+    """Force-squash all commits above *base_ref* into one (no-op if <= 1).
+
+    Safety net for the "exactly 1 commit per PR" invariant: if
+    generate_final_post's squash was skipped or failed, this guarantees the
+    pushed branch has a single commit above the PR base.
+    """
     if not base_ref:
-        ts_print("[push] No base_ref provided, skipping force-squash safety net")
-        _push_with_lease(ascend_path, branch)
         return
     try:
         count = subprocess.run(
             ["git", "rev-list", "--count", f"{base_ref}..HEAD"],
             cwd=str(ascend_path), capture_output=True, text=True,
         )
-        if count.returncode == 0 and int(count.stdout.strip() or "0") > 1:
-            subprocess.run(["git", "reset", "--soft", base_ref],
-                           cwd=str(ascend_path), capture_output=True)
-            subprocess.run(["git", "add", "-A"], cwd=str(ascend_path), capture_output=True)
-            subprocess.run(
-                ["git", "commit", "-m", f"main2main: sync vllm upstream [{branch}]"],
-                cwd=str(ascend_path), capture_output=True)
-            ts_print(f"[push] Force-squashed {count.stdout.strip()} commits into 1 (base={base_ref[:8]})")
+        if count.returncode != 0 or int(count.stdout.strip() or "0") <= 1:
+            return
+        subprocess.run(["git", "reset", "--soft", base_ref],
+                       cwd=str(ascend_path), capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=str(ascend_path), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"main2main: sync vllm upstream [{branch}]"],
+            cwd=str(ascend_path), capture_output=True)
+        ts_print(f"[push] Force-squashed {count.stdout.strip()} commits into 1 (base={base_ref[:8]})")
     except (ValueError, subprocess.CalledProcessError):
         pass
 
+
+def _git_push(ascend_path: Path, branch: str, base_ref: str = "") -> None:
+    # Final safety net: guarantee exactly 1 commit before push.
+    # If generate_final_post squash failed for any reason, force-squash here.
+    # Squash baseline: the pinned upstream/main (the PR base) — same as
+    # generate_final_post.  DO NOT use origin/main: when
+    # MAIN2MAIN_KEEP_BRANCH=true reuses a branch, origin/main (the fork's main)
+    # lags behind upstream main, so origin/main..HEAD includes thousands of
+    # upstream commits, and squashing them all produces a multi-GB commit that
+    # git push rejects with HTTP 413.
+    if not base_ref:
+        # Self-heal when the caller didn't pass a base (e.g. CLI usage).
+        base_ref = resolve_squash_baseline(ascend_path)
+    if not base_ref:
+        ts_print("[push] No squash baseline available, skipping force-squash safety net")
+        _push_with_lease(ascend_path, branch)
+        return
+
+    _force_squash(ascend_path, base_ref, branch)
     _push_with_lease(ascend_path, branch)
 
 
@@ -507,6 +553,7 @@ def push_and_create_pr(
             ts_print(f"[push] Pushed to {fork_url}")
             run_git(ascend_path, "remote", "set-url", "origin", _saved_origin_url)
         else:
+            _force_squash(ascend_path, base_ref, branch)
             run_git(ascend_path, "push", "origin", branch)
             head_ref = branch
             ts_print(f"[push] Pushed branch '{branch}'.")

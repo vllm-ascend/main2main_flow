@@ -35,7 +35,7 @@ run ends — otherwise the lessons are lost.
 from __future__ import annotations
 
 import json
-import re
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -43,8 +43,6 @@ from pathlib import Path
 from main2main_flow.scripts.utils.utils import (
     WORKSPACE_DIR,
     STEPS_DIR,
-    EACH_STEP_SUMMARY_FILE,
-    run_git,
     ts_print,
 )
 
@@ -103,26 +101,16 @@ def _extract_keywords(error_text: str, fallback: str) -> list[str]:
     return keywords
 
 
-def _extract_fix_files(report_root: Path, step_id: str) -> list[str]:
-    """Files this step's fix touched (from step_summary.md's adapted line)."""
-    ssp = report_root / STEPS_DIR / step_id / EACH_STEP_SUMMARY_FILE
-    if not ssp.exists():
-        return []
-    ssp_text = ssp.read_text(encoding="utf-8")
-    pattern = rf"^- {re.escape(step_id)}: Adapted — (.+)$"
-    m = re.search(pattern, ssp_text, re.M)
-    if not m:
-        return []
-    return sorted(set(f.strip() for f in m.group(1).split(",") if f.strip()))[:5]
-
-
 def submit_step_lesson(vllm_report_path: str, step_id: str) -> None:
     """Record a lesson when the step needed >=1 E2E fix round.
 
     Called by flow.process_steps when the step passes E2E after
     retry_count >= 1.  Reads the failed test details from the step's
-    tests/ dir, extracts keywords + fixed files, and appends a lesson to
-    vllm-report's lessons/<date>.json.
+    tests/ dir, extracts keywords + fixed files, then submits the lesson
+    through vllm-report's OWN MCP ``submit_lesson`` implementation (the
+    same function the adapter's MCP call dispatches to).  Since
+    ``submit_lesson`` now commits + pushes to the remote, the lesson is
+    persisted immediately — the clone is re-created every run.
     """
     if not vllm_report_path:
         return
@@ -137,58 +125,58 @@ def submit_step_lesson(vllm_report_path: str, step_id: str) -> None:
 
     error_text = failures[0][1]
     keywords = _extract_keywords(error_text, failures[0][0].split("::")[-1])
-    fix_files = _extract_fix_files(WORKSPACE_DIR, step_id)
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    lessons_dir = report_dir / "data" / "vllm-ascend" / "lessons"
-    lessons_dir.mkdir(parents=True, exist_ok=True)
-    fpath = lessons_dir / f"{today}.json"
+    # Import vllm-report's MCP module from the cloned repo (same code path
+    # the adapter uses via MCP) so id assignment / file format / persistence
+    # live in one place.  data_dir is normally set by its main(); set it
+    # here since we call the tool function directly.
+    import sys as _sys
+    import asyncio
+    _sys.path.insert(0, str(report_dir))
+    try:
+        import src.mcp_server_app as mcp_app
+        mcp_app.data_dir = str(report_dir / "data")
+    except Exception as e:
+        ts_print(f"[lesson] {step_id}: cannot import vllm-report MCP module "
+                 f"({e}), skipping lesson")
+        return
 
-    data = {}
-    if fpath.exists():
-        try:
-            data = json.loads(fpath.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            data = {}
-    lessons = data.setdefault("lessons", [])
-    seq = len(lessons) + 1
-    lesson = {
-        "id": f"L{today.replace('-', '')}-{seq:03d}",
-        "title": (f"{step_id}: E2E fix needed "
-                  f"{failures[0][0].split('::')[-1][:60]}"),
-        "keywords": keywords,
-        "symptom": (f"E2E failed on {len(failures)} test(s) in {step_id}: "
-                    f"{', '.join(t.split('::')[-1] for t, _ in failures[:3])}"),
-        "root_cause": "E2E failure required adapter-fix round(s) — the "
-                      "initial adaptation missed a case the E2E test covers. "
-                      "See the failed test log for the exact path.",
-        "fix_guidance": [
-            "Read the E2E traceback to identify the exact failing path",
-            "Check all code paths reaching the asserted invariant (normal "
-            "vs cache, with-data vs no-data) — a fix covering only one "
-            "path leaves E2E failing",
-            "Verify the fix against the failing test specifically",
-        ],
-        "tags": ["e2e-fix", "auto-submitted"],
-        "example": f"Failed tests: {failures[0][0]} — {error_text[:200]}",
-        "created_at": datetime.now().isoformat(),
-        "hits": 0,
-    }
-    if fix_files:
-        lesson["fix_files"] = fix_files
-    lessons.append(lesson)
-    fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                     encoding="utf-8")
-    ts_print(f"[lesson] {step_id}: recorded lesson {lesson['id']} "
-             f"({len(failures)} E2E failure(s)) → "
-             f"{fpath.relative_to(report_dir)}")
+    title = f"{step_id}: E2E fix needed {failures[0][0].split('::')[-1][:60]}"
+    symptom = (f"E2E failed on {len(failures)} test(s) in {step_id}: "
+               f"{', '.join(t.split('::')[-1] for t, _ in failures[:3])}")
+    root_cause = ("E2E failure required adapter-fix round(s) — the "
+                  "initial adaptation missed a case the E2E test covers. "
+                  "See the failed test log for the exact path.")
+    fix_guidance = [
+        "Read the E2E traceback to identify the exact failing path",
+        "Check all code paths reaching the asserted invariant (normal "
+        "vs cache, with-data vs no-data) — a fix covering only one "
+        "path leaves E2E failing",
+        "Verify the fix against the failing test specifically",
+    ]
+    example = f"Failed tests: {failures[0][0]} — {error_text[:200]}"
+    try:
+        result = asyncio.run(mcp_app.tool_submit_lesson(
+            title=title,
+            symptom=symptom,
+            root_cause=root_cause,
+            fix_guidance=fix_guidance,
+            tags=["e2e-fix", "auto-submitted"],
+            keywords=keywords,
+            example=example,
+        ))
+        ts_print(f"[lesson] {step_id}: submit_lesson → {result}")
+    except Exception as e:
+        ts_print(f"[lesson] {step_id}: failed to submit lesson: {e}")
 
 
 def persist_lessons(vllm_report_path: str) -> None:
     """Commit + push vllm-report lessons back to the remote (best-effort).
 
-    The vllm-report clone is re-created every run, so lessons recorded
-    this run are lost unless pushed.  Failures only log a warning.
+    Safety net for any data written to the clone this run (lessons already
+    push via submit_lesson; this also covers e.g. adaptation-status writes
+    and anything that failed to push at submit time).  The clone is
+    re-created every run, so un-pushed changes are lost.
     """
     if not vllm_report_path:
         return
@@ -203,13 +191,43 @@ def persist_lessons(vllm_report_path: str) -> None:
     if r.returncode != 0 or not r.stdout.strip():
         ts_print("[lesson] no vllm-report changes to persist")
         return
+    # The fresh clone has no git identity — a bare `git commit` fails with
+    # "Author identity unknown" (exit 128).  Set it per-command.
+    identity = ["-c", "user.name=main2main-bot",
+                "-c", "user.email=main2main-bot@users.noreply.github.com"]
     try:
-        run_git(report_dir, "add", "-A")
+        subprocess.run(["git", *identity, "add", "-A"],
+                       cwd=str(report_dir), check=True, capture_output=True,
+                       text=True)
         commit_msg = (f"lessons: {datetime.now().strftime('%Y-%m-%d %H:%M')} "
                       "auto-recorded from main2main E2E fixes")
-        run_git(report_dir, "commit", "-m", commit_msg)
-        subprocess.run(["git", "push", "origin", "main"],
-                       cwd=str(report_dir), capture_output=True, text=True)
-        ts_print("[lesson] pushed vllm-report lessons to remote")
+        subprocess.run(["git", *identity, "commit", "-m", commit_msg],
+                       cwd=str(report_dir), check=True, capture_output=True,
+                       text=True)
+        # Push with a token-embedded URL when a token is available: the CI
+        # runner routes github.com through an anonymous-fetch proxy that
+        # needs the token in the URL for push.  Fall back to the plain
+        # origin push locally (credential helper).
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+        targets: list[str] = []
+        if token:
+            targets.append(
+                f"https://x-access-token:{token}@gh-proxy.test.osinfra.cn/"
+                f"https://github.com/vllm-ascend/vllm-report.git")
+            targets.append(
+                f"https://x-access-token:{token}@github.com/"
+                f"vllm-ascend/vllm-report.git")
+        targets.append("origin")
+        last_err = ""
+        for target in targets:
+            pr = subprocess.run(["git", "push", target, "main"],
+                                cwd=str(report_dir), capture_output=True,
+                                text=True)
+            if pr.returncode == 0:
+                ts_print("[lesson] pushed vllm-report lessons to remote")
+                return
+            last_err = pr.stderr.strip()[:300]
+        ts_print(f"[lesson] WARNING failed to push vllm-report lessons: "
+                 f"{last_err}")
     except subprocess.CalledProcessError as e:
         ts_print(f"[lesson] WARNING failed to persist lessons: {e}")
