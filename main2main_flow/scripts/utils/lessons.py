@@ -101,6 +101,39 @@ def _extract_keywords(error_text: str, fallback: str) -> list[str]:
     return keywords
 
 
+def _submit_via_mcp(report_dir: Path, *, title: str, symptom: str,
+                    root_cause: str, fix_guidance: list[str], tags: list[str],
+                    keywords: list[str] | None = None,
+                    example: str | None = None) -> None:
+    """Submit a lesson through vllm-report's OWN MCP ``submit_lesson``
+    implementation (same function the adapter's MCP call dispatches to).
+    ``submit_lesson`` commits + pushes, so the lesson is persisted
+    immediately — the clone is re-created every run."""
+    import sys as _sys
+    import asyncio
+    _sys.path.insert(0, str(report_dir))
+    try:
+        import src.mcp_server_app as mcp_app
+        mcp_app.data_dir = str(report_dir / "data")
+    except Exception as e:
+        ts_print(f"[lesson] cannot import vllm-report MCP module "
+                 f"({e}), skipping lesson")
+        return
+    try:
+        result = asyncio.run(mcp_app.tool_submit_lesson(
+            title=title,
+            symptom=symptom,
+            root_cause=root_cause,
+            fix_guidance=fix_guidance,
+            tags=tags,
+            keywords=keywords,
+            example=example,
+        ))
+        ts_print(f"[lesson] submit_lesson → {result}")
+    except Exception as e:
+        ts_print(f"[lesson] failed to submit lesson: {e}")
+
+
 def submit_step_lesson(vllm_report_path: str, step_id: str) -> None:
     """Record a lesson when the step needed >=1 E2E fix round.
 
@@ -126,21 +159,6 @@ def submit_step_lesson(vllm_report_path: str, step_id: str) -> None:
     error_text = failures[0][1]
     keywords = _extract_keywords(error_text, failures[0][0].split("::")[-1])
 
-    # Import vllm-report's MCP module from the cloned repo (same code path
-    # the adapter uses via MCP) so id assignment / file format / persistence
-    # live in one place.  data_dir is normally set by its main(); set it
-    # here since we call the tool function directly.
-    import sys as _sys
-    import asyncio
-    _sys.path.insert(0, str(report_dir))
-    try:
-        import src.mcp_server_app as mcp_app
-        mcp_app.data_dir = str(report_dir / "data")
-    except Exception as e:
-        ts_print(f"[lesson] {step_id}: cannot import vllm-report MCP module "
-                 f"({e}), skipping lesson")
-        return
-
     title = f"{step_id}: E2E fix needed {failures[0][0].split('::')[-1][:60]}"
     symptom = (f"E2E failed on {len(failures)} test(s) in {step_id}: "
                f"{', '.join(t.split('::')[-1] for t, _ in failures[:3])}")
@@ -155,19 +173,47 @@ def submit_step_lesson(vllm_report_path: str, step_id: str) -> None:
         "Verify the fix against the failing test specifically",
     ]
     example = f"Failed tests: {failures[0][0]} — {error_text[:200]}"
-    try:
-        result = asyncio.run(mcp_app.tool_submit_lesson(
-            title=title,
-            symptom=symptom,
-            root_cause=root_cause,
-            fix_guidance=fix_guidance,
-            tags=["e2e-fix", "auto-submitted"],
-            keywords=keywords,
-            example=example,
-        ))
-        ts_print(f"[lesson] {step_id}: submit_lesson → {result}")
-    except Exception as e:
-        ts_print(f"[lesson] {step_id}: failed to submit lesson: {e}")
+    _submit_via_mcp(report_dir, title=title, symptom=symptom,
+                    root_cause=root_cause, fix_guidance=fix_guidance,
+                    tags=["e2e-fix", "auto-submitted"],
+                    keywords=keywords, example=example)
+
+
+def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
+    """Record a lesson when the final quality gate needed a fix round.
+
+    The gate's adapter-fix loop resolves UT/format/mypy failures found only
+    at the end of the run (e.g. version-dependent UT failures, test
+    isolation issues) — knowledge as valuable as per-step E2E lessons, and
+    previously lost.  Called by flow._final_quality_gate when a fix round
+    succeeded.
+    """
+    if not vllm_report_path or not error_logs:
+        return
+    report_dir = Path(vllm_report_path)
+    failed = [l for l in error_logs if "FAILED" in l or "ERROR" in l]
+    error_text = "\n".join(error_logs)
+    keywords = _extract_keywords(error_text, "final quality gate failure")
+    title = (f"final-gate: fix needed "
+             f"({len(failed) or len(error_logs)} failure(s))")
+    symptom = ("Final quality gate (format+mypy+UT) failed: "
+               + "; ".join((failed or error_logs)[:3]))
+    root_cause = ("The gate found failures that per-step e2e did not — "
+                  "version-dependent UT expectations (vllm_version_is), "
+                  "test isolation/mock requirements, or format/mypy issues "
+                  "surfacing only on the cumulative state.")
+    fix_guidance = [
+        "Check if the failing UT needs a vllm_version_is('0.26.0') branch "
+        "or a version guard",
+        "Check if the failing UT constructs objects requiring ascend config "
+        "or NPU env — add a mock/fixture instead of relying on isolation",
+        "Verify the fix against the failing test specifically",
+    ]
+    example = error_text[:200]
+    _submit_via_mcp(report_dir, title=title, symptom=symptom,
+                    root_cause=root_cause, fix_guidance=fix_guidance,
+                    tags=["final-gate", "auto-submitted"],
+                    keywords=keywords, example=example)
 
 
 def persist_lessons(vllm_report_path: str) -> None:

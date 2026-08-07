@@ -15,7 +15,8 @@ from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_openc
 from main2main_flow.scripts.utils.detect_commits import detect
 from main2main_flow.scripts.utils.plan_steps import run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
-from main2main_flow.scripts.utils.lessons import persist_lessons, submit_step_lesson
+from main2main_flow.scripts.utils.lessons import (
+    persist_lessons, submit_step_lesson, submit_gate_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
 from main2main_flow.scripts.utils.run_tests import run_tests
 from main2main_flow.scripts.utils.update_commit_reference import run_update
@@ -740,6 +741,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         self._revert_working_tree("gate e2e regression")
                         error_logs = [str(Path(gate_dir) / "quality_gate.json")]
                         continue
+                if attempt > 1:
+                    # A fix round succeeded — record the failure knowledge
+                    # (version guards, test isolation, etc.) so future runs
+                    # fix the same gate failure in one pass.
+                    submit_gate_lesson(self.state.vllm_report_path, error_logs)
                 ts_print(f"\n[final_quality_gate] PASSED (attempt {attempt})")
                 # Regenerate the cumulative patch from the CURRENT working
                 # tree so it includes format/mypy fixes made by the gate.
