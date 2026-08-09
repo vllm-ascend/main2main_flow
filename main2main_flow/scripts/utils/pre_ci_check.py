@@ -476,6 +476,64 @@ def _is_npu_convention_ut_path(rel_path: str) -> bool:
     return bool(_CPU_UT_A2_RE.search(p) or _CPU_UT_A3_2_RE.search(p))
 
 
+# a2-routed UTs that are too heavy for the batch (verified on CI:
+# test_attention_v1_precision 500s, test_mla_precision 125s, and
+# test_sfa_v1_precision hangs).  They get their own partition time on CI;
+# the flow excludes them.
+_A2_UT_EXCLUDE = ("test_attention_v1_precision.py", "test_mla_precision.py",
+                  "test_sfa_v1_precision.py")
+
+# a2-routed UTs that break at COLLECTION when imported after other files in
+# the shared pytest process (verified: test_find_loaded_library.py errors at
+# collection in the batch but passes standalone).  Run in their own process.
+_A2_UT_ISOLATED = ("test_find_loaded_library.py",)
+
+
+def _collect_a2_ut_files(repo: Path) -> list[str]:
+    """Return a2-routed tests/ut paths (rel to repo), for the E2E batch.
+
+    a2-routed UTs (tests/ut/**/a2/) test REAL NPU kernels — the CPU-UT gate
+    can't cover them (it mocks torch_npu), so they ride along with the E2E
+    runs on the real NPU.  Routing mirrors CI's runner_mapping
+    (tests/ut/.+/a2), excluding the heavy precision files (see
+    _A2_UT_EXCLUDE).  Reads test_config.yaml like _collect_cpu_ut_files.
+    """
+    a2_patterns: list[re.Pattern] = []
+    config_path = repo / ".github/workflows/scripts/test_config.yaml"
+    if config_path.exists():
+        try:
+            import yaml
+            docs = list(yaml.safe_load_all(
+                config_path.read_text(encoding="utf-8")))
+            meta = docs[1] if len(docs) >= 2 and docs[1] else {}
+            for pattern_str in ((meta or {}).get("runner_mapping", {}) or {}):
+                if re.fullmatch(r"tests/ut/.+/a2", pattern_str):
+                    a2_patterns.append(re.compile(pattern_str))
+        except Exception as e:
+            ts_print(f"[pre_ci] ut: failed to parse test_config.yaml ({e}), "
+                     "using convention regex for a2 UTs")
+            a2_patterns = []
+    if not a2_patterns:
+        a2_patterns = [re.compile(r"tests/ut/.+/a2(/|$)")]
+
+    ut_dir = repo / "tests" / "ut"
+    if not ut_dir.exists():
+        return []
+    files: list[str] = []
+    for root, dirs, fnames in os.walk(ut_dir):
+        if "__pycache__" in dirs:
+            dirs.remove("__pycache__")
+        for f in sorted(fnames):
+            if f.startswith("test_") and f.endswith(".py"):
+                rel = os.path.relpath(os.path.join(root, f), str(repo))
+                if not any(p.search(rel) for p in a2_patterns):
+                    continue
+                if f in _A2_UT_EXCLUDE:
+                    continue
+                files.append(rel)
+    return files
+
+
 def _collect_cpu_ut_files(repo: Path) -> list[str]:
     """Return CPU-routed tests/ut paths (rel to repo).
 
@@ -776,6 +834,87 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
                            else f"exit={rr.returncode}")
                 details.append(f"{label}/{name}: {summary}")
                 ts_print(f"[pre_ci] ut: [{label}/{name}] {summary}")
+
+            # a2-routed UTs (real NPU kernels, tests/ut/**/a2/): the CPU batch
+            # above mocks torch_npu via the fake npu-smi, so these run
+            # separately on the REAL device — the main2main runner has NPU and
+            # CI routes them to a2 runners too.  One pytest process per
+            # version (per-file startup dominates; the batch itself is
+            # ~1-2 min).  Heavy precision files are excluded — CI gives them
+            # their own partition budget (test_attention_v1_precision ~500s).
+            a2_files = _collect_a2_ut_files(repo)
+            if a2_files:
+                a2_env = env.copy()
+                a2_env["PATH"] = a2_env["PATH"].replace(f"{fake_bin_dir}:", "")
+                # Match vllm-ascend CI's "with device" jobs exactly:
+                #  - NO TORCH_DEVICE_BACKEND_AUTOLOAD=0 (that is only set on
+                #    CI's CPU/without-device step).  torch_npu must load via
+                #    autoload — that path registers the inductor npu backend;
+                #    with AUTOLOAD=0 the compile path fails with
+                #    "Device npu not supported".
+                #  - CI container env vars (container-level in
+                #    _selected_tests.yaml).
+                a2_env.pop("TORCH_DEVICE_BACKEND_AUTOLOAD", None)
+                a2_env.setdefault("VLLM_LOGGING_LEVEL", "ERROR")
+                a2_env.setdefault("VLLM_USE_MODELSCOPE", "True")
+                a2_env.setdefault("HF_HUB_OFFLINE", "1")
+                a2_env.setdefault("MAX_JOBS", "4")
+                isolated_a2 = [f for f in a2_files
+                               if f.rsplit("/", 1)[-1] in _A2_UT_ISOLATED]
+                batch_a2 = [f for f in a2_files if f not in isolated_a2]
+                ts_print(f"\n[pre_ci] ut: === a2 batch [{label}] "
+                         f"({len(batch_a2)} files + "
+                         f"{len(isolated_a2)} isolated, real NPU) ===")
+
+                a2_runs: list[tuple[str, subprocess.CompletedProcess]] = []
+                # Use the SYSTEM python (like the e2e runs), not the numpy
+                # venv: the a2 UTs run on the real NPU and need the CANN
+                # bindings (acl etc.) that the venv python can't see.
+                a2_pytest = [sys.executable, "-m", "pytest"]
+                try:
+                    rr = subprocess.run(
+                        [*a2_pytest, "-q", "--tb=short", "--no-header",
+                         "--continue-on-collection-errors", *batch_a2],
+                        cwd=str(repo), capture_output=True, text=True,
+                        env=a2_env, timeout=1200,
+                    )
+                    a2_runs.append(("a2", rr))
+                except subprocess.TimeoutExpired:
+                    ts_print(f"[pre_ci] ut: [{label}/a2] TIMEOUT(1200s)")
+                    all_files_clean = False
+                    details.append(f"{label}/a2: TIMEOUT(1200s)")
+                for f in isolated_a2:
+                    try:
+                        rr = subprocess.run(
+                            [*a2_pytest, "-q", "--tb=short", "--no-header", f],
+                            cwd=str(repo), capture_output=True, text=True,
+                            env=a2_env, timeout=300,
+                        )
+                        a2_runs.append((f, rr))
+                    except subprocess.TimeoutExpired:
+                        ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
+                        all_files_clean = False
+
+                for name, rr in a2_runs:
+                    clean = ansi_re.sub("", rr.stdout + rr.stderr)
+                    a2_seen: set[str] = set()
+                    for line in clean.splitlines():
+                        m = failed_re.search(line.strip())
+                        if m and m.group(2) not in a2_seen:
+                            a2_seen.add(m.group(2))
+                            all_violations.append(f"[{label}/a2] {line.strip()}")
+                    if rr.returncode != 0:
+                        all_files_clean = False
+                        if not a2_seen:
+                            all_violations.append(
+                                f"[{label}/a2] {name}: exit={rr.returncode} — "
+                                f"{clean[-500:]}")
+                    summary_m = re.search(
+                        r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
+                    summary = (summary_m.group(1) if summary_m
+                               else f"exit={rr.returncode}")
+                    details.append(f"{label}/a2/{name}: {summary}")
+                    ts_print(f"[pre_ci] ut: [{label}/a2/{name}] {summary}")
 
         if all_files_clean:
             ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean "

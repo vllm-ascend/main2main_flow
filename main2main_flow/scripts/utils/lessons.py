@@ -54,17 +54,19 @@ _KEYWORD_MAX_LEN = 120
 
 
 def _collect_failures(tests_dir: Path) -> list[tuple[str, str]]:
-    """Collect (test_name, error_text) from round-N-result.json fix rounds.
+    """Collect (test_name, error_text) from the step's e2e rounds.
 
-    round-0 is the first attempt (not a fix round) — skipped.  Later
-    rounds that still failed are the ones the adapter had to fix.
+    The lesson is recorded when the step PASSES after a fix round — but the
+    failure details that prompted the fix live in the EARLIER rounds
+    (round-0 is the first attempt, which the old code skipped).  Read every
+    round and keep the FIRST failure per test: round-0's traceback is the
+    original bug, later failed rounds are the adapter's attempts at it.
     """
     failures: list[tuple[str, str]] = []
+    seen: set[str] = set()
     if not tests_dir.is_dir():
         return failures
     for rfile in sorted(tests_dir.glob("round-*-result.json")):
-        if "round-0" in rfile.name:
-            continue  # first attempt, not a fix round
         try:
             data = json.loads(rfile.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -72,6 +74,9 @@ def _collect_failures(tests_dir: Path) -> list[tuple[str, str]]:
         for test_name, tr in (data.get("suite_results") or {}).items():
             if tr.get("ci_result") in ("passed", "env_flake_pass"):
                 continue
+            if test_name in seen:
+                continue  # keep the earliest round's failure
+            seen.add(test_name)
             error_text = ""
             for bug in (tr.get("code_bugs") or []):
                 error_text += (bug.get("traceback") or bug.get("error")

@@ -53,8 +53,13 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     if role == "adapter-fix":
         ref_content = "(reference docs already in session context — see previous messages)"
         # vllm-report context is per-step; in fix mode (same step, retry) it is
-        # already in session - do not re-send.
-        if ctx.get("vllm_report_context"):
+        # already in session - do not re-send.  BUT keep the MCP dynamic-mode
+        # instruction (which tells the adapter to call get_adaptation_lessons):
+        # the final quality gate's fix rounds pass it fresh — without it the
+        # adapter fixes UT/test failures blind (it previously got
+        # "vllm-report unavailable").
+        if (ctx.get("vllm_report_context")
+                and "MCP server is registered" not in ctx["vllm_report_context"]):
             ctx["vllm_report_context"] = "(vllm-report impact map already in session context — see previous messages)"
     elif role == "description-fill":
         # description-fill is self-contained — no reference docs needed.

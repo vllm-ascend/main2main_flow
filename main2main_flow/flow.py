@@ -784,16 +784,29 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 "error_logs": json.dumps(error_logs, ensure_ascii=False),
                 "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
                 "mode": role,
-                "vllm_report_context": "",
+                # The gate's fix rounds fix UT/test failures (e.g. PIN_MEMORY,
+                # maybe_calc_kv_scales, deepseek_v4_thinking) — the adapter
+                # must query vllm-report's lessons (get_adaptation_lessons) to
+                # fix them in one pass instead of blind retries.
+                "vllm_report_context": (
+                    "vllm-report MCP server is registered in opencode.jsonc. "
+                    "Call its tools dynamically (see \"vllm-report MCP Tools\" "
+                    "section below).  Call tool_get_adaptation_lessons to find "
+                    "prior lessons matching these failures before fixing."
+                ),
             }, session_id=self.state.session_id)
             if adapt_result.session_id:
                 self.state.session_id = adapt_result.session_id
 
         ts_print("\n[final_quality_gate] exhausted 3 fix rounds, still failing")
-        # Revert the last failed fix round so it doesn't leak into
-        # generate_final_post's squash via `git add -A` and get pushed
-        # (KEEP_BRANCH mode does add -A + amend at push time).
-        self._revert_working_tree("final quality gate exhausted 3 fix rounds")
+        # KEEP the adapter's last fixes in the working tree.  Reverting used
+        # to discard ALL of them — but the fix loop can resolve most issues
+        # (e.g. the PIN_MEMORY / maybe_calc_kv_scales test adaptations that
+        # a fresh run keeps missing: attempt 3 passed main/batch 2068/2068)
+        # and leave only a few env-bound failures.  Throwing the good fixes
+        # away made the pushed PR carry the UNFIXED tests and its CI went red
+        # on the same errors the adapter had already fixed.  With the tree
+        # kept, remaining failures stay visible in the PR CI.
         return False
 
     def _run_e2e_test_for_final_gate(self) -> bool:
