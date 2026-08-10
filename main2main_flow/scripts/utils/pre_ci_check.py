@@ -141,6 +141,51 @@ def _check_temp_files(repo: Path) -> dict:
     return {"violations": violations}
 
 
+def _check_fast_format(repo: Path) -> dict:
+    """Quick ruff-check on the changed files via pre-commit (not full format.sh).
+
+    The ruff-check hook auto-fixes what it can (isort/import order), which is
+    treated as success — the tree is left clean.  Only violations that
+    survive the auto-fix (e.g. F821 undefined name) fail the check.  This
+    catches format mistakes inside the step's fix loop; previously they were
+    only found by the reviewer or the final gate, and a fix round churned on
+    them (run 31376860112: an isort violation in compiler_interface.py burned
+    ~35 min of adapter retries).
+    """
+    if not shutil.which("pre-commit"):
+        return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
+    py_files = subprocess.run(
+        ["git", "diff", "HEAD", "--name-only", "--", "*.py"],
+        cwd=str(repo), capture_output=True, text=True,
+    ).stdout.splitlines()
+    if not py_files:
+        return {"violations": [], "detail": "no changed python files", "skipped": True}
+    snapshot = subprocess.run(
+        ["git", "diff", "HEAD", "--", "*.py"], cwd=str(repo),
+        capture_output=True, text=True,
+    ).stdout
+    r = subprocess.run(
+        ["pre-commit", "run", "ruff-check", "--files", *py_files],
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    output = (r.stdout + "\n" + r.stderr)
+    if r.returncode == 0:
+        return {"violations": [], "detail": "ruff-check OK"}
+    if r.returncode == 2:
+        # pre-commit infra error (env not ready etc.) — do not block the step.
+        return {"violations": [], "detail": "ruff-check skipped (pre-commit error)", "skipped": True}
+    after = subprocess.run(
+        ["git", "diff", "HEAD", "--", "*.py"], cwd=str(repo),
+        capture_output=True, text=True,
+    ).stdout
+    if after != snapshot:
+        ts_print("[pre_ci] format: ruff-check auto-fixed the changed files")
+        return {"violations": [], "detail": "ruff-check auto-fixed the changed files"}
+    violations = [l for l in output.splitlines() if l.strip()][:20]
+    return {"violations": violations,
+            "detail": f"{len(violations)} ruff violation(s) (not auto-fixable)"}
+
+
 def _check_format(repo: Path) -> dict:
     """Run ``bash format.sh`` and detect real (non-auto-fixable) errors.
 
@@ -1087,5 +1132,16 @@ def run_check(ascend_path: str | Path, release_tag: str,
         })
         if not import_ok:
             all_passed = False
+
+    fmt = _check_fast_format(repo)
+    fmt_ok = len(fmt["violations"]) == 0
+    checks.append({
+        "name": "format",
+        "passed": fmt_ok,
+        "detail": fmt["detail"],
+        "violations": fmt["violations"],
+    })
+    if not fmt_ok:
+        all_passed = False
 
     return {"all_passed": all_passed, "checks": checks}

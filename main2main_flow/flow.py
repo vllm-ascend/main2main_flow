@@ -285,10 +285,15 @@ class Main2MainFlow:
             qa_template = qa_template_path.read_text(encoding="utf-8")
 
         lessons = lessons_path.read_text(encoding="utf-8")
-        # Inject the full review-lessons.md: §1-8 give context (classic
-        # examples) for each checklist item in §9, so the reviewer can
-        # pattern-match, not just tick boxes.
-        checklist = lessons
+        # Inject only the checklist skeleton (section/subsection headings) —
+        # the full review-lessons.md (with the classic examples) stays at
+        # {lessons_path} for on-demand reading.  Inlining all of it (~6KB)
+        # made every QA tool-call generation re-process the examples, and QA
+        # sessions ran 128 tool calls against a 53K-char prompt.
+        checklist = "\n".join(
+            line for line in lessons.splitlines()
+            if line.startswith("## ") or line.startswith("### ")
+        ) + f"\n\nFull details with examples: {lessons_path}"
 
         diff_limit = 8000
         diff_snippet = diff if len(diff) <= diff_limit else diff[:diff_limit] + "\n... [truncated]"
@@ -1262,16 +1267,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 if tr.get("ci_result") in ("passed", "env_flake_pass"):
                     continue
                 parts = [f"=== {test_name} ==="]
-                # Structured summary (code_bugs/env_flakes with traceback)
-                sp = Path(tr.get("summary_path", ""))
-                if sp.exists():
-                    try:
-                        parts.append(f"[summary]\n{sp.read_text(encoding='utf-8')[:4000]}")
-                    except Exception:
-                        parts.append("[summary]\n(could not read)")
-                # Log content: error-signature excerpts first (a hang after a
-                # crash buries the traceback under READY/polling noise, so a
-                # plain tail cut loses the cause), tail as fallback, and the
+                # Log content FIRST — the excerpt carries the actual failure.
+                # A hang after a crash buries the traceback under
+                # READY/polling noise (plain tail cut loses the cause), and an
+                # empty structured summary (timeout-killed tests have no pytest
+                # output) misled the adapter into dismissing real bugs as
+                # "resource kill" (run 31376860112: disaggregated_encoder's
+                # eps=0.0 ValueError sat in the excerpt, but the empty
+                # [summary] above it won).  Excerpt first, tail as fallback,
                 # timeout note only when neither yields anything.
                 lp = Path(tr.get("log_path", ""))
                 log_text = ""
@@ -1290,6 +1293,22 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     parts.append("[NOTE] process was killed by the suite timeout "
                                  "(exit -9) and its log is empty — likely a hang "
                                  "with no error output")
+                # Structured summary AFTER the log excerpt — secondary.  A
+                # timeout-killed test has an empty summary (no pytest output);
+                # flag it so the agent does not dismiss the excerpt's real
+                # failure as a "resource kill" again.
+                sp = Path(tr.get("summary_path", ""))
+                if sp.exists():
+                    try:
+                        summary_text = sp.read_text(encoding='utf-8')[:4000]
+                    except Exception:
+                        summary_text = "(could not read)"
+                    if '"code_bugs": []' in summary_text.replace(" ", ""):
+                        summary_text += ("\n[NOTE] structured summary is empty — the test was "
+                                         "killed by the suite timeout (no pytest output). "
+                                         "The [log excerpt] above IS the failure; do not "
+                                         "dismiss it as a resource kill.")
+                    parts.append(f"[summary]\n{summary_text}")
                 detail_parts.append("\n\n".join(parts))
             if detail_parts:
                 test_errors_detail.write_text("\n\n---\n\n".join(detail_parts), encoding="utf-8")

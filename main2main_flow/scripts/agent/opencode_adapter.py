@@ -26,6 +26,11 @@ from main2main_flow.scripts.utils.utils import ts_print
 _AGENT_DIR = Path(__file__).parent.parent.parent / "agents"
 _TIMEOUT_MINUTES = 30
 _STALE_SECONDS = 300
+# No JSONL progress event (step_start/tool_use/text/step_finish) for this
+# long → kill.  The stdout-based stale check misses sessions that stream
+# progress output while the model stalls for many minutes between events
+# (observed 26 min of non-event output in an adapter-qa session).
+_EVENT_STALE_SECONDS = 600
 _MAX_STALE_RETRIES = 3
 _DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
 
@@ -73,13 +78,14 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
         # Load code-structure-guide only on the first step (static mapping table)
         if inputs.get("step_id") == "step-1":
             ref_names.append("code-structure-guide.md")
-        parts = []
-        for rf in ref_names:
-            text = _load_ref(agent_dir, rf)
-            if text:
-                parts.append(text)
-                refs_loaded.append(rf)
-        ref_content = "\n\n".join(parts)
+        # Do NOT inline the reference docs: every tool-call generation
+        # re-processes the full prompt, so ~32KB of static reference text
+        # (~8K tokens) made each call slow (adapter prompt was 53.6K chars).
+        # Pass absolute paths instead; the model reads only the section it
+        # needs, when it needs it.
+        ref_dir = _AGENT_DIR / agent_dir / "reference"
+        ref_content = "\n".join(f"- {rf}: {ref_dir / rf}" for rf in ref_names)
+        refs_loaded = ref_names
 
     ctx["reference_content"] = ref_content
     # Ensure vllm_report_context placeholder is never empty (avoids KeyError
@@ -120,19 +126,13 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     return template.format_map(ctx), refs_loaded
 
 
-def _load_ref(role: str, filename: str) -> str:
-    path = _AGENT_DIR / role / "reference" / filename
-    if path.exists():
-        return path.read_text(encoding="utf-8")
-    return ""
-
-
 def _build_continue_prompt(inputs: dict[str, Any], retry: int) -> str:
     step_dir = inputs.get("step_dir", "")
     return f"""Continue the adaptation task for step {inputs.get('step_id', '')}.
 
-The previous opencode run produced no output for {_STALE_SECONDS} seconds and
-was terminated. This is continuation retry {retry}/{_MAX_STALE_RETRIES}.
+The previous opencode run was terminated for lack of progress
+({_STALE_SECONDS}s without output or {_EVENT_STALE_SECONDS}s without a
+progress event). This is continuation retry {retry}/{_MAX_STALE_RETRIES}.
 
 The full task prompt, reference docs, and rules are already in this session's
 context — do NOT expect them to be repeated here. Re-read them from the
@@ -229,9 +229,9 @@ def run_opencode_adapter(inputs: dict[str, Any],
         if reason is None:
             break
 
-        if reason == "stale_timeout" and attempt < _MAX_STALE_RETRIES:
+        if reason in ("stale_timeout", "event_stale_timeout") and attempt < _MAX_STALE_RETRIES:
             retry = attempt + 1
-            ts_print(f"\n[opencode] retrying after stale timeout ({retry}/{_MAX_STALE_RETRIES})", flush=True)
+            ts_print(f"\n[opencode] retrying after {reason} ({retry}/{_MAX_STALE_RETRIES})", flush=True)
             prompt = _build_continue_prompt(inputs, retry)
             continue
 
@@ -269,7 +269,7 @@ def run_opencode_review(
     return "".join(lines), sid or ""
 
 
-_StopReason = Literal["stale_timeout", "total_timeout"]
+_StopReason = Literal["stale_timeout", "event_stale_timeout", "total_timeout"]
 
 
 def _print_prompt(prompt: str, attempt: int, refs: list[str] | None = None) -> None:
@@ -337,6 +337,7 @@ def _run_once(
 
     deadline = time.monotonic() + _TIMEOUT_MINUTES * 60
     last_output_time = time.monotonic()
+    last_event_time = time.monotonic()
     stop_reason: _StopReason | None = None
     extracted_sid = ""
 
@@ -356,6 +357,13 @@ def _run_once(
                     proc.kill()
                     stop_reason = "stale_timeout"
                     break
+                if now - last_event_time > _EVENT_STALE_SECONDS:
+                    ts_print(f"\n[opencode] EVENT STALE TIMEOUT "
+                             f"({_EVENT_STALE_SECONDS}s without a progress event), "
+                             f"killing process", flush=True)
+                    proc.kill()
+                    stop_reason = "event_stale_timeout"
+                    break
                 continue
 
             if line is None:
@@ -363,12 +371,15 @@ def _run_once(
 
             last_output_time = time.monotonic()
             state.lines.append(line)
-            if not extracted_sid:
-                try:
-                    ev = json.loads(line)
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                ev = None
+            if ev is not None:
+                if not extracted_sid:
                     extracted_sid = ev.get("sessionID", "")
-                except json.JSONDecodeError:
-                    pass
+                if ev.get("type"):
+                    last_event_time = time.monotonic()
             if raw_fh:
                 raw_fh.write(line)
             _print_event(line, state)

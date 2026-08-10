@@ -4,6 +4,59 @@ description: Adapt vllm-ascend to upstream vLLM changes ({mode} mode).
 ---
 # adapter — mode: {mode}
 
+## Efficiency Rules — avoid dead-end exploration
+
+Each tool call (bash/grep/read) costs 10-30s of model time, and each
+"let me think about this" gap costs 1-2 min. A full step should take
+~10 min of work. If you're past that, you are over-exploring. Follow
+these rules to stay on the critical path:
+
+1. **Grep budget: max 5 grep/glob calls per step.** MCP context + 2-3
+   targeted greps covers almost every step. If you've grepped 5 times and
+   are still unsure, STOP grepping — re-read the MCP `get_adaptation_guide`
+   result or the upstream patch instead. The answer is usually there.
+2. **Conclude once, act immediately.** When your analysis reaches a
+   conclusion (e.g. "this is the processor/multimodal trap, the fix is
+   X"), implement X RIGHT AWAY. Do NOT re-state the same conclusion in
+   follow-up text, do NOT grep to "confirm" what you already derived.
+   Each repetition burns 1-2 min with no new information.
+3. **Read files whole, once.** Use `read` or `cat` to load a file ONCE.
+   Do NOT probe small sections with `sed -n '40,75p'` repeatedly — one
+   full read of a 200-line file is faster than 4 partial reads, and the
+   model sees the full context in one shot.
+4. **Batch related checks into one bash command.** Combine multiple greps
+   in a single call: `grep -n "X" file; grep -n "Y" file; ls dir`. Each
+   bash call has fixed overhead (issue + output processing); 3 greps in
+   one command is ~1/3 the cost of 3 separate calls.
+5. **Verify at edit time, not in a verification loop.** Keep every line
+   ≤120 chars AS YOU WRITE IT (the format rules below apply while
+   editing). Do NOT run `git diff | grep '^+' | awk 'length>121'`, do NOT
+   run py_compile/mypy/ruff (banned — see Rules above). Just write clean
+   lines as you go. The final quality gate re-runs format + mypy once at
+   push time and feeds exact violations back — your job is to not leave
+   obvious violations, not to exhaustively prove there are none.
+6. **MCP context is the map — don't re-discover it — BUT only when it
+   covers the commit.** Two cases:
+   a. `get_adaptation_guide(sha)` RETURNED a guide (the commit was
+      analyzed): follow it directly. Do NOT grep the upstream diff hunks
+      for files the guide already identified, do NOT re-verify the
+      guide's conclusions. Grep only for CALL SITES and sibling
+      overrides (rules 9-10 in the checklist below), which the guide
+      may not enumerate.
+   b. `get_adaptation_guide(sha)` returned empty / "commit not covered"
+      (too recent, or vllm-report has no analysis yet): the guide is
+      useless — DO analyze the upstream diff yourself (grep, read,
+      reason) to find what vllm-ascend depends on. This is expected and
+      allowed. The MCP gap is the signal to explore.
+7. **One pass per file.** Read a file, understand it, edit all needed
+   spots, verify once, move on. Do NOT return to an already-edited file
+   unless a later discovery proves your edit wrong.
+8. **In fix mode, fix ONLY what the error says.** Read the traceback /
+   `pre_ci_check.json` violation, fix that exact line, done. Do NOT
+   re-analyze the upstream patch or re-explore the subsystem. The
+   adaptation is done; you are fixing a specific failure.
+
+
 ## Repositories
 
 | repo | path |
@@ -79,58 +132,6 @@ The step_target.patch is cumulative (git diff HEAD).
 - Use `grep` and `glob` to verify that no other vllm-ascend file depends on
   the same changed symbol. When a method signature changes, grep for ALL
   `def <method_name>(` in the vllm-ascend tree — every override must be updated.
-
-## Efficiency Rules — avoid dead-end exploration
-
-Each tool call (bash/grep/read) costs 10-30s of model time, and each
-"let me think about this" gap costs 1-2 min. A full step should take
-~10 min of work. If you're past that, you are over-exploring. Follow
-these rules to stay on the critical path:
-
-1. **Grep budget: max 5 grep/glob calls per step.** MCP context + 2-3
-   targeted greps covers almost every step. If you've grepped 5 times and
-   are still unsure, STOP grepping — re-read the MCP `get_adaptation_guide`
-   result or the upstream patch instead. The answer is usually there.
-2. **Conclude once, act immediately.** When your analysis reaches a
-   conclusion (e.g. "this is the processor/multimodal trap, the fix is
-   X"), implement X RIGHT AWAY. Do NOT re-state the same conclusion in
-   follow-up text, do NOT grep to "confirm" what you already derived.
-   Each repetition burns 1-2 min with no new information.
-3. **Read files whole, once.** Use `read` or `cat` to load a file ONCE.
-   Do NOT probe small sections with `sed -n '40,75p'` repeatedly — one
-   full read of a 200-line file is faster than 4 partial reads, and the
-   model sees the full context in one shot.
-4. **Batch related checks into one bash command.** Combine multiple greps
-   in a single call: `grep -n "X" file; grep -n "Y" file; ls dir`. Each
-   bash call has fixed overhead (issue + output processing); 3 greps in
-   one command is ~1/3 the cost of 3 separate calls.
-5. **Verify at edit time, not in a verification loop.** Keep every line
-   ≤120 chars AS YOU WRITE IT (the format rules below apply while
-   editing). Do NOT run `git diff | grep '^+' | awk 'length>121'`, do NOT
-   run py_compile/mypy/ruff (banned — see Rules above). Just write clean
-   lines as you go. The final quality gate re-runs format + mypy once at
-   push time and feeds exact violations back — your job is to not leave
-   obvious violations, not to exhaustively prove there are none.
-6. **MCP context is the map — don't re-discover it — BUT only when it
-   covers the commit.** Two cases:
-   a. `get_adaptation_guide(sha)` RETURNED a guide (the commit was
-      analyzed): follow it directly. Do NOT grep the upstream diff hunks
-      for files the guide already identified, do NOT re-verify the
-      guide's conclusions. Grep only for CALL SITES and sibling
-      overrides (rules 9-10 in the checklist below), which the guide
-      may not enumerate.
-   b. `get_adaptation_guide(sha)` returned empty / "commit not covered"
-      (too recent, or vllm-report has no analysis yet): the guide is
-      useless — DO analyze the upstream diff yourself (grep, read,
-      reason) to find what vllm-ascend depends on. This is expected and
-      allowed. The MCP gap is the signal to explore.
-7. **One pass per file.** Read a file, understand it, edit all needed
-   spots, verify once, move on. Do NOT return to an already-edited file
-   unless a later discovery proves your edit wrong.
-8. **In fix mode, fix ONLY what the error says.** Read the traceback /
-   `pre_ci_check.json` violation, fix that exact line, done. Do NOT
-   re-analyze the upstream patch or re-explore the subsystem. The
-   adaptation is done; you are fixing a specific failure.
 
 ## Workflow
 
@@ -405,6 +406,11 @@ MCP calls + 2-3 targeted greps (for gaps).
 - When vllm-report says "no ascend impact" but grep finds a base-class change,
   trust grep (vllm-report may not have analyzed this commit).
 
-## Reference
+## Reference (read on demand)
+
+The reference docs below are NOT inlined — carrying them in the prompt makes
+every tool-call generation slower. Read a file ONLY when the current question
+depends on it, and read only the relevant section (grep the file for the
+heading first, then read that range).
 
 {reference_content}
