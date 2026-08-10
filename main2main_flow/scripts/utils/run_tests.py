@@ -417,7 +417,7 @@ def _build_setup_script(vllm_path: Path, vllm_commit: str, ascend_path: Path,
 # =============================================================================
 
 def _run_to_log(command: list[str], cwd: Path, log_path: Path,
-                env: dict[str, str]) -> int:
+                env: dict[str, str], timeout_s: int | None = None) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     # start_new_session=True puts the child (pytest + its vllm workers) in a
@@ -430,8 +430,10 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
                             close_fds=True, start_new_session=True)
     assert proc.stdout is not None
 
-    # Per-suite timeout (env-configurable, default 30 min).
-    timeout_s = int(os.environ.get("MAIN2MAIN_TEST_TIMEOUT", "1800"))
+    # Per-suite timeout (env-configurable, default 30 min); test_policy.json
+    # "timeouts" can override it per test.
+    if timeout_s is None:
+        timeout_s = int(os.environ.get("MAIN2MAIN_TEST_TIMEOUT", "1800"))
     deadline = time.monotonic() + timeout_s
 
     with log_path.open("w", encoding="utf-8") as f:
@@ -602,12 +604,13 @@ def _build_test_cmd(test: str, devices: str, *,
 def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
                   test: str, devices: str, ci_log_summary: Path,
                   ascend_path: Path, step_id: int, round_number: int,
-                  env: dict[str, str], *, is_remote: bool, is_mock: bool) -> dict:
+                  env: dict[str, str], *, is_remote: bool, is_mock: bool,
+                  timeout_s: int | None = None) -> dict:
     """Execute one test and return its result dict."""
     cwd = Path("/tmp") if is_remote else ascend_path
     if not is_remote and not is_mock:
         env["ASCEND_RT_VISIBLE_DEVICES"] = devices
-    exit_code = _run_to_log(cmd, cwd, log_path, env)
+    exit_code = _run_to_log(cmd, cwd, log_path, env, timeout_s=timeout_s)
     cards = _test_cards(test)
 
     if is_mock:
@@ -644,6 +647,7 @@ def run_tests(
     step_id: int = 0,
     select_by_files: list[str] | None = None,
     test_cases: list[str] | None = None,
+    test_timeouts: dict[str, int] | None = None,
     remote: str | None = None,
     log_dir: str | Path = "",
     remote_log_dir: str | Path | None = None,
@@ -794,7 +798,8 @@ def run_tests(
                 fut = executor.submit(_run_one_test, cmd, lp, sp, test, devices,
                                       ci_log_summary, ascend_path,
                                       step_id, round_number, env.copy(),
-                                      is_remote=bool(remote_host), is_mock=mock)
+                                      is_remote=bool(remote_host), is_mock=mock,
+                                      timeout_s=test_timeouts.get(test) if test_timeouts else None)
                 futs[fut] = test
                 ts_print(f"  [{test}] started ({_test_cards(test)} card(s))", flush=True)
 

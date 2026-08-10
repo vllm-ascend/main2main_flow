@@ -119,6 +119,69 @@ def _resolve_test_cases() -> list[str] | None:
     return result or None
 
 
+_ERROR_SIGNATURES = re.compile(
+    r"Traceback \(most recent call last\)|Traceback:"
+    r"|EngineCore failed|exited unexpectedly"
+    r"|\[UC\]\[E\]|\[ERROR\]|\[TIMEOUT\]"
+    r"|\b(?:ValueError|RuntimeError|TypeError|KeyError|AttributeError|"
+    r"AssertionError|ImportError|ValidationError|IndexError|"
+    r"OverflowError|OSError)\b"
+)
+
+
+def _extract_error_excerpt(log_text: str, max_chars: int = 4000) -> str | None:
+    """Extract windows around error signatures from a test log.
+
+    A test that hangs after a crash (e.g. a server died but the test keeps
+    polling for readiness) buries the real traceback under minutes of log
+    noise, so cutting the tail loses the cause.  Search the whole log for
+    error signatures and return the surrounding context instead.
+    """
+    matches = list(_ERROR_SIGNATURES.finditer(log_text))
+    if not matches:
+        return None
+    parts: list[str] = []
+    total = 0
+    prev_end = -1
+    for m in matches:
+        start = max(0, m.start() - 200)
+        end = min(len(log_text), m.end() + 800)
+        if start <= prev_end:
+            continue
+        piece = log_text[start:end]
+        if total + len(piece) > max_chars:
+            parts.append(f"... (truncated, {len(matches) - len(parts)} more matches)")
+            break
+        line_no = log_text.count("\n", 0, m.start()) + 1
+        parts.append(f"...[log line {line_no}]\n{piece}")
+        total += len(piece)
+        prev_end = end
+    return "\n\n---\n\n".join(parts) if parts else None
+
+
+def _resolve_test_timeouts() -> dict[str, int] | None:
+    """Per-test timeout overrides from test_policy.json's "timeouts" map.
+
+    Tests that hang (env-bound failures, broken collection) would otherwise
+    burn the full MAIN2MAIN_TEST_TIMEOUT (30 min) per e2e round.
+    """
+    policy_path = Path(__file__).parent / "test_policy.json"
+    if not policy_path.exists():
+        return None
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, KeyError):
+        return None
+    timeouts = policy.get("timeouts", {})
+    if not isinstance(timeouts, dict):
+        return None
+    out: dict[str, int] = {}
+    for k, v in timeouts.items():
+        if isinstance(k, str) and isinstance(v, int) and v > 0:
+            out[k] = v
+    return out or None
+
+
 def _has_source_changes(changed_files: list[str]) -> bool:
     """True if any changed file is real adaptation code.
 
@@ -864,6 +927,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 step_id=step_id,
                 select_by_files=cumulative_files or None,
                 test_cases=_resolve_test_cases(),
+                test_timeouts=_resolve_test_timeouts(),
                 remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
                 round_number=0,
                 log_dir=str(WORKSPACE_DIR / STEPS_DIR),
@@ -1165,6 +1229,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             step_id=step_id,
             select_by_files=changed,
             test_cases=_resolve_test_cases(),
+            test_timeouts=_resolve_test_timeouts(),
             remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
             round_number=self.state.retry_count,
             log_dir=str(WORKSPACE_DIR / STEPS_DIR),
@@ -1204,15 +1269,27 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         parts.append(f"[summary]\n{sp.read_text(encoding='utf-8')[:4000]}")
                     except Exception:
                         parts.append("[summary]\n(could not read)")
-                # Raw log tail (full traceback, assertion details)
+                # Log content: error-signature excerpts first (a hang after a
+                # crash buries the traceback under READY/polling noise, so a
+                # plain tail cut loses the cause), tail as fallback, and the
+                # timeout note only when neither yields anything.
                 lp = Path(tr.get("log_path", ""))
+                log_text = ""
                 if lp.exists():
                     try:
-                        log_tail = lp.read_text(encoding='utf-8', errors='replace')
-                        # Keep last 3000 chars — tracebacks are at the end
-                        parts.append(f"[log tail]\n...\n{log_tail[-3000:]}")
+                        log_text = lp.read_text(encoding='utf-8', errors='replace')
                     except Exception:
-                        parts.append("[log tail]\n(could not read)")
+                        parts.append("[log]\n(could not read)")
+                if log_text:
+                    excerpt = _extract_error_excerpt(log_text)
+                    if excerpt:
+                        parts.append(f"[log excerpt]\n{excerpt}")
+                    else:
+                        parts.append(f"[log tail]\n...\n{log_text[-3000:]}")
+                if not log_text and tr.get("run_suite_exit_code") == -9:
+                    parts.append("[NOTE] process was killed by the suite timeout "
+                                 "(exit -9) and its log is empty — likely a hang "
+                                 "with no error output")
                 detail_parts.append("\n\n".join(parts))
             if detail_parts:
                 test_errors_detail.write_text("\n\n---\n\n".join(detail_parts), encoding="utf-8")

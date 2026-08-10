@@ -4,9 +4,14 @@
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_dspark_spec_decoding",
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_graph_mode",
     "tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py",
-    "tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py"
+    "tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py",
+    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py::test_models[1-Qwen/Qwen2.5-VL-7B-Instruct]"
   ],
   "blocklist": [
-    "tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py"
-  ]
+    "tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py",
+    "tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py"
+  ],
+  "timeouts": {
+    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py::test_models[1-Qwen/Qwen2.5-VL-7B-Instruct]": 400
+  }
 }
