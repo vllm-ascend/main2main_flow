@@ -29,6 +29,7 @@ import concurrent.futures
 import json
 import os
 import queue
+import re
 import shlex
 import shutil
 import signal
@@ -104,11 +105,43 @@ def _lookup_time(test: str, times: dict[str, int]) -> int:
     return times.get(test) or times.get(test.split("::")[0]) or _DEFAULT_ESTIMATED_SECONDS
 
 
+_DEVICE_OVERRIDE_PATTERNS = re.compile(
+    r"RemoteEPDServer|RemotePDServer|ASCEND_RT_VISIBLE_DEVICES\s*="
+)
+
+
+def _detect_device_overriders(test_files: list[str],
+                              ascend_path: Path) -> set[str]:
+    """Tests whose child processes hardcode physical devices.
+
+    RemoteEPDServer/RemotePDServer (tests/e2e/conftest.py) override
+    ASCEND_RT_VISIBLE_DEVICES to "0"/"1" when spawning their vllm servers,
+    ignoring whatever devices the runner assigned (run 31357662108:
+    disaggregated_encoder's servers loaded Qwen2.5-VL onto the deepseek
+    test's cards, failing its 0.8-utilization memory check).  Such tests must
+    own physical devices 0..cards-1, and only one of them may share a round
+    (they all fight over the same 0..N-1 range).
+    """
+    overriders: set[str] = set()
+    for t in test_files:
+        rel = t.split("::")[0]
+        path = ascend_path / rel
+        try:
+            src = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _DEVICE_OVERRIDE_PATTERNS.search(src):
+            overriders.add(t)
+    return overriders
+
+
 def _schedule_rounds(tests: list[str], total_cards: int,
-                     estimated_times: dict[str, int] | None = None) -> list[list[str]]:
+                     estimated_times: dict[str, int] | None = None,
+                     device_overriders: set[str] | None = None) -> list[list[str]]:
     # Sort by card count descending, then estimated time descending (longest
     # first — a greedy bin-packing heuristic that shortens makespan).
     times = estimated_times or {}
+    overriders = device_overriders or set()
     ordered = sorted(tests, key=lambda t: (-_test_cards(t),
                                             -_lookup_time(t, times), t))
     rounds: list[list[str]] = []
@@ -117,6 +150,14 @@ def _schedule_rounds(tests: list[str], total_cards: int,
         need = _test_cards(t)
         if need > total_cards:
             raise ValueError(f"Test '{t}' requires {need} cards but only {total_cards} available")
+        if t in overriders:
+            # Device-overriding tests each start their own round (they all
+            # hardcode physical devices 0..N-1, so a round can hold at most
+            # one of them).  As the round's first test it gets 0..N-1, which
+            # matches its hardcoded range; other tests fill the cards after.
+            rounds.append([t])
+            usage.append(need)
+            continue
         for i in range(len(rounds)):
             if usage[i] + need <= total_cards:
                 rounds[i].append(t)
@@ -758,8 +799,12 @@ def run_tests(
         total_est = sum(_lookup_time(t, est_times) for t in test_files)
         ts_print(f"Estimated test durations loaded ({len(est_times)} entries, "
               f"total: {total_est // 60} min for {len(test_files)} tests)")
+    overriders = _detect_device_overriders(test_files, ascend_path)
+    if overriders:
+        ts_print(f"Device-overriding tests (own physical 0..N-1, one per round): "
+                 f"{sorted(overriders)}", flush=True)
     rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
-        test_files, total_cards, est_times)
+        test_files, total_cards, est_times, device_overriders=overriders)
     device_rounds = _assign_devices(rounds, all_phy_ids)
 
     parallel_count = sum(1 for r in rounds if len(r) > 1)

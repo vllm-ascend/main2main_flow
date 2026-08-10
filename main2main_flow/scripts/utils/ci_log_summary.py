@@ -177,6 +177,18 @@ def _extract_errors(log_text: str, failed_test_cases: list[str]) -> list[dict]:
             "failed_test_cases": matching_cases[:1],
         })
 
+    # Memory shortage on a shared runner surfaces as generic wrapper errors
+    # ("Engine core initialization failed", "Server ... exited unexpectedly")
+    # whose root cause is the "Free memory on device ... is less than desired
+    # GPU memory utilization" ValueError (e.g. deepseek TP/PP/EP alongside
+    # other tests on the 8-NPU runner, run 31357662108). Reclassify all errors
+    # as environment flakes so the test counts as env_flake_pass instead of
+    # burning adapter fix rounds on an unfixable resource issue.
+    if any(re.search(r"Free memory on device .* is less than desired GPU memory utilization", line)
+           for line in lines):
+        for e in errors:
+            e["category"] = "Environment Flake"
+
     return errors
 
 
