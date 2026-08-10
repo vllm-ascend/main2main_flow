@@ -34,6 +34,21 @@ _EVENT_STALE_SECONDS = 600
 _MAX_STALE_RETRIES = 3
 _DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
 
+# Per-role model overrides.  The analysis/fix roles do mechanical routing
+# (read diff, map symbols, edit) where deep per-call reasoning is not
+# needed — a non-thinking model (deepseek-chat, reasoning:false) cuts the
+# adapter phase from 30+ min to minutes.  The review role keeps the
+# thinking model (its adversarial judgment benefits from deep reasoning).
+_ROLE_MODEL_ENVS = {
+    "adapter": "MAIN2MAIN_MODEL_ADAPT",
+    "adapter-fix": "MAIN2MAIN_MODEL_FIX",
+}
+
+
+def _resolve_role_model(role: str) -> str | None:
+    env = _ROLE_MODEL_ENVS.get(role)
+    return os.environ.get(env) if env else None
+
 # Verify opencode is available at import time
 if not shutil.which("opencode"):
     raise SystemExit(
@@ -168,6 +183,7 @@ def run_opencode_adapter(inputs: dict[str, Any],
                          session_id: str = "") -> AdaptResult:
     base_prompt, refs_loaded = _build_prompt(inputs)
     prompt = base_prompt
+    role_model = _resolve_role_model(inputs.get("role", "adapter"))
     step_dir = inputs.get("step_dir", "")
     step_path = Path(step_dir) if step_dir else None
     log_path = step_path / "opencode.log" if step_path else None
@@ -190,7 +206,8 @@ def run_opencode_adapter(inputs: dict[str, Any],
         if log_path:
             _log_prompt(prompt, attempt, log_path)
 
-        lines, reason, sid, rc = _run_once(prompt, log_path, raw_path, stderr_path, session_id)
+        lines, reason, sid, rc = _run_once(prompt, log_path, raw_path, stderr_path,
+                                           session_id, model=role_model)
         all_lines.extend(lines)
         last_reason = reason
         if sid:
