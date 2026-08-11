@@ -141,14 +141,31 @@ def _resolve_impacts(shas: list[str], vllm_report_path: Path | None,
 
 # ── bucket classification ─────────────────────────────────────────────────────
 
-def _bucket_of(impact: dict | None, vllm_lines: int) -> str:
-    """'noop' / 'code' — see plan algorithm in module docstring."""
-    if impact is None:
-        # Unanalyzed: docs/CI-only → noop; code-touching → code
-        return "noop" if vllm_lines == 0 else "code"
-    if not impact.get("ascend_affected", False):
-        return "noop"
-    return "code"
+def _effective_lines(impact: dict | None, vllm_lines: int) -> int:
+    """Lines that count toward the 1000-line step budget.
+
+    A commit analyzed by vllm-report with ascend_affected=False contributes
+    0 effective lines (plan still includes it in a step so verified.commit
+    advances, but it doesn't consume budget).  Unanalyzed commits and
+    ascend_affected=True commits contribute their full vllm/ line count.
+    """
+    if impact is not None and not impact.get("ascend_affected", False):
+        return 0
+    return vllm_lines
+
+
+def _step_needs_adaptation(step_commits: list[dict[str, str]],
+                           impacts: dict[str, dict | None]) -> bool:
+    """Unused. The adapter always runs on every step and decides itself
+    whether to skip e2e (via is_noop).  Kept only because the step dict
+    records it for telemetry."""
+    for c in step_commits:
+        impact = impacts.get(c["sha"])
+        if impact is None:
+            return True
+        if impact.get("ascend_affected", False):
+            return True
+    return False
 
 
 # ── commit listing ─────────────────────────────────────────────────────────────
@@ -187,8 +204,16 @@ def _vllm_lines_for_commit(repo: Path, sha: str) -> int:
     return total
 
 
-def _make_step(index: int, commits: list[dict[str, str]], start: str, lines: int,
-               bucket: str, tags: list[str] | None = None) -> dict[str, Any]:
+def _make_step(index: int, commits: list[dict[str, str]], start: str,
+               vllm_lines: int, effective_lines: int,
+               needs_adaptation: bool,
+               impacts: dict[str, dict | None] | None = None) -> dict[str, Any]:
+    tags: set[str] = set()
+    if impacts:
+        for c in commits:
+            impact = impacts.get(c["sha"])
+            if impact:
+                tags.update(impact.get("tags", []) or [])
     return {
         "index": index,
         "id": f"step-{index}",
@@ -196,12 +221,12 @@ def _make_step(index: int, commits: list[dict[str, str]], start: str, lines: int
         "commit_count": len(commits),
         "start_commit": start,
         "end_commit": commits[-1]["sha"],
-        "vllm_changed_lines": lines,
+        "vllm_changed_lines": vllm_lines,
+        "effective_lines": effective_lines,
         "line_budget": LINE_BUDGET,
         "commit_count_budget": _commit_count_budget(),
-        "bucket": bucket,
-        "tags": sorted(set(tags or [])),
-        "noop": bucket == "noop",
+        "needs_adaptation": needs_adaptation,
+        "tags": sorted(tags),
     }
 
 
@@ -245,123 +270,92 @@ def _plan_steps(
     impacts: dict[str, dict | None],
     base_commit: str,
 ) -> list[dict[str, Any]]:
-    """Group commits into steps by bucket type + line/commit budget.
+    """Linear grouping by effective-line budget.
 
-    Bucket rules (per commit):
-      - impact is None (unanalyzed) + vllm_lines == 0 → 'noop'
-      - impact is None (unanalyzed) + vllm_lines > 0  → 'code'
-      - impact.ascend_affected == False → 'noop'
-      - impact.ascend_affected == True  → 'code'
+    Every commit goes into a step (so verified.commit advances across the
+    full range).  A commit's *effective* lines are:
+      - 0 if vllm-report analyzed it and marked ascend_affected=False
+        (the commit's own changes don't need ascend work, but plan still
+        walks through it to keep ordering intact)
+      - the full vllm/ line count otherwise (analyzed + affected, or
+        unanalyzed where we fall back to conservative line-count)
 
-    Within a bucket:
-      - 'noop': consecutive commits merge into one no-op step (no adapter,
-        only advances verified.commit).
-      - 'code': current vllm-line-budget + commit-count-budget grouping
-        (single commit > LINE_BUDGET gets its own step).
+    Steps accumulate commits until effective_lines > LINE_BUDGET or the
+    commit-count budget is reached, then a new step starts.  A single
+    commit whose effective_lines > LINE_BUDGET gets its own step.
 
-    When the bucket type changes, the current step closes — except a single
-    noop commit with 0 vllm lines may merge into an open 'code' step (it
-    only advances verified.commit there).  This avoids fragmenting runs of
-    code-touching commits just because a docs-only commit sits between them.
+    The adapter runs on every step.  If the adapter's analysis confirms
+    the step needs no ascend change (all commits ascend_affected=False AND
+    no baseline issue surfaces), the adapter sets is_noop=True on the
+    result and the flow skips e2e for that step.
     """
-    # Track which commits have been placed (verifies no omissions).
     placed_shas: set[str] = set()
     steps: list[dict[str, Any]] = []
 
-    # State for the currently-open step.
-    cur_bucket: str | None = None
     cur_commits: list[dict[str, str]] = []
-    cur_lines = 0
-    cur_tags: list[str] = []
+    cur_vllm_lines = 0
+    cur_effective_lines = 0
     start = base_commit
 
     def close_step() -> None:
-        nonlocal cur_commits, cur_lines, cur_tags, cur_bucket, start
+        nonlocal cur_commits, cur_vllm_lines, cur_effective_lines, start
         if not cur_commits:
             return
+        needs_adapt = _step_needs_adaptation(cur_commits, impacts)
         steps.append(_make_step(len(steps) + 1, cur_commits, start,
-                                cur_lines, cur_bucket, cur_tags))
+                                cur_vllm_lines, cur_effective_lines,
+                                needs_adapt, impacts))
         for c in cur_commits:
             placed_shas.add(c["sha"])
         start = cur_commits[-1]["sha"]
         cur_commits = []
-        cur_lines = 0
-        cur_tags = []
+        cur_vllm_lines = 0
+        cur_effective_lines = 0
 
     for commit in commits:
         sha = commit["sha"]
-        lines = lines_per_commit.get(sha, 0)
+        vllm_lines = lines_per_commit.get(sha, 0)
         impact = impacts.get(sha)
-        bucket = _bucket_of(impact, lines)
-        commit_tags = (impact or {}).get("tags", []) or []
+        eff = _effective_lines(impact, vllm_lines)
 
-        # Bucket-type switch: close current step — EXCEPT a 'noop' commit
-        # with 0 vllm lines may merge into an open 'fallback' or 'adapt'
-        # step (it only advances verified.commit there, doesn't change the
-        # work).  This avoids fragmenting runs of code-touching commits
-        # just because a docs-only commit sits between them (29 commits
-        # → 13 steps was too many; most steps had 1-2 commits).
-        if cur_bucket is not None and bucket != cur_bucket:
-            if bucket == "noop" and lines == 0 and cur_bucket == "code":
-                # Merge this noop commit into the current step; keep
-                # cur_bucket unchanged.
-                cur_commits.append(commit)
-                # No lines added (lines == 0).  No tags for noop.
-                placed_shas.add(sha)
-                # Continue to next commit without resetting bucket state.
-                continue
+        # Single commit exceeding budget → own step.
+        if eff > LINE_BUDGET:
             close_step()
-            cur_bucket = bucket
-            cur_tags = list(commit_tags)
-        elif cur_bucket is None:
-            cur_bucket = bucket
-            cur_tags = list(commit_tags)
+            cur_commits.append(commit)
+            cur_vllm_lines = vllm_lines
+            cur_effective_lines = eff
+            close_step()
+            continue
 
-        # 'code' bucket (was 'adapt' + 'fallback'): use the current vllm-line
-        # + commit-count budget.  No theme grouping — theme routing was too
-        # granular and produced too many steps (29 commits → 13 steps).
-        # The 1000-line budget is the only grouper.
-        if bucket == "code":
-            if lines > LINE_BUDGET:
-                close_step()
-                cur_commits.append(commit)
-                cur_lines = lines
-                close_step()
-                continue
-            if cur_lines + lines > LINE_BUDGET or len(cur_commits) >= _commit_count_budget():
-                close_step()
-        # 'noop' bucket: keep accumulating; no budget, no adapter.
+        # Accumulate; flush when budget exceeded.
+        if cur_effective_lines + eff > LINE_BUDGET or len(cur_commits) >= _commit_count_budget():
+            close_step()
 
         cur_commits.append(commit)
-        cur_lines += lines
-        # Tags track the union across the step (for code bucket, when impact
-        # analysis is available — purely informational).
-        if bucket == "code":
-            for t in commit_tags:
-                if t not in cur_tags:
-                    cur_tags.append(t)
+        cur_vllm_lines += vllm_lines
+        cur_effective_lines += eff
 
     close_step()
 
-    # If all commits were filtered into a noop bucket at index 0, we still
-    # have steps (no special case needed).  But if commits existed and
-    # produced zero steps (shouldn't happen), fall back to a single no-op.
+    # If commits existed but produced zero steps (shouldn't happen), fall
+    # back to a single step covering the full range.
     if not steps and commits:
-        steps.append(_make_step(1, commits, base_commit, 0, "noop", []))
+        steps.append(_make_step(1, commits, base_commit, 0, 0,
+                                _step_needs_adaptation(commits, impacts), impacts))
         for c in commits:
             placed_shas.add(c["sha"])
 
     # Safety net: every input commit must appear in exactly one step.
     missing = [c["sha"] for c in commits if c["sha"] not in placed_shas]
     if missing:
-        # This is a bug in the algorithm; create a fallback step for the
-        # leftover commits so verified.commit still advances.
         ts_print(f"[plan] WARNING: {len(missing)} commits not placed in any "
                  f"step, creating fallback step: {[s[:8] for s in missing[:5]]}")
         steps.append(_make_step(len(steps) + 1,
                                 [c for c in commits if c["sha"] in missing],
                                 steps[-1]["end_commit"] if steps else base_commit,
-                                0, "code", []))
+                                0, 0, True, impacts))
+        for c in steps[-1]["commits"]:
+            placed_shas.add(c["sha"])
 
     return steps
 
@@ -390,8 +384,10 @@ def run_plan(vllm_path: Path, base_commit: str, target_commit: str,
 
     impacts = _resolve_impacts([c["sha"] for c in commits], vllm_report_path, ascend_path)
     analyzed = sum(1 for v in impacts.values() if v is not None)
-    ts_print(f"[plan] vllm-report impact: {analyzed}/{len(commits)} commits analyzed, "
-             f"{len(commits) - analyzed} fall back to line-budget")
+    unaffected = sum(1 for v in impacts.values() if v and not v.get("ascend_affected", False))
+    ts_print(f"[plan] vllm-report impact: {analyzed}/{len(commits)} analyzed, "
+             f"{unaffected} marked ascend_affected=False (0 effective lines), "
+             f"{len(commits) - analyzed} unanalyzed (fallback to vllm-line-budget)")
 
     steps = _plan_steps(commits, lines_per_commit, impacts, base_commit)
     _enrich_steps_with_diff(vllm_path, steps)
