@@ -365,6 +365,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             for k, v in inputs.items():
                 setattr(self.state, k, v)
         self.initialize()
+        self._warmup_mega_moe()
         signal = self.analyze_commit_and_plan_step()
         if signal == HasNoCommit:
             self.has_no_commit()
@@ -612,6 +613,28 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             self.state.vllm_release_path = ""
             ts_print(f"[init] WARNING vllm release worktree failed ({e}) — "
                      "UT gate will test main only")
+
+    def _warmup_mega_moe(self) -> None:
+        """Pre-compile CANN 9.1.0's mega_moe op so the first e2e doesn't JIT it.
+
+        CANN 9.1.0's cann_ops_transformer mega_moe op (used by MoE + EP + EPLB
+        tests like qwen3_30b_a3b) JIT-compiles npu_mega_moe.so at first import
+        (~4 min of c++).  During compilation the rank's shm_broadcast blocks
+        for >60s and the HCCL watchdog kills the engine (run 31515866004,
+        31504773494).  Pre-importing the module here compiles it once, before
+        any test starts.
+        """
+        try:
+            ts_print("[init] warming up CANN mega_moe op (JIT compile once)...")
+            subprocess.run(
+                [sys.executable, "-c",
+                 "import cann_ops_transformer.ops.mega_moe; print('mega_moe warmed')"],
+                capture_output=True, text=True, timeout=900,
+            )
+            ts_print("[init] mega_moe warmup done")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            ts_print(f"[init] WARNING mega_moe warmup failed ({e}) — "
+                     "first MoE/EP test may JIT-compile at runtime")
 
     def _cleanup_release_worktree(self) -> None:
         """Remove the vllm release worktree created in initialize."""

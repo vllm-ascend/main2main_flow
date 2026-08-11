@@ -150,13 +150,11 @@ def _schedule_rounds(tests: list[str], total_cards: int,
         need = _test_cards(t)
         if need > total_cards:
             raise ValueError(f"Test '{t}' requires {need} cards but only {total_cards} available")
-        if need > 1:
-            # Multi-card tests each get their own round: they all initialize
-            # HCCL during startup, and two multi-card tests starting in
-            # parallel corrupt each other's HCCL rank->device mapping on
-            # CANN 9.1.0 (run 31504773494: "indexFromRank 1 !=
-            # indexFromCurDevice 3" then HCCL watchdog crash).  One-card
-            # tests may still fill the remaining cards of the round.
+        if t in overriders:
+            # Device-overriding tests each start their own round (they all
+            # hardcode physical devices 0..N-1, so a round can hold at most
+            # one of them).  As the round's first test it gets 0..N-1, which
+            # matches its hardcoded range; other tests fill the cards after.
             rounds.append([t])
             usage.append(need)
             continue
