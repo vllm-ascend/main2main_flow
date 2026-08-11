@@ -644,7 +644,9 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             return HasNoCommit
 
         # generate steps.json in workspace
-        plan = run_plan(vllm_path, result["base_commit"], result["target_commit"])
+        plan = run_plan(vllm_path, result["base_commit"], result["target_commit"],
+                        vllm_report_path=Path(self.state.vllm_report_path) if self.state.vllm_report_path else None,
+                        ascend_path=Path(self.state.vllm_ascend_path))
         self.state.steps = plan["steps"]
         self.state.total_steps = len(plan["steps"])
 
