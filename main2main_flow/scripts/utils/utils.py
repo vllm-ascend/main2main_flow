@@ -6,8 +6,15 @@ from pathlib import Path
 
 
 def ts_print(*args, **kwargs) -> None:
-    """Print with [HH:MM:SS.mmm] timestamp prefix."""
+    """Print with [HH:MM:SS.mmm] timestamp prefix.
+
+    flush=True by default — GH Actions logs are buffered when Python's stdout
+    is line/newline-buffered, so a ts_print at T shows up in the log file at
+    T+seconds-to-minutes, scrambling the apparent order of events.
+    """
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}"
+    # Force flush unless caller explicitly passes flush=False.
+    kwargs.setdefault("flush", True)
     print(f"[{ts}]", *args, **kwargs)
 
 UpgradeCompleted = "UpgradeCompleted"

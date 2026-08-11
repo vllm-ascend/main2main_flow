@@ -236,6 +236,12 @@ class Main2MainState(BaseModel):
     # must run the regression e2e — the agent's no-op judgment can be wrong.
     last_step_e2e_passed: bool = False
 
+    # Set by _ai_analysis: True if the adapter's analysis found the step
+    # needs no vllm-ascend code change (modified files excluding the
+    # tracking file).  process_steps uses this to skip the per-step e2e
+    # round; final_quality_gate's regression e2e still runs.
+    last_step_is_noop: bool = False
+
     # Persistent opencode session ID for full conversational context
     session_id: str = ""
 
@@ -695,6 +701,26 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self._revert_working_tree(f"step {step_id} ai_analysis exhausted")
                 self.state.final_status = UpgradeFailed
                 return
+
+            # Adapter analyzed the step and confirmed no vllm-ascend code
+            # change needed → skip the per-step e2e round (only on the first
+            # attempt; if a later step's regression e2e in the final gate
+            # surfaces a baseline bug, that gate's fix loop handles it).
+            # The final quality gate always runs the regression e2e at the end.
+            if self.state.last_step_is_noop and self.state.retry_count == 0:
+                ts_print(f"[process_steps] {step_id}: adapter marked step as "
+                         f"no-op (no vllm-ascend code change), skipping e2e")
+                # Commit the verified.commit bump + any adapter artifacts
+                # (e.g. step_summary.md is untracked, no commit needed for it).
+                run_git(ascend_path, "add", "-A")
+                subprocess.run(["git", "commit", "-s", "-m",
+                                 f"main2main: step {step_id} ({step['end_commit'][:8]})"],
+                                cwd=ascend_path, capture_output=True)
+                self.state.current_step += 1
+                self.state.retry_count = 0
+                self.state.last_verified_commit = self.state.cur_vllm_commit
+                self.state.last_step_e2e_passed = False  # final gate must run regression
+                continue
 
             test_pass = self._run_e2e_test()
             if test_pass:
@@ -1156,6 +1182,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             return False
 
         self.state.test_errors = []
+
+        # Track whether the adapter made any vllm-ascend code change (excluding
+        # the tracking file).  process_steps uses this to skip the per-step
+        # e2e for true no-op steps; the final quality gate's regression e2e
+        # still runs at the end.
+        self.state.last_step_is_noop = bool(adapt_result and adapt_result.is_noop)
 
         summary_path = step_dir / EACH_STEP_SUMMARY_FILE
         if adapt_result and adapt_result.step_summary and not summary_path.exists():

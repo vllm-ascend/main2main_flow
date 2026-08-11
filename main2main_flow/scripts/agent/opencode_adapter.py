@@ -591,4 +591,9 @@ def _modified_files(ascend_path: str) -> list[str]:
         )
     except subprocess.CalledProcessError:
         return []
-    return [line for line in result.stdout.splitlines() if line]
+    files = [line for line in result.stdout.splitlines() if line]
+    # Exclude the tracking file (.github/vllm-main-verified.commit) — flow
+    # always updates it for the step's upstream commit, but that's not an
+    # adaptation change.  A step whose only modified file is the tracking
+    # file is a true no-op (adapter did not change any vllm-ascend code).
+    return [f for f in files if f != ".github/vllm-main-verified.commit"]
