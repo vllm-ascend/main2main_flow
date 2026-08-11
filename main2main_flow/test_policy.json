@@ -11,5 +11,8 @@
     "tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py",
     "tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py",
     "tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py"
-  ]
+  ],
+  "timeouts": {
+    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py::test_models[1-Qwen/Qwen2.5-VL-7B-Instruct]": 600
+  }
 }
