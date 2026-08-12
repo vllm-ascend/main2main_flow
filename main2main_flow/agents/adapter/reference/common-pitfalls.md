@@ -324,7 +324,9 @@ These are caught by the QA reviewer but should be applied proactively:
   versions, `getattr(obj, "param", default)` is acceptable. This is different from using
   `hasattr`/`try-except` FOR VERSION DETECTION, which is prohibited.
 - **Triton kernel params must match**: every arg passed to a Triton kernel call must exist
-  in the kernel function signature.
+  in the kernel function signature. When syncing an NPU Triton kernel, also apply the
+  triton-ascend authoring constraints (boolean chains / int64 / uint64 / new constexpr
+  params) — see the "triton-ascend kernel authoring constraints" section below.
 - **No `logging.debug` on TorchDynamo compile path**: guard with
   `if not torch.compiler.is_compiling()`.
 - **Resolve paths before chaining**: call `.resolve()` before `.parents[N]` on `Path`.
@@ -379,6 +381,56 @@ symbol vllm main newly references, do NOT mark as no-op/env-flake. Add a
 compat stub in `vllm_ascend/__init__.py` (module-level, before vllm imports).
 Use `vllm_version_is()` guard if the stub should only apply to certain
 versions.
+
+## triton-ascend kernel authoring constraints (NPU Triton kernels)
+
+When syncing/porting an upstream Triton kernel that vllm-ascend
+monkey-patches (e.g. `postprocess_mamba_fused_kernel` via
+`patch_mamba_utils.py`), triton-ascend rejects constructs that upstream
+triton accepts. Each rejected construct surfaces as a SEPARATE E2E
+`EngineDeadError` / `CompilationError` round — write the kernel right the
+first time by applying all four rules below:
+
+**1. 3-term boolean chains are rejected**
+- Symptom: `triton.compiler.errors.CompilationError: UnsupportedLanguageConstruct`
+  on `if A and B and C:`.
+- Fix: parenthesize so every level has exactly 2 terms:
+  `if (A and B) and C:` — triton-ascend accepts this form.
+
+**2. Mixed int32/int64 loop/range math is rejected**
+- Symptom: `AssertionError('Mismatched type for copy_start between then
+  block (int32) and else block (int64)')`.
+- Fix: keep all range/tile math in ONE dtype — cast to int64 explicitly:
+  `copy_size = a.to(tl.int64) * b.to(tl.int64)`,
+  `tile_start = tile_idx.to(tl.int64) * per_tile`. Never let an int32
+  literal leak into a branch that computes an int64 bound.
+
+**3. DT_UINT64 is unsupported on NPU**
+- Symptom: runtime error in `aclnnInplaceZero` (e.g. MambaCopyBuffers
+  tensors) or kernel compile failure on `tl.pointer_type(tl.uint64)`.
+- Fix: use `tl.int64` / `tl.uint8` pointers instead of `tl.uint64`.
+  Upstream kernels that vectorize with u64 (e.g. `_memcpy_u64_tiled`) must
+  be ported as byte-wise or int64 copies.
+
+**4. Upstream adds a kernel constexpr param → launch `KeyError`**
+- Symptom: `KeyError: 'Keyword argument <NAME> was specified but
+  unrecognised'` from `triton/runtime/jit.py` at kernel launch — surfaces as
+  `EngineDeadError` in E2E. Upstream changed the kernel signature (e.g.
+  added `TEMPORAL_TILES` + 3D grid); the vllm-ascend patched kernel wasn't
+  synced.
+- Fix: sync-port the new param with a DEFAULT that preserves the old
+  contract — `NAME: tl.constexpr = 1`. Triton pads 2D grids to `(g0, g1, 1)`,
+  so `tl.program_id(2)` is 0 for old callers and the untiled path is
+  preserved. For the mamba case, sync upstream's
+  `_memcpy_u64_tiled` / `_copy_mamba_state_block` structure
+  (vllm/v1/worker/mamba_utils.py, kernel def ~line 250, launch sites
+  ~lines 893/991/1028) while keeping rules 1-3.
+
+**Classic case — mamba `TEMPORAL_TILES` (run 31553496227)**: the sync missed
+the new param, then two fix rounds hit rules 1 and 2 in sequence before the
+3-attempt budget ran out. Full step-by-step guidance is in vllm-report
+lesson L20260812-001 — in fix mode, query
+`get_adaptation_lessons(keywords=["TEMPORAL_TILES"])` FIRST.
 
 ## `device_index` must be passed explicitly (not ambient)
 
