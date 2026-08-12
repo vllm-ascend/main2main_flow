@@ -26,7 +26,7 @@ from main2main_flow.scripts.utils.utils import (
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
-    FINAL_CODE_STRUCTURE_GUIDE_FILE, run_git, ts_print
+    FINAL_CODE_STRUCTURE_GUIDE_FILE, GENERATED_ARTIFACT_DIRS, run_git, ts_print
 )
 
 # Files that are tracking/metadata, not real adaptation changes — excluded
@@ -508,13 +508,18 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # (opencode's custom-config path, highest precedence).
             os.environ["OPENCODE_CONFIG"] = str(opencode_config_path)
             # .git/info/exclude (not .gitignore) - local-only, doesn't pollute
-            # the repo or the PR diff.
+            # the repo or the PR diff.  Also excludes generated tool artifacts
+            # (torch_compile_debug/ etc.) so they can never enter a step
+            # commit, the gate checks, or the PR diff.
             exclude_file = Path(self.state.vllm_ascend_path) / ".git" / "info" / "exclude"
+            exclude_patterns = ["opencode.json", *GENERATED_ARTIFACT_DIRS]
             try:
                 exclude_content = exclude_file.read_text(encoding="utf-8")
-                if "opencode.json" not in exclude_content:
+                missing = [p for p in exclude_patterns if p not in exclude_content]
+                if missing:
                     exclude_file.write_text(
-                        exclude_content.rstrip() + "\nopencode.json\n", encoding="utf-8"
+                        exclude_content.rstrip() + "\n" + "\n".join(missing) + "\n",
+                        encoding="utf-8",
                     )
             except OSError:
                 # .git/info/exclude not writable - append to .gitignore instead
@@ -522,11 +527,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 gitignore_path = Path(self.state.vllm_ascend_path) / ".gitignore"
                 try:
                     gi_content = gitignore_path.read_text(encoding="utf-8")
-                    if "opencode.json" not in gi_content:
+                    missing = [p for p in exclude_patterns if p not in gi_content]
+                    if missing:
                         gitignore_path.write_text(
-                            gi_content.rstrip() + "\nopencode.json\n", encoding="utf-8"
+                            gi_content.rstrip() + "\n" + "\n".join(missing) + "\n",
+                            encoding="utf-8",
                         )
-                        ts_print("[init] added opencode.json to .gitignore (exclude not writable)")
+                        ts_print("[init] added patterns to .gitignore (exclude not writable)")
                 except OSError:
                     ts_print("[init] WARNING could not ignore opencode.json - "
                              "it may be committed into the PR!")

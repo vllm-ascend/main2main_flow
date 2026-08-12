@@ -221,6 +221,46 @@ def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
                     keywords=keywords, example=example)
 
 
+def _resolve_push_targets(report_dir: Path) -> list[str]:
+    """Push targets for the vllm-report clone, honoring the runner's own
+    github rewrite (``url.*.insteadOf``): embed the token in the REWRITTEN
+    base so the push goes through the same proxy the runner uses for fetch
+    (git-cdn in CI, none locally) — the pattern that made
+    ``_push_via_proxy`` (push_to_github.py) work.  Falls back to the CI
+    push proxy and direct github.com (local runs / credential helper).
+    """
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    repo_url = "https://github.com/vllm-ascend/vllm-report.git"
+    targets: list[str] = []
+    if token:
+        # 1. The runner's own github proxy (git config url.*.insteadOf),
+        #    e.g. http://git-cdn-service...:8000 — reachable wherever the
+        #    clone's fetch worked, and the only proxy that survives on
+        #    runners without gh-proxy access.  Without this the push fell
+        #    through to `origin`, got rewritten to the proxy, and failed
+        #    with "could not read Username" (run 31563761175).
+        r = subprocess.run(
+            ["git", "config", "--get-regexp", r"^url\..*\.insteadof$"],
+            cwd=str(report_dir), capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            key, _, value = line.partition(" ")
+            if "github.com" not in value:
+                continue
+            base = key[len("url."):-len(".insteadof")]
+            scheme, _, rest = base.partition("://")
+            targets.append(
+                f"{scheme}://x-access-token:{token}@{rest}{repo_url}")
+            break
+        # 2. The CI push proxy used by push_to_github._push_via_proxy.
+        targets.append(
+            f"https://x-access-token:{token}@gh-proxy.test.osinfra.cn/"
+            f"{repo_url}")
+        # 3. Direct github.com (local runs, non-proxy runners).
+        targets.append(f"https://x-access-token:{token}@{repo_url[8:]}")
+    targets.append("origin")
+    return targets
+
+
 def persist_lessons(vllm_report_path: str) -> None:
     """Commit + push vllm-report lessons back to the remote (best-effort).
 
@@ -239,7 +279,16 @@ def persist_lessons(vllm_report_path: str) -> None:
     r = subprocess.run(
         ["git", "status", "--short"], cwd=str(report_dir),
         capture_output=True, text=True)
-    if r.returncode != 0 or not r.stdout.strip():
+    # Also count unpushed commits: vllm-report's tool_submit_lesson commits
+    # locally BEFORE pushing, so a failed submit push leaves a clean working
+    # tree with an unpushed commit that `git status` cannot see (run
+    # 31563761175: "no vllm-report changes to persist" while the lesson
+    # commit was stranded).
+    ahead = subprocess.run(
+        ["git", "rev-list", "--count", "origin/main..HEAD"],
+        cwd=str(report_dir), capture_output=True, text=True)
+    ahead_count = int(ahead.stdout.strip()) if ahead.stdout.strip().isdigit() else 0
+    if r.returncode != 0 or (not r.stdout.strip() and ahead_count == 0):
         ts_print("[lesson] no vllm-report changes to persist")
         return
     # The fresh clone has no git identity — a bare `git commit` fails with
@@ -247,28 +296,32 @@ def persist_lessons(vllm_report_path: str) -> None:
     identity = ["-c", "user.name=main2main-bot",
                 "-c", "user.email=main2main-bot@users.noreply.github.com"]
     try:
-        subprocess.run(["git", *identity, "add", "-A"],
-                       cwd=str(report_dir), check=True, capture_output=True,
-                       text=True)
-        commit_msg = (f"lessons: {datetime.now().strftime('%Y-%m-%d %H:%M')} "
-                      "auto-recorded from main2main E2E fixes")
-        subprocess.run(["git", *identity, "commit", "-m", commit_msg],
-                       cwd=str(report_dir), check=True, capture_output=True,
-                       text=True)
-        # Push with a token-embedded URL when a token is available: the CI
-        # runner routes github.com through an anonymous-fetch proxy that
-        # needs the token in the URL for push.  Fall back to the plain
-        # origin push locally (credential helper).
-        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-        targets: list[str] = []
-        if token:
-            targets.append(
-                f"https://x-access-token:{token}@gh-proxy.test.osinfra.cn/"
-                f"https://github.com/vllm-ascend/vllm-report.git")
-            targets.append(
-                f"https://x-access-token:{token}@github.com/"
-                f"vllm-ascend/vllm-report.git")
-        targets.append("origin")
+        if r.stdout.strip():
+            subprocess.run(["git", *identity, "add", "-A"],
+                           cwd=str(report_dir), check=True, capture_output=True,
+                           text=True)
+            commit_msg = (f"lessons: {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+                          "auto-recorded from main2main E2E fixes")
+            subprocess.run(["git", *identity, "commit", "-m", commit_msg],
+                           cwd=str(report_dir), check=True, capture_output=True,
+                           text=True)
+        # Fetch + rebase before push: the daily data-update bot commits to
+        # main between our clone and this push, so a bare push would be
+        # rejected as non-fast-forward (mirrors vllm-report's
+        # _persist_lesson_to_remote).  Fetch through the first target so it
+        # goes through the runner's own proxy.
+        targets = _resolve_push_targets(report_dir)
+        fr = subprocess.run(["git", "fetch", targets[0], "main"],
+                            cwd=str(report_dir), capture_output=True,
+                            text=True)
+        if fr.returncode == 0:
+            rb = subprocess.run(["git", "rebase", "FETCH_HEAD"],
+                                cwd=str(report_dir), capture_output=True,
+                                text=True)
+            if rb.returncode != 0:
+                subprocess.run(["git", "rebase", "--abort"],
+                               cwd=str(report_dir), capture_output=True,
+                               text=True)
         last_err = ""
         for target in targets:
             pr = subprocess.run(["git", "push", target, "main"],

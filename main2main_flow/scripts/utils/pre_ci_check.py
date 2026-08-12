@@ -835,8 +835,15 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
 
             runs: list[tuple[str, subprocess.CompletedProcess]] = []
             try:
+                # --continue-on-collection-errors: a single file that fails
+                # to import (e.g. an env-specific ModuleNotFoundError) must
+                # NOT abort the whole batch and mask every other test —
+                # the batch is one pytest process for all files (run
+                # 31563761175: sfa_pd_rd2h collection error hid 8 real
+                # regressions that PR CI then exposed).
                 rr = subprocess.run(
                     [*pytest_cmd, "-q", "--tb=short", "--no-header",
+                     "--continue-on-collection-errors",
                      *batch, "-k", exclude_expr],
                     cwd=str(repo), capture_output=True, text=True,
                     env=env, timeout=1200,

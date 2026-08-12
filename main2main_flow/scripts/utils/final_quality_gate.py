@@ -29,7 +29,7 @@ from main2main_flow.scripts.utils.pre_ci_check import (
     _check_mypy,
     _check_ut,
 )
-from main2main_flow.scripts.utils.utils import ts_print
+from main2main_flow.scripts.utils.utils import exclude_generated_artifacts, ts_print
 
 
 def run_final_quality_gate(
@@ -53,6 +53,14 @@ def run_final_quality_gate(
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     gate_path = log_dir / "quality_gate.json"
+
+    # Isolate non-business generated artifacts (e.g. torch_compile_debug/
+    # from the previous round's a2 UT run) before any check — they must
+    # never fail format or leak into the PR diff.
+    n_unstaged = exclude_generated_artifacts(repo)
+    if n_unstaged:
+        ts_print(f"[final_quality_gate] unstaged {n_unstaged} generated "
+                 f"artifact file(s) (excluded from checks)")
 
     # UT gate on/off switch.  Verified 166/166 clean on A2, but keep a
     # kill-switch so a UT-environment regression can't block push — set

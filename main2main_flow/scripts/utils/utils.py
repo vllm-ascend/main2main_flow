@@ -103,3 +103,43 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
         except OSError:
             pass
     return r
+
+
+# Generated-artifact dirs that must never enter the gate's checks or the PR
+# diff — tool output, not business code.  torch.compile dumps
+# ``torch_compile_debug/`` into the repo root when a2 UTs run (e.g.
+# test_gdn_layerwise_kv.py); without isolation the artifacts get staged and
+# the next gate round fails format on them (run 31563761175 round 3).
+GENERATED_ARTIFACT_DIRS = ("torch_compile_debug/",)
+
+
+def exclude_generated_artifacts(repo: Path) -> int:
+    """Isolate non-business generated artifacts from the gate's checks.
+
+    Adds ``GENERATED_ARTIFACT_DIRS`` to ``.git/info/exclude`` (local-only,
+    never pollutes the repo or the PR diff — pre-commit --all-files and
+    ``git add -A``/``-N`` both honor it) and unstages any artifact files
+    already in the index (e.g. intent-to-add left by the regression-e2e
+    patch regen).  Returns the number of unstaged files.
+    """
+    exclude_file = Path(repo) / ".git" / "info" / "exclude"
+    try:
+        content = (exclude_file.read_text(encoding="utf-8")
+                   if exclude_file.exists() else "")
+        missing = [p for p in GENERATED_ARTIFACT_DIRS if p not in content]
+        if missing:
+            exclude_file.write_text(
+                content.rstrip() + "\n" + "\n".join(missing) + "\n",
+                encoding="utf-8",
+            )
+    except OSError:
+        pass
+    r = subprocess.run(
+        ["git", "ls-files", "--cached", "--", *GENERATED_ARTIFACT_DIRS],
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    staged = [f for f in r.stdout.splitlines() if f]
+    if staged:
+        subprocess.run(["git", "reset", "-q", "--", *staged],
+                       cwd=str(repo), capture_output=True, text=True)
+    return len(staged)
