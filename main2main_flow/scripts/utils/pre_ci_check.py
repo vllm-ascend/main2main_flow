@@ -825,9 +825,13 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
             # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
             # polluting test_linear.py / test_gdn_layerwise_kv.py in the
             # same process (verified on A2, run 2026-08-12).
+            # test_gdn_layerwise_kv.py itself fails only inside the batch
+            # (qwen_gdn_attention_core CPU-backend NotImplementedError;
+            # passes standalone) — isolate it too so the batch stays clean.
             isolated = [f for f in cpu_files
                         if f.endswith(("test_batch_invariant.py",
-                                       "test_vocab_parallel_embedding.py"))]
+                                       "test_vocab_parallel_embedding.py",
+                                       "test_gdn_layerwise_kv.py"))]
             batch = [f for f in cpu_files if f not in isolated]
 
             exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
