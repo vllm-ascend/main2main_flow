@@ -821,8 +821,13 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
             # installs a global torch.library.Library monkeypatch that breaks
             # test_gdn_layerwise_kv.py when run in the same process (the
             # original per-file isolation existed for exactly this pair).
+            # test_vocab_parallel_embedding.py assigns module-level
+            # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
+            # polluting test_linear.py / test_gdn_layerwise_kv.py in the
+            # same process (verified on A2, run 2026-08-12).
             isolated = [f for f in cpu_files
-                        if f.endswith("test_batch_invariant.py")]
+                        if f.endswith(("test_batch_invariant.py",
+                                       "test_vocab_parallel_embedding.py"))]
             batch = [f for f in cpu_files if f not in isolated]
 
             exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
@@ -841,9 +846,15 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
                 # the batch is one pytest process for all files (run
                 # 31563761175: sfa_pd_rd2h collection error hid 8 real
                 # regressions that PR CI then exposed).
+                # -p pytest_ascend_examples: PYTHONPATH=<ascend>:<vllm>
+                # makes vllm's regular examples/ package shadow ascend's
+                # namespace examples/ — pre-register the ascend dir so the
+                # batch matches real CI (vllm installed, no examples/ on
+                # sys.path).
                 rr = subprocess.run(
                     [*pytest_cmd, "-q", "--tb=short", "--no-header",
                      "--continue-on-collection-errors",
+                     "-p", "main2main_flow.scripts.utils.pytest_ascend_examples",
                      *batch, "-k", exclude_expr],
                     cwd=str(repo), capture_output=True, text=True,
                     env=env, timeout=1200,
