@@ -909,7 +909,13 @@ def _check_ut(repo: Path, vllm_path: str | Path | None = None,
             # version (per-file startup dominates; the batch itself is
             # ~1-2 min).  Heavy precision files are excluded — CI gives them
             # their own partition budget (test_attention_v1_precision ~500s).
-            a2_files = _collect_a2_ut_files(repo)
+            # MAIN2MAIN_UT_SKIP_A2=1 skips them (CPU-only verification runs).
+            skip_a2 = os.environ.get("MAIN2MAIN_UT_SKIP_A2", "0").lower() in (
+                "1", "true", "yes", "on")
+            a2_files = [] if skip_a2 else _collect_a2_ut_files(repo)
+            if skip_a2:
+                ts_print("[pre_ci] ut: SKIPPED a2 batch "
+                         "(MAIN2MAIN_UT_SKIP_A2=1)")
             if a2_files:
                 a2_env = env.copy()
                 a2_env["PATH"] = a2_env["PATH"].replace(f"{fake_bin_dir}:", "")
