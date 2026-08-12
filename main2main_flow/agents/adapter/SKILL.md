@@ -91,6 +91,35 @@ these rules to stay on the critical path:
 - Never read raw CI logs — use inlined error content above
 - Do NOT treat ModuleNotFoundError or missing NPU/GPU from local commands as adaptation failures
 
+## UT adaptation rules (write tests that survive the shared-process batch)
+
+Adapting an upstream contract change usually requires rewriting `tests/ut`
+files too — and the rewritten tests are where adaptations most often break
+CI. Apply these rules while writing them; each has a recognition signal and
+a fix pattern (generic versions of the failures in run 31581543851, PR
+#14107).
+
+1. **Bare-object tests** — signal: `AttributeError: '<X> object has no
+   attribute '<Y>'` where X is a `__new__`-constructed object (tests use
+   `__new__` to skip `__init__`). Fix: add the missing attribute to the
+   test object; for OPTIONAL attributes, prefer defensive access in the
+   source (`getattr(obj, name, default)`) — it stays compatible with
+   upstream, which always sets the attribute in `__init__`.
+2. **Mock-contract drift** — signal: `TypeError: unexpected keyword
+   argument`, or a mock result wrapping an AttributeError (e.g. a Future).
+   Fix: sync the mock with the upstream definition by GREPPING the
+   upstream signature/attribute — do NOT run the test to discover it.
+3. **Version-guarded symbol resolution** — signal: a stub/empty
+   implementation surfaces as `KeyError`/`AttributeError` at the first
+   real use. Under `vllm_version_is` a name has one definition per branch;
+   `next()`-style lookups (AST walks, iterators) can grab the stub. Fix:
+   grep ALL `def <name>(` and resolve the ACTUAL implementation (often
+   the private method the stub delegates to).
+4. **Adapt source and tests together** — when the adaptation changes a
+   contract, update the test mocks in the same pass. Verify statically
+   (grep the attribute-access chain of the bare object) instead of
+   running tests — running is banned and each run costs a full e2e round.
+
 ## Cumulative Step Model
 
 The vllm-ascend working tree already contains all successful adaptations from previous steps:
