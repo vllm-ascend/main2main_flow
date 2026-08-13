@@ -567,6 +567,34 @@ def _classify(exit_code: int, summary: dict | None, error: str | None) -> str:
     return "failed"
 
 
+# Model missing/download failures (offline cache miss, network errors) are
+# environment issues, not adaptation bugs — they must not block the step
+# (runs 31620090267/31661253547: hunyuan-vl missing from the runner cache
+# dragged step-1 into repeated e2e failure chains; the adapter correctly
+# found no source change).
+_MODEL_DOWNLOAD_FAILURE_RE = re.compile(
+    r"Cannot find the requested files in the cached path"
+    r"|local_files_only"
+    r"|failed to download|download failed|Download failed"
+    r"|snapshot_download.*(?:error|failed|Cannot find|connect)"
+    r"|offline mode.*(?:model|download)"
+    r"|outgoing traffic has been disabled"
+    r"|connection (?:error|failed).*(?:modelscope|huggingface)"
+    r"|(?:modelscope|huggingface).*connection (?:error|failed)",
+    re.IGNORECASE)
+
+
+def _is_model_download_failure(log_path: Path) -> bool:
+    """True if the test log shows a model-missing/download failure."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        return bool(_MODEL_DOWNLOAD_FAILURE_RE.search(text))
+    except OSError:
+        return False
+
+
 def _select_tests_by_files(ascend_path: Path, changed_files: list[str]) -> list[str] | None:
     """Call vllm-ascend's select_tests.py to resolve changed files → test files.
 
@@ -664,9 +692,14 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
 
     sr = _run_summary(ci_log_summary, log_path, summary_path, step_id, round_number)
     s, se = sr["summary"], sr["summary_error"]
+    ci_result = _classify(exit_code, s, se)
+    if ci_result == "failed" and _is_model_download_failure(log_path):
+        ts_print(f"  [env-flake] {test}: model download/cache failure "
+                 f"classified as environment, not blocking")
+        ci_result = "env_flake_pass"
     return {"test": test, "cards_required": cards,
             "run_suite_exit_code": exit_code,
-            "ci_result": _classify(exit_code, s, se),
+            "ci_result": ci_result,
             "summary_error": se,
             "code_bugs_count": len((s or {}).get("code_bugs", [])),
             "env_flakes_count": len((s or {}).get("env_flakes", [])),

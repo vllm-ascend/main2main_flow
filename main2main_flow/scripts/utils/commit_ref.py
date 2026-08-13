@@ -6,7 +6,7 @@ step. This script makes that update deterministic and avoids broad shell
 commands such as `grep | xargs sed`.
 
 Usage:
-    python3 update_commit_reference.py \\
+    python3 commit_ref.py \\
       --ascend-path <path> \\
       --old-commit <40-char-sha> \\
       --new-commit <40-char-sha>

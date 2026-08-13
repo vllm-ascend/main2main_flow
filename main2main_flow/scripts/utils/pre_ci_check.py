@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import run_format_sh, run_git, ts_print
+from main2main_flow.scripts.utils.ut_check import check_ut as _check_ut  # noqa: E402
 
 _TEMP_PATTERNS = [
     ".log",
@@ -47,7 +48,6 @@ _VERSION_IS_RE = re.compile(r'vllm_version_is\(\s*["\']([^"\']+)["\']\s*\)')
 # Re-syncing the copy to the tag would revert upstream main's scheduler code,
 # which is out of scope for main2main.  Excluded via -k (a no-op if upstream
 # later renames/removes the test).
-_BALANCE_TAG_BODY_TEST = "test_schedule_body_matches_pinned_release_tag"
 
 
 def _get_added_lines(repo: Path, base_ref: str | None = None) -> list[dict[str, str]]:
@@ -292,6 +292,25 @@ def _is_real_error(line: str) -> bool:
     return True
 
 
+def _changed_test_py_files(repo: Path) -> list[str]:
+    """tests/examples .py files changed since the adaptation base.
+
+    Uses ``upstream/main`` when available (covers committed step changes +
+    uncommitted gate-fix edits), falls back to ``HEAD`` (uncommitted only).
+    """
+    base = "upstream/main"
+    r = subprocess.run(
+        ["git", "rev-parse", "--verify", base],
+        cwd=str(repo), capture_output=True, text=True)
+    if r.returncode != 0:
+        base = "HEAD"
+    diff = subprocess.run(
+        ["git", "diff", base, "--name-only", "--", "tests/", "examples/"],
+        cwd=str(repo), capture_output=True, text=True)
+    return [f for f in diff.stdout.splitlines()
+            if f.endswith(".py") and f.startswith(("tests/", "examples/"))]
+
+
 def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
     """Run mypy with the same core command and environment as vllm-ascend's CI.
 
@@ -457,6 +476,18 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
         _shutil.rmtree(cache, ignore_errors=True)
         ts_print("\n[pre_ci] mypy: cleared .mypy_cache")
 
+    # Adapter-edited tests/examples files are type-checked individually:
+    # full-repo tests/ mypy fails on mock-pattern noise in THIS runner's
+    # environment (~336 errors on the cann runner; CI's lint image is
+    # clean), but checking only vllm_ascend let adapter-edited
+    # tests/e2e/conftest.py ship a type error that PR CI mypy caught
+    # (PR #14135).  Diff against the adaptation base so both committed
+    # step changes and uncommitted gate-fix edits are covered.
+    changed_extra = _changed_test_py_files(repo)
+    if changed_extra:
+        ts_print(f"[pre_ci] mypy: also checking {len(changed_extra)} "
+                 f"changed tests/examples file(s)")
+
     try:
         all_violations: list[str] = []
         all_output: list[str] = []
@@ -467,7 +498,7 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
                 [*mypy_cmd, "--follow-imports", "skip", "--check-untyped-defs",
                  "--python-version", py_ver,
                  "--exclude", "_cann_ops_custom/",
-                 "vllm_ascend"],
+                 "vllm_ascend", *changed_extra],
                 cwd=str(repo), capture_output=True, text=True, env=env,
             )
             output = r.stdout + "\n" + r.stderr
@@ -511,507 +542,6 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
 # CPU UT routing: mirror select_tests._scan_ut_test_dir(cpu_only=True).
 # Files under tests/ut/<module>/a2/ or tests/ut/<module>/a3_2/ route to NPU
 # runners and are NOT part of the CPU-UT batch.
-_CPU_UT_A2_RE = re.compile(r"tests/ut/.+/a2(/|$)")
-_CPU_UT_A3_2_RE = re.compile(r"tests/ut/.+/a3_2(/|$)")
-
-
-def _is_npu_convention_ut_path(rel_path: str) -> bool:
-    """Mirror select_tests._route_ut_dir — True if path routes to NPU runner."""
-    p = rel_path.replace("\\", "/")
-    return bool(_CPU_UT_A2_RE.search(p) or _CPU_UT_A3_2_RE.search(p))
-
-
-# a2-routed UTs that are too heavy for the batch (verified on CI:
-# test_attention_v1_precision 500s, test_mla_precision 125s, and
-# test_sfa_v1_precision hangs).  They get their own partition time on CI;
-# the flow excludes them.
-_A2_UT_EXCLUDE = ("test_attention_v1_precision.py", "test_mla_precision.py",
-                  "test_sfa_v1_precision.py")
-
-# a2-routed UTs that break at COLLECTION when imported after other files in
-# the shared pytest process (verified: test_find_loaded_library.py errors at
-# collection in the batch but passes standalone).  Run in their own process.
-_A2_UT_ISOLATED = ("test_find_loaded_library.py",)
-
-
-def _collect_a2_ut_files(repo: Path) -> list[str]:
-    """Return a2-routed tests/ut paths (rel to repo), for the E2E batch.
-
-    a2-routed UTs (tests/ut/**/a2/) test REAL NPU kernels — the CPU-UT gate
-    can't cover them (it mocks torch_npu), so they ride along with the E2E
-    runs on the real NPU.  Routing mirrors CI's runner_mapping
-    (tests/ut/.+/a2), excluding the heavy precision files (see
-    _A2_UT_EXCLUDE).  Reads test_config.yaml like _collect_cpu_ut_files.
-    """
-    a2_patterns: list[re.Pattern] = []
-    config_path = repo / ".github/workflows/scripts/test_config.yaml"
-    if config_path.exists():
-        try:
-            import yaml
-            docs = list(yaml.safe_load_all(
-                config_path.read_text(encoding="utf-8")))
-            meta = docs[1] if len(docs) >= 2 and docs[1] else {}
-            for pattern_str in ((meta or {}).get("runner_mapping", {}) or {}):
-                if re.fullmatch(r"tests/ut/.+/a2", pattern_str):
-                    a2_patterns.append(re.compile(pattern_str))
-        except Exception as e:
-            ts_print(f"[pre_ci] ut: failed to parse test_config.yaml ({e}), "
-                     "using convention regex for a2 UTs")
-            a2_patterns = []
-    if not a2_patterns:
-        a2_patterns = [re.compile(r"tests/ut/.+/a2(/|$)")]
-
-    ut_dir = repo / "tests" / "ut"
-    if not ut_dir.exists():
-        return []
-    files: list[str] = []
-    for root, dirs, fnames in os.walk(ut_dir):
-        if "__pycache__" in dirs:
-            dirs.remove("__pycache__")
-        for f in sorted(fnames):
-            if f.startswith("test_") and f.endswith(".py"):
-                rel = os.path.relpath(os.path.join(root, f), str(repo))
-                if not any(p.search(rel) for p in a2_patterns):
-                    continue
-                if f in _A2_UT_EXCLUDE:
-                    continue
-                files.append(rel)
-    return files
-
-
-def _collect_cpu_ut_files(repo: Path) -> list[str]:
-    """Return CPU-routed tests/ut paths (rel to repo).
-
-    Routes from vllm-ascend's OWN ``test_config.yaml`` — the same
-    ``runner_mapping`` + ``skip_tests`` CI's select_tests.py reads — so the
-    set tracks CI automatically when routing changes (new NPU directories,
-    new skip entries).  Reading the config is read-only; vllm-ascend is
-    never modified.  Falls back to the convention regexes when the config
-    is missing or unparseable (old checkouts).
-    """
-    skip_tests: set[str] = set()
-    npu_patterns: list[re.Pattern] = []
-    config_path = repo / ".github/workflows/scripts/test_config.yaml"
-    if config_path.exists():
-        try:
-            import yaml
-            docs = list(yaml.safe_load_all(
-                config_path.read_text(encoding="utf-8")))
-            modules = docs[0] or []
-            meta = docs[1] if len(docs) >= 2 and docs[1] else {}
-            for module in modules:
-                for s in module.get("skip_tests", []):
-                    skip_tests.add(str(s).rstrip("/"))
-            for pattern_str in ((meta or {}).get("runner_mapping", {}) or {}):
-                if pattern_str.startswith("tests/ut"):
-                    npu_patterns.append(re.compile(pattern_str))
-            if npu_patterns:
-                ts_print(f"[pre_ci] ut: routing from test_config.yaml "
-                         f"({len(npu_patterns)} NPU pattern(s), "
-                         f"{len(skip_tests)} skip entry(s))")
-        except Exception as e:
-            ts_print(f"[pre_ci] ut: failed to parse test_config.yaml ({e}), "
-                     "falling back to convention regexes")
-            npu_patterns = []
-
-    ut_dir = repo / "tests" / "ut"
-    if not ut_dir.exists():
-        return []
-    files: list[str] = []
-    for root, dirs, fnames in os.walk(ut_dir):
-        if "__pycache__" in dirs:
-            dirs.remove("__pycache__")
-        for f in sorted(fnames):
-            if f.startswith("test_") and f.endswith(".py"):
-                rel = os.path.relpath(os.path.join(root, f), str(repo))
-                if skip_tests and rel in skip_tests:
-                    continue
-                if npu_patterns:
-                    if any(p.search(rel) for p in npu_patterns):
-                        continue
-                elif _is_npu_convention_ut_path(rel):
-                    continue
-                files.append(rel)
-    return files
-
-
-def _check_ut(repo: Path, vllm_path: str | Path | None = None,
-              vllm_release_path: str | Path | None = None,
-              release_tag: str = "",
-              timeout_s: int = 1800) -> dict:
-    """Run the CPU-UT batch, aligned with CI's single-process execution.
-
-    Runs the same CPU-routed tests/ut/* files as CI's CPU runner
-    (linux-amd64-cpu-8-hk), but on whatever machine main2main runs on —
-    including the A2 NPU runner.  Mirrors vllm-ascend's
-    ``run_selected_tests.sh`` cpu-ut batch: ALL files in ONE pytest
-    process (CI runs 2044 tests in ~44s; per-file subprocess isolation
-    cost ~5 min per version).  The key mechanism:
-
-    **Fake npu-smi on the PATH**: vllm-ascend's tests/ut/conftest.py
-    checks ``npu-smi info`` to decide whether to mock torch_npu.
-    On the A2 runner npu-smi succeeds, so conftest would NOT mock and
-    CPU UT cases would hit real NPU ops (e.g. ``swiglustep: N=4 must
-    be multiple of 8``).  We prepend a temp dir with a fake
-    ``npu-smi`` script (exit 1) to the child's PATH — conftest then
-    takes the mock path, exactly like CI's CPU runner.
-
-    Runs the batch against BOTH vllm versions: the target main checkout
-    (``vllm_path``) AND the pinned release (``vllm_release_path``, e.g.
-    v0.26.0).  vllm-ascend carries ``vllm_version_is("<release_tag>")``
-    guards — a fix that passes on main can break the release branch, so
-    both must pass.  Violations are aggregated with the version labeled.
-
-    Release-batch specifics:
-    - ``VLLM_VERSION`` is set from the release tag: a raw git worktree has
-      no build-generated ``vllm/_version.py``, so ``vllm.__version__`` is
-      "dev" and every module-level ``vllm_version_is()`` guard raises at
-      collection (all 166 files failed before this fix).
-    - ``test_vllm_version_is`` is excluded on the release batch only — it
-      unit-tests the env-var fallback with a mocked env, which the
-      real ``VLLM_VERSION`` override conflicts with.
-    - ``test_schedule_body_matches_pinned_release_tag`` is excluded on BOTH
-      batches — see ``_BALANCE_TAG_BODY_TEST``.
-
-    Env mirrors CI: venv with --system-site-packages + numpy==1.26.4
-    (from triton-ascend metadata) + PYTHONPATH=ascend:vllm.  torch_npu
-    is mocked by conftest, so the venv python's C-extension issue that
-    broke A2-NPU-UT in PR #13657 does not apply here.
-
-    Returns dict with ``violations`` (failing test node IDs) and
-    ``detail``.  Empty violations + non-skipped → pass.
-    """
-    import tempfile
-    import importlib.metadata as _md
-
-    cpu_files = _collect_cpu_ut_files(repo)
-    if not cpu_files:
-        ts_print("\n[pre_ci] ut: SKIPPED — tests/ut not found or no CPU tests")
-        return {"violations": [], "detail": "tests/ut not found", "skipped": True}
-
-    pytest_bin = shutil.which("pytest")
-    if not pytest_bin:
-        ts_print("\n[pre_ci] ut: SKIPPED — pytest not installed")
-        return {"violations": [], "detail": "pytest not installed", "skipped": True}
-
-    ts_print(f"\n[pre_ci] ut: collected {len(cpu_files)} CPU test files "
-             f"(per-file isolation, NPU-convention a2/ and a3_2/ excluded)")
-
-    # Read numpy constraint from triton-ascend metadata (mirror _check_mypy).
-    target_numpy_spec = ""
-    try:
-        from packaging.requirements import Requirement
-        reqs = _md.requires("triton-ascend") or []
-        for req in reqs:
-            if "extra" in req.lower():
-                continue
-            try:
-                r = Requirement(req)
-            except Exception:
-                continue
-            if r.name.lower() == "numpy":
-                target_numpy_spec = ",".join(
-                    f"{s.operator}{s.version}" for s in r.specifier)
-                break
-    except Exception as e:
-        ts_print(f"[pre_ci] ut: failed to read triton-ascend numpy constraint ({e})")
-
-    # Create venv with --system-site-packages, install numpy constraint.
-    venv_dir: Path | None = None
-    pytest_cmd = [pytest_bin]
-    if (vllm_path or vllm_release_path) and target_numpy_spec:
-        venv_dir = Path(tempfile.mkdtemp(prefix="ut_venv_"))
-        ts_print(f"[pre_ci] ut: creating venv at {venv_dir} "
-                 f"(numpy{target_numpy_spec} from triton-ascend)")
-        try:
-            r = subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_dir), "--system-site-packages"],
-                capture_output=True, text=True, timeout=180,
-            )
-        except subprocess.TimeoutExpired:
-            ts_print("[pre_ci] ut: WARNING venv creation TIMED OUT (180s) — "
-                     "falling back to system pytest")
-            r = None  # type: ignore[assignment]
-        if r is not None and r.returncode == 0:
-            venv_python = venv_dir / "bin" / "python"
-            try:
-                r2 = subprocess.run(
-                    [str(venv_python), "-m", "pip", "install",
-                     f"numpy{target_numpy_spec}"],
-                    capture_output=True, text=True, timeout=300,
-                )
-            except subprocess.TimeoutExpired:
-                ts_print("[pre_ci] ut: WARNING numpy install TIMED OUT — "
-                         "falling back to system pytest")
-                r2 = None  # type: ignore[assignment]
-            if r2 is not None and r2.returncode != 0:
-                ts_print(f"[pre_ci] ut: numpy install FAILED "
-                         f"({r2.stderr.strip()[:300]}) — falling back to system pytest")
-            elif r2 is not None:
-                pytest_cmd = [str(venv_python), "-m", "pytest"]
-        elif r is not None:
-            ts_print(f"[pre_ci] ut: venv creation failed ({r.stderr.strip()[:200]}) — "
-                     "using system pytest")
-
-    # Fake npu-smi: prepend a temp dir with an `npu-smi` that exits 1, so
-    # tests/ut/conftest.py takes the mock path (as on CI's CPU runner).
-    fake_bin_dir = Path(tempfile.mkdtemp(prefix="ut_fake_bin_"))
-    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
-    failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
-
-    try:
-        fake_npu_smi = fake_bin_dir / "npu-smi"
-        fake_npu_smi.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        fake_npu_smi.chmod(0o755)
-
-        # Versions to test: main checkout + pinned release (if available).
-        # Third element: VLLM_VERSION to force for the batch.  A release
-        # worktree is a raw git checkout without the build-generated
-        # vllm/_version.py, so vllm.__version__ falls back to "dev" — an
-        # invalid packaging version.  Every module-level vllm_version_is()
-        # guard in vllm-ascend (e.g. npu_communicator.py at import) then
-        # raises at collection and ALL test files fail.  vllm_version_is()
-        # honors the VLLM_VERSION env var (x.y.z), so pin it to the release.
-        versions: list[tuple[str, Path | None, str]] = [
-            ("main", Path(vllm_path) if vllm_path else None, ""),
-        ]
-        if vllm_release_path:
-            rel_tag = release_tag
-            if not rel_tag:
-                # Fallback: read the pin from vllm-ascend's tracking file (the
-                # same source initialize() used to create the worktree).
-                pin_file = repo / ".github" / "vllm-release-tag.commit"
-                if pin_file.exists():
-                    rel_tag = pin_file.read_text(encoding="utf-8").strip()
-            versions.append((rel_tag or "release",
-                             Path(vllm_release_path),
-                             rel_tag.lstrip("v")))
-
-        all_violations: list[str] = []
-        details: list[str] = []
-        all_files_clean = True
-        for label, vpath, vllm_version in versions:
-            if vpath is None:
-                ts_print(f"\n[pre_ci] ut: {label}: no vllm path, skipped")
-                continue
-            env = os.environ.copy()
-            ascend_abs = str(repo.resolve())
-            vllm_abs = str(vpath.resolve())
-            existing = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = (
-                f"{ascend_abs}:{vllm_abs}:{existing}" if existing
-                else f"{ascend_abs}:{vllm_abs}")
-            if vllm_version:
-                env["VLLM_VERSION"] = vllm_version
-            env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
-            env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-            env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
-
-            ts_print(f"\n[pre_ci] ut: === batch [{label}] "
-                     f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
-
-            # CI-aligned: run all files in ONE pytest process, exactly like
-            # vllm-ascend's run_selected_tests.sh cpu-ut batch (2044 tests in
-            # ~44s on CI).  The previous per-file subprocess isolation cost
-            # ~5 min per version (python+torch import per file); a single
-            # process shares those imports and runs in ~2 min.
-            #
-            # Exception: files known to pollute the shared process get their
-            # own subprocess.  Verified on the A2 env: test_batch_invariant.py
-            # installs a global torch.library.Library monkeypatch that breaks
-            # test_gdn_layerwise_kv.py when run in the same process (the
-            # original per-file isolation existed for exactly this pair).
-            # test_vocab_parallel_embedding.py assigns module-level
-            # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
-            # polluting test_linear.py / test_gdn_layerwise_kv.py in the
-            # same process (verified on A2, run 2026-08-12).
-            # test_gdn_layerwise_kv.py itself fails only inside the batch
-            # (qwen_gdn_attention_core CPU-backend NotImplementedError;
-            # passes standalone) — isolate it too so the batch stays clean.
-            isolated = [f for f in cpu_files
-                        if f.endswith(("test_batch_invariant.py",
-                                       "test_vocab_parallel_embedding.py",
-                                       "test_gdn_layerwise_kv.py"))]
-            batch = [f for f in cpu_files if f not in isolated]
-
-            exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
-            if vllm_version:
-                # test_vllm_version_is unit-tests the VLLM_VERSION env
-                # fallback with a mocked env; the release batch sets
-                # VLLM_VERSION for real, so its __version__-fallback
-                # assertions can't hold there.  Main batch runs it as-is.
-                exclude_expr += " and not test_vllm_version_is"
-
-            runs: list[tuple[str, subprocess.CompletedProcess]] = []
-            try:
-                # --continue-on-collection-errors: a single file that fails
-                # to import (e.g. an env-specific ModuleNotFoundError) must
-                # NOT abort the whole batch and mask every other test —
-                # the batch is one pytest process for all files (run
-                # 31563761175: sfa_pd_rd2h collection error hid 8 real
-                # regressions that PR CI then exposed).
-                # -p pytest_ascend_examples: PYTHONPATH=<ascend>:<vllm>
-                # makes vllm's regular examples/ package shadow ascend's
-                # namespace examples/ — pre-register the ascend dir so the
-                # batch matches real CI (vllm installed, no examples/ on
-                # sys.path).
-                rr = subprocess.run(
-                    [*pytest_cmd, "-q", "--tb=short", "--no-header",
-                     "--continue-on-collection-errors",
-                     "-p", "main2main_flow.scripts.utils.pytest_ascend_examples",
-                     *batch, "-k", exclude_expr],
-                    cwd=str(repo), capture_output=True, text=True,
-                    env=env, timeout=1200,
-                )
-                runs.append(("batch", rr))
-            except subprocess.TimeoutExpired:
-                ts_print(f"[pre_ci] ut: [{label}] batch TIMEOUT(1200s)")
-                all_files_clean = False
-                details.append(f"{label}/batch: TIMEOUT(1200s)")
-            for f in isolated:
-                try:
-                    rr = subprocess.run(
-                        [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
-                        cwd=str(repo), capture_output=True, text=True,
-                        env=env, timeout=300,
-                    )
-                    runs.append((f, rr))
-                except subprocess.TimeoutExpired:
-                    ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
-                    all_files_clean = False
-
-            for name, rr in runs:
-                clean = ansi_re.sub("", rr.stdout + rr.stderr)
-                seen: set[str] = set()
-                for line in clean.splitlines():
-                    m = failed_re.search(line.strip())
-                    if m and m.group(2) not in seen:
-                        seen.add(m.group(2))
-                        all_violations.append(f"[{label}] {line.strip()}")
-                if rr.returncode != 0:
-                    all_files_clean = False
-                    if not seen:
-                        # No parseable failures — dump output tail.
-                        all_violations.append(
-                            f"[{label}] {name}: exit={rr.returncode} — "
-                            f"{clean[-500:]}")
-                summary_m = re.search(
-                    r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
-                summary = (summary_m.group(1) if summary_m
-                           else f"exit={rr.returncode}")
-                details.append(f"{label}/{name}: {summary}")
-                ts_print(f"[pre_ci] ut: [{label}/{name}] {summary}")
-
-            # a2-routed UTs (real NPU kernels, tests/ut/**/a2/): the CPU batch
-            # above mocks torch_npu via the fake npu-smi, so these run
-            # separately on the REAL device — the main2main runner has NPU and
-            # CI routes them to a2 runners too.  One pytest process per
-            # version (per-file startup dominates; the batch itself is
-            # ~1-2 min).  Heavy precision files are excluded — CI gives them
-            # their own partition budget (test_attention_v1_precision ~500s).
-            # MAIN2MAIN_UT_SKIP_A2=1 skips them (CPU-only verification runs).
-            skip_a2 = os.environ.get("MAIN2MAIN_UT_SKIP_A2", "0").lower() in (
-                "1", "true", "yes", "on")
-            a2_files = [] if skip_a2 else _collect_a2_ut_files(repo)
-            if skip_a2:
-                ts_print("[pre_ci] ut: SKIPPED a2 batch "
-                         "(MAIN2MAIN_UT_SKIP_A2=1)")
-            if a2_files:
-                a2_env = env.copy()
-                a2_env["PATH"] = a2_env["PATH"].replace(f"{fake_bin_dir}:", "")
-                # Match vllm-ascend CI's "with device" jobs exactly:
-                #  - NO TORCH_DEVICE_BACKEND_AUTOLOAD=0 (that is only set on
-                #    CI's CPU/without-device step).  torch_npu must load via
-                #    autoload — that path registers the inductor npu backend;
-                #    with AUTOLOAD=0 the compile path fails with
-                #    "Device npu not supported".
-                #  - CI container env vars (container-level in
-                #    _selected_tests.yaml).
-                a2_env.pop("TORCH_DEVICE_BACKEND_AUTOLOAD", None)
-                a2_env.setdefault("VLLM_LOGGING_LEVEL", "ERROR")
-                a2_env.setdefault("VLLM_USE_MODELSCOPE", "True")
-                a2_env.setdefault("HF_HUB_OFFLINE", "1")
-                a2_env.setdefault("MAX_JOBS", "4")
-                isolated_a2 = [f for f in a2_files
-                               if f.rsplit("/", 1)[-1] in _A2_UT_ISOLATED]
-                batch_a2 = [f for f in a2_files if f not in isolated_a2]
-                ts_print(f"\n[pre_ci] ut: === a2 batch [{label}] "
-                         f"({len(batch_a2)} files + "
-                         f"{len(isolated_a2)} isolated, real NPU) ===")
-
-                a2_runs: list[tuple[str, subprocess.CompletedProcess]] = []
-                # Use the SYSTEM python (like the e2e runs), not the numpy
-                # venv: the a2 UTs run on the real NPU and need the CANN
-                # bindings (acl etc.) that the venv python can't see.
-                a2_pytest = [sys.executable, "-m", "pytest"]
-                try:
-                    rr = subprocess.run(
-                        [*a2_pytest, "-q", "--tb=short", "--no-header",
-                         "--continue-on-collection-errors", *batch_a2],
-                        cwd=str(repo), capture_output=True, text=True,
-                        env=a2_env, timeout=1200,
-                    )
-                    a2_runs.append(("a2", rr))
-                except subprocess.TimeoutExpired:
-                    ts_print(f"[pre_ci] ut: [{label}/a2] TIMEOUT(1200s)")
-                    all_files_clean = False
-                    details.append(f"{label}/a2: TIMEOUT(1200s)")
-                for f in isolated_a2:
-                    try:
-                        rr = subprocess.run(
-                            [*a2_pytest, "-q", "--tb=short", "--no-header", f],
-                            cwd=str(repo), capture_output=True, text=True,
-                            env=a2_env, timeout=300,
-                        )
-                        a2_runs.append((f, rr))
-                    except subprocess.TimeoutExpired:
-                        ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
-                        all_files_clean = False
-
-                for name, rr in a2_runs:
-                    clean = ansi_re.sub("", rr.stdout + rr.stderr)
-                    a2_seen: set[str] = set()
-                    for line in clean.splitlines():
-                        m = failed_re.search(line.strip())
-                        if m and m.group(2) not in a2_seen:
-                            a2_seen.add(m.group(2))
-                            all_violations.append(f"[{label}/a2] {line.strip()}")
-                    if rr.returncode != 0:
-                        all_files_clean = False
-                        if not a2_seen:
-                            all_violations.append(
-                                f"[{label}/a2] {name}: exit={rr.returncode} — "
-                                f"{clean[-500:]}")
-                    summary_m = re.search(
-                        r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
-                    summary = (summary_m.group(1) if summary_m
-                               else f"exit={rr.returncode}")
-                    details.append(f"{label}/a2/{name}: {summary}")
-                    ts_print(f"[pre_ci] ut: [{label}/a2/{name}] {summary}")
-
-        if all_files_clean:
-            ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean "
-                     f"on all versions")
-            return {"violations": [],
-                    "detail": f"UT clean ({len(cpu_files)} files × "
-                              f"{len(versions)} versions, single-process "
-                              f"batch)"}
-        ts_print(f"\n[pre_ci] ut: {len(all_violations)} failure(s):")
-        for v in all_violations[:20]:
-            ts_print(f"  {v}")
-        if len(all_violations) > 20:
-            ts_print(f"  ... and {len(all_violations) - 20} more")
-        return {"violations": all_violations,
-                "detail": f"{len(all_violations)} UT failure(s): "
-                          f"{'; '.join(details)}"}
-    finally:
-        if venv_dir and venv_dir.exists():
-            shutil.rmtree(venv_dir, ignore_errors=True)
-        if fake_bin_dir.exists():
-            shutil.rmtree(fake_bin_dir, ignore_errors=True)
-            ts_print("[pre_ci] ut: removed fake npu-smi dir")
-
-
 def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
     """Verify newly-added ``from vllm.X`` imports.
 

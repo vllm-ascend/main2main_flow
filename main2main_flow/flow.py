@@ -19,7 +19,7 @@ from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
 from main2main_flow.scripts.utils.run_tests import run_tests
-from main2main_flow.scripts.utils.update_commit_reference import run_update
+from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
 from main2main_flow.scripts.utils.utils import (
     UpgradeCompleted, UpgradeFailed,
