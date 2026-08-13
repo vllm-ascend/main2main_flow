@@ -838,7 +838,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         gate_dir.mkdir(parents=True, exist_ok=True)
 
         error_logs: list[str] = []
-        for attempt in range(1, 4):
+        # 4 gate runs: attempts 1-3 each feed one adapter fix round; the
+        # 4th run VERIFIES the last fix (a fix that never gets re-checked
+        # is indistinguishable from failure — run 31691299310's attempt-3
+        # fix was correct and PR CI passed, but the gate had already
+        # exhausted).
+        for attempt in range(1, 5):
             passed, new_error_logs = run_final_quality_gate(
                 ascend_path=ascend_path,
                 vllm_path=vllm_path,
@@ -890,6 +895,9 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 return True
 
             error_logs = new_error_logs
+            if attempt == 4:
+                # Verification run for the last fix — no further fix round.
+                break
             ts_print(f"\n[final_quality_gate] fix attempt {attempt}/3: FAILED "
                      f"-> adapter-fix")
 
