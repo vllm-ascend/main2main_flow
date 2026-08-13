@@ -99,6 +99,42 @@ def _collect_cpu_ut_files(repo: Path) -> list[str]:
     return files
 
 
+_EXCERPT_SIG_RE = re.compile(
+    r"Traceback \(most recent call last\)|Traceback:"
+    r"|\b(?:ValueError|RuntimeError|TypeError|KeyError|AttributeError|"
+    r"AssertionError|ImportError|IndexError|OverflowError|OSError|"
+    r"NameError|NotImplementedError|EngineDeadError)\b")
+
+
+def _failure_excerpt(clean: str, failure_line: str, max_chars: int = 900) -> str:
+    """Extract a traceback window around a failing test's error message.
+
+    The gate's violations previously carried only the one-line pytest
+    summary ("TypeError: 'NoneType' object is not iterable") — the adapter
+    had to guess where and why.  Locate the error message in the full
+    pytest output and return the surrounding window (the code line that
+    raised, plus the tail of the call stack).
+    """
+    err = failure_line.split(" - ", 1)[-1] if " - " in failure_line else failure_line
+    needle = err.strip()[:80]
+    idx = clean.find(needle)
+    if idx < 0:
+        m = _EXCERPT_SIG_RE.search(clean)
+        if not m:
+            return ""
+        idx = m.start()
+    start = max(0, idx - 200)
+    end = min(len(clean), idx + max_chars)
+    excerpt = clean[start:end].strip()
+    # 截断到下一个测试标题/分隔（pytest 的 ____ name ____ 或 ==== 段）。
+    for marker in ("\n____", "\n===", "\n---------"):
+        cut = excerpt.find(marker, 1)
+        if cut > 0:
+            excerpt = excerpt[:cut]
+            break
+    return excerpt or ""
+
+
 def check_ut(repo: Path, vllm_path: str | Path | None = None,
              vllm_release_path: str | Path | None = None,
              release_tag: str = "",
@@ -328,7 +364,11 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                     m = failed_re.search(line.strip())
                     if m and m.group(2) not in seen:
                         seen.add(m.group(2))
-                        all_violations.append(f"[{label}] {line.strip()}")
+                        v = f"[{label}] {line.strip()}"
+                        ex = _failure_excerpt(clean, line.strip())
+                        if ex:
+                            v += "\n" + ex
+                        all_violations.append(v)
                 if rr.returncode != 0:
                     all_files_clean = False
                     if not seen:
