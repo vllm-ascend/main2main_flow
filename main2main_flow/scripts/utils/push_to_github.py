@@ -418,9 +418,14 @@ def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
         return
     # Use REST API (not `gh pr edit` — that hits GraphQL which requires
     # read:org scope).  POST with a JSON array of label names.
+    # --input - is REQUIRED: without it `gh api` ignores stdin and sends a
+    # nil body → 422 "Invalid request" (PRs then miss the `ready` label and
+    # vllm-ascend's ci-gate fails with "Selected tests are required" —
+    # PR #14376).
     result = subprocess.run(
         ["gh", "api", "--method", "POST",
          "-H", "Accept: application/vnd.github+json",
+         "--input", "-",
          f"/repos/{github_repo}/issues/{pr_number}/labels"],
         input=json.dumps(labels),  # ["ready"]
         capture_output=True, text=True,
