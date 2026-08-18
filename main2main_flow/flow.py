@@ -1343,8 +1343,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             test_errors_detail = tests_dir / f"round-{self.state.retry_count}-test-errors.txt"
             detail_parts = []
             for test_name, tr in result.get("suite_results", {}).items():
-                if tr.get("ci_result") in ("passed", "env_flake_pass"):
+                if tr.get("ci_result") == "passed":
                     continue
+                # env_flake_pass tests are ALSO included: their logs often
+                # carry the real root cause that the classifier smoothed over
+                # (e.g. torch_npu npugraph FX compile crash "too many values
+                # to unpack (expected 20)" classified as Engine-core-init
+                # failure — run 31952700363).  Without the excerpt the adapter
+                # cannot tell a true env issue from a real bug and burns fix
+                # rounds guessing.
                 parts = [f"=== {test_name} ==="]
                 # Log content FIRST — the excerpt carries the actual failure.
                 # A hang after a crash buries the traceback under
