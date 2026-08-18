@@ -377,6 +377,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # lessons would be lost.
         persist_lessons(self.state.vllm_report_path)
         self._cleanup_release_worktree()
+        if self.state.current_step == 0:
+            # No step ever passed e2e: there is no successful adaptation to
+            # submit, so creating a PR would only ship a "failed" description
+            # and the last-attempted (broken) diff (PR #14376).  Skip the
+            # push entirely.
+            ts_print("[push] no steps completed, skipping PR creation")
+            return
         self.push_to_github()
 
     def initialize(self):
@@ -1609,15 +1616,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                             "new_commit": self.state.target_commit or ""}, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8"
             )
-            # Try to copy the last attempted step's patch so push_to_github
-            # can still create a PR with the best-effort diff.
-            if self.state.total_steps > 0:
-                last_attempted = self.state.steps[-1]
-                last_step_dir = WORKSPACE_DIR / STEPS_DIR / last_attempted["id"]
-                last_patch = last_step_dir / EACH_STEP_TARGET_PATCH_FILE
-                if last_patch.exists():
-                    shutil.copy2(last_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
-                    ts_print("[generate_final_post] Copied last attempted step's patch as final_target.patch")
+            # No PR is created for a zero-success run (flow.run skips the
+            # push) — a PR would carry only a "failed" description and the
+            # last-attempted (broken) diff.  Do NOT copy that patch into
+            # final_target.patch.
             return
 
         last_step = self.state.steps[self.state.current_step - 1]
