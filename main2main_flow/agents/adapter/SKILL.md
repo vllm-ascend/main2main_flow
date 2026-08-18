@@ -90,6 +90,7 @@ these rules to stay on the critical path:
 - **DO NOT run mypy, ruff, pre-commit, py_compile, or any linter/checker/compiler command.** Ever. During adaptation, only read code and edit files.
 - Never read raw CI logs — use inlined error content above
 - Do NOT treat ModuleNotFoundError or missing NPU/GPU from local commands as adaptation failures
+- **NEVER modify anything under tests/e2e/ — E2E test cases (assertions, golden values, parametrizations) are frozen.** Edits there are automatically reverted and the attempt is voided; adapt the `vllm_ascend/` source instead. (`tests/ut/` MAY be adapted per the UT rules below.)
 
 ## UT adaptation rules (write tests that survive the shared-process batch)
 

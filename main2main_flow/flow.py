@@ -200,6 +200,40 @@ def _has_source_changes(changed_files: list[str]) -> bool:
     return False
 
 
+def _revert_e2e_test_edits(ascend_path: str) -> list[str]:
+    """Revert any adapter edits under tests/e2e/ — E2E test cases are frozen.
+
+    Returns the reverted paths.  Tracked-file changes are checked out;
+    newly created files/dirs are removed.  Run 32101793062: the adapter
+    rewrote test_basic.py's dspark golden values to the measured failure
+    (relaxing the assertion); without this guard the "fix" would have
+    shipped in the adaptation PR.
+    """
+    e2e_dir = Path(ascend_path) / "tests" / "e2e"
+    if not e2e_dir.exists():
+        return []
+    r = subprocess.run(
+        ["git", "status", "--short", "--", "tests/e2e/"],
+        cwd=ascend_path, capture_output=True, text=True,
+    )
+    reverted: list[str] = []
+    for line in r.stdout.splitlines():
+        st, path = line[:2], line[3:].strip()
+        if not path or path.startswith('"'):
+            continue
+        full = Path(ascend_path) / path
+        if st == "??":
+            if full.is_dir():
+                shutil.rmtree(full)
+            elif full.is_file() or full.is_symlink():
+                full.unlink()
+        else:
+            subprocess.run(["git", "checkout", "--", path],
+                           cwd=ascend_path, capture_output=True, text=True)
+        reverted.append(path)
+    return reverted
+
+
 class Main2MainState(BaseModel):
     vllm_path: str = ""
     vllm_ascend_path: str = ""
@@ -1167,6 +1201,27 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             }, session_id=self.state.session_id)
             if adapt_result.session_id:
                 self.state.session_id = adapt_result.session_id
+
+            # E2E test cases are frozen: any adapter edit under tests/e2e/
+            # is reverted immediately and voids the attempt.  The warning is
+            # passed back via error_logs so the next attempt knows the rule
+            # (run 32101793062: adapter rewrote dspark golden values to the
+            # measured failure — a test relaxation, not an adaptation).
+            reverted_tests = _revert_e2e_test_edits(ascend_path)
+            if reverted_tests:
+                warning = (
+                    "E2E test cases (tests/e2e/) must NEVER be modified — "
+                    "assertions, golden values and parametrizations are frozen. "
+                    f"The following edit(s) were reverted: {', '.join(reverted_tests)}. "
+                    "Adapt the vllm_ascend/ source code instead; tests/e2e/ files "
+                    "cannot be part of the adaptation."
+                )
+                ts_print(f"[ai_analysis] {step_id}: REVERTED forbidden e2e test "
+                         f"edit(s): {reverted_tests}")
+                warn_path = step_dir / f"e2e-test-edit-warning-{attempt}.txt"
+                warn_path.write_text(warning + "\n", encoding="utf-8")
+                error_logs = [str(warn_path)]
+                continue
 
             # pre_ci: mechanical checks (version, format, imports, temp files)
             check_result = run_check(ascend_path, self.state.release_tag, vllm_path=vllm_path)
