@@ -583,14 +583,34 @@ _MODEL_DOWNLOAD_FAILURE_RE = re.compile(
     r"|(?:modelscope|huggingface).*connection (?:error|failed)",
     re.IGNORECASE)
 
+# A real (non-download) exception after a traceback means the log carries a
+# genuine code/compile bug NEXT TO the download noise — run 31952700363:
+# an offline safetensors warning (Qwen3-8B-speculator.eagle3) appeared in the
+# same log as the npu_fx_compiler "too many values to unpack (expected 20)"
+# crash, and the download signature alone misclassified the whole test as an
+# env flake, hiding the real bug from the adapter.
+_REAL_ERROR_SIGNATURES = re.compile(
+    r"Traceback \(most recent call last\).*?(?:ValueError|RuntimeError|"
+    r"TypeError|KeyError|AttributeError|AssertionError|ImportError|"
+    r"IndexError|OverflowError|NameError|NotImplementedError|EngineDeadError)",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def _is_model_download_failure(log_path: Path) -> bool:
-    """True if the test log shows a model-missing/download failure."""
+    """True if the test log shows a model-missing/download failure and no
+    real code error alongside it."""
     try:
         if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
             return False
         text = log_path.read_text(encoding="utf-8", errors="replace")
-        return bool(_MODEL_DOWNLOAD_FAILURE_RE.search(text))
+        if not _MODEL_DOWNLOAD_FAILURE_RE.search(text):
+            return False
+        if _REAL_ERROR_SIGNATURES.search(text):
+            ts_print("  [env-flake] real traceback exception found next to "
+                     "download noise — NOT classifying as env flake")
+            return False
+        return True
     except OSError:
         return False
 
