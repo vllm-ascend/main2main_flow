@@ -4,7 +4,9 @@
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_dspark_spec_decoding",
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_graph_mode",
     "tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py",
-    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py::test_models[1-Qwen/Qwen2.5-VL-7B-Instruct]"
+    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py::test_models[1-Qwen/Qwen2.5-VL-7B-Instruct]",
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_mtp_spec_decoding[full_decode_only-False-32-wemaster/deepseek_mtp_main_random_bf16]",
+    "tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py::test_qwen3moe_lora_ep"
   ],
   "blocklist": [
     "tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py",
