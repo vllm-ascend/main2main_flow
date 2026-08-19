@@ -14,6 +14,7 @@ Design note:
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shutil
@@ -542,7 +543,62 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
 # CPU UT routing: mirror select_tests._scan_ut_test_dir(cpu_only=True).
 # Files under tests/ut/<module>/a2/ or tests/ut/<module>/a3_2/ route to NPU
 # runners and are NOT part of the CPU-UT batch.
-def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
+def _module_binding_names(src_file: Path) -> set[str]:
+    """Top-level names a module defines/exports (AST-based, best-effort).
+
+    Covers defs/classes/assignments/imports, including inside top-level
+    ``if`` blocks (upstream defines symbols under version guards too —
+    conservative: any branch defines the name, we count it).
+    """
+    if not src_file.exists():
+        return set()
+    try:
+        tree = ast.parse(src_file.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    names: set[str] = set()
+
+    def _collect(node: ast.AST) -> None:
+        for sub in ast.iter_child_nodes(node):
+            if isinstance(sub, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+                names.add(sub.name)
+            elif isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    if isinstance(t, ast.Name):
+                        names.add(t.id)
+            elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                names.add(sub.target.id)
+            elif isinstance(sub, ast.Import):
+                for a in sub.names:
+                    names.add(a.asname or a.name.split(".")[0])
+            elif isinstance(sub, ast.ImportFrom):
+                for a in sub.names:
+                    names.add(a.asname or a.name)
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                names.add(a.asname or a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                names.add(a.asname or a.name)
+        elif isinstance(node, ast.If):
+            # upstream modules define names under top-level version guards
+            for sub in node.body:
+                _collect(sub)
+    return names
+
+
+def _check_broken_imports(repo: Path, vllm_path: str | Path,
+                          vllm_release_path: str | Path | None = None) -> dict:
     """Verify newly-added ``from vllm.X`` imports.
 
     1. Module must exist in the vllm tree (file or package dir).
@@ -550,8 +606,14 @@ def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
        MUST carry ``# type: ignore[import-not-found]`` — mypy checks all
        static paths regardless of runtime guards.  No mypy needed here;
        this is a pure static check on the source text.
+    3. If ``vllm_release_path`` (the pinned fixed branch, e.g. v0.27.1) is
+       given, every imported SYMBOL must also exist there — an unguarded
+       module-level import of a main-only symbol (cp_local_slot,
+       BatchReqState) crashes the whole fixed-branch lane at import time
+       (PRs #14517/#14580).
     """
     vllm_src = Path(vllm_path) / "vllm"
+    release_src = Path(vllm_release_path) / "vllm" if vllm_release_path else None
     added_lines = _get_added_lines(repo)
     violations: list[str] = []
     _indent_cache: dict[str, set[int]] = {}
@@ -615,16 +677,38 @@ def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
                     ts_print(f"[pre_ci] broken_imports: auto-fixed {entry['file']}:{entry['line_no']} "
                              f"(added # type: ignore[import-not-found])")
 
+        # Symbol-level check against the pinned fixed branch: an unguarded
+        # module-level import of a main-only symbol crashes the whole lane at
+        # import time (BatchReqState in #14517, cp_local_slot in #14580).
+        if release_src is not None and not has_ignore and \
+                int(entry["line_no"]) not in _guarded_lines(entry["file"]):
+            if "import" in parts:
+                idx = parts.index("import")
+                symbols = [p.strip(",") for p in parts[idx + 1:] if p.strip(",") and p.strip(",") != "*"]
+                rel_mod_file = release_src / (mod.replace(".", "/") + ".py")
+                rel_pkg_init = release_src / mod.replace(".", "/") / "__init__.py"
+                release_names = (_module_binding_names(rel_mod_file)
+                                 | _module_binding_names(rel_pkg_init))
+                for sym in symbols:
+                    if sym not in release_names:
+                        violations.append(
+                            f"{entry['file']}:{entry['line_no']}: symbol '{sym}' "
+                            f"not found in the fixed-branch vllm tree — "
+                            f"unguarded import crashes it ({line})")
+
     return {"violations": violations}
 
 
 def run_check(ascend_path: str | Path, release_tag: str,
-              vllm_path: str | Path | None = None) -> dict:
+              vllm_path: str | Path | None = None,
+              vllm_release_path: str | Path | None = None) -> dict:
     """Run pre-CI checks on the vllm-ascend working tree.
 
     Returns a dict with 'all_passed' (bool) and 'checks' (list of check results).
     If `vllm_path` is provided, also verifies that any new ``from vllm.X``
     imports in changed Python files reference modules that actually exist.
+    If `vllm_release_path` is also provided, imported SYMBOLS must exist in
+    the pinned fixed branch too (unguarded main-only imports crash it).
     """
     repo = Path(ascend_path)
 
@@ -632,7 +716,8 @@ def run_check(ascend_path: str | Path, release_tag: str,
         added_lines = _get_added_lines(repo)
         versions = _check_version_strings(added_lines, release_tag)
         temps = _check_temp_files(repo)
-        imports = _check_broken_imports(repo, vllm_path) if vllm_path else {"violations": []}
+        imports = (_check_broken_imports(repo, vllm_path, vllm_release_path)
+                   if vllm_path else {"violations": []})
     except subprocess.CalledProcessError as exc:
         return {
             "all_passed": False,

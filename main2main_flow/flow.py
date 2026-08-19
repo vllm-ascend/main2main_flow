@@ -200,6 +200,45 @@ def _has_source_changes(changed_files: list[str]) -> bool:
     return False
 
 
+_UPSTREAM_DIFF_KEEP = (
+    "vllm/model_executor/",
+    "vllm/lora/",
+    "vllm/v1/",
+    "vllm/distributed/",
+    "vllm/_custom_ops.py",
+    "vllm/envs.py",
+    "vllm/config/",
+    "vllm/platforms/",
+    "vllm/attention/",
+)
+
+
+def _build_upstream_fix_diff(vllm_path: str, start_commit: str, end_commit: str,
+                             max_chars: int = 25000) -> str:
+    """Upstream diff (start..end) restricted to runtime code paths.
+
+    The full upstream patch exists on disk ({patch_path}) but the adapter
+    routinely skips it when it is large.  A targeted diff of the paths that
+    can actually affect e2e behavior makes the change surface visible —
+    run 32101793062: the adapter dismissed 47ececb58e's shared-expert
+    stream-sync refactor (moe_runner/shared_experts) as "no-op because
+    forward is overridden", while the ms-ON path failed 9 rounds on
+    stale-buffer races.  The wrapped modules' async/stream/event logic still
+    executes on the Ascend wrapper's behalf.
+    """
+    pathspec = []
+    for p in _UPSTREAM_DIFF_KEEP:
+        pathspec.append(p if p.endswith("/") else p)
+    r = subprocess.run(
+        ["git", "diff", f"{start_commit}..{end_commit}", "--", *pathspec],
+        cwd=vllm_path, capture_output=True, text=True,
+    )
+    diff = r.stdout
+    if len(diff) <= max_chars:
+        return diff
+    return diff[:max_chars] + "\n... [truncated]"
+
+
 def _revert_e2e_test_edits(ascend_path: str) -> list[str]:
     """Revert any adapter edits under tests/e2e/ — E2E test cases are frozen.
 
@@ -1181,6 +1220,21 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         for attempt in range(1, 4):
             role = "adapter-fix" if error_logs else "adapter"
+            if role == "adapter-fix":
+                # Targeted upstream diff (runtime paths only) — the full
+                # upstream patch is skipped when large; a focused diff makes
+                # the change surface visible so no-op claims need evidence
+                # (multistream misdiagnosis, run 32101793062).
+                upstream_diff = _build_upstream_fix_diff(
+                    vllm_path, step["start_commit"], step["end_commit"])
+                if upstream_diff:
+                    fix_ctx = step_dir / "upstream-fix-context.diff"
+                    fix_ctx.write_text(
+                        "# Upstream diff (step start..end, runtime paths only) — "
+                        "check this BEFORE deciding the step is a no-op.\n\n"
+                        + upstream_diff,
+                        encoding="utf-8")
+                    error_logs = list(error_logs) + [str(fix_ctx)]
             ts_print(f"[ai_analysis] {step_id}: opencode attempt {attempt}, role={role}")
             adapt_result = run_opencode_adapter({
                 "step_id": step_id,
@@ -1224,7 +1278,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 continue
 
             # pre_ci: mechanical checks (version, format, imports, temp files)
-            check_result = run_check(ascend_path, self.state.release_tag, vllm_path=vllm_path)
+            # vllm_release_path enables symbol-level import checks against
+            # the pinned fixed branch (unguarded main-only imports crash it).
+            check_result = run_check(
+                ascend_path, self.state.release_tag, vllm_path=vllm_path,
+                vllm_release_path=self.state.vllm_release_path or None)
             pre_ci_passed = check_result["all_passed"]
             if not pre_ci_passed:
                 log_path = step_dir / PRE_CI_CHECK_FILE

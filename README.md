@@ -15,7 +15,7 @@ drives that whole loop:
 Full walkthrough lives in [`docs/guide.md`](docs/guide.md); this README only
 covers how to install and run.
 
-![Flow diagram](docs/images/flow.png)
+![Flow diagram](docs/images/workflow.png)
 
 ## Requirements
 

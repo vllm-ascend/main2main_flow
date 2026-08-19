@@ -134,7 +134,7 @@ SKIP_AI_ANALYSIS=true kickoff \
 
 流程通过字符串信号传递控制权：`HasCommit`、`HasNoCommit`、`UpgradeCompleted`、`UpgradeFailed`，定义在 `scripts/utils/utils.py`。
 
-![Flow 结构图](images/flow.png)
+![Flow 结构图](images/workflow.png)
 
 ---
 

@@ -86,6 +86,14 @@ these rules to stay on the critical path:
 - Do NOT run git add, git commit, git reset, or git checkout in vllm-ascend
 - Use `vllm_version_is("{release_tag}")` for version boundaries — never `hasattr` or `try/except`
 - All branches of a version guard must have identical function signatures
+- **Imports of new upstream symbols must be guarded too** — a module-level
+  `from vllm... import NewSymbol` crashes older fixed branches (v0.27.1) at
+  import time even when every call site is guarded.  Import inside the
+  `vllm_version_is` branch, or lazily at the use site.  After writing a
+  guard, grep the file to VERIFY no unguarded import of the new symbol
+  remains (PR #14517: the call site was guarded but the module-level
+  `BatchReqState` import broke the whole v0.27.1 lane — ImportError + a
+  third positional arg to `init_workspace_manager`).
 - Static analysis only — do not import vllm/vllm-ascend, run tests, launch models, or require NPU/GPU
 - **DO NOT run mypy, ruff, pre-commit, py_compile, or any linter/checker/compiler command.** Ever. During adaptation, only read code and edit files.
 - Never read raw CI logs — use inlined error content above
@@ -136,6 +144,14 @@ The step_target.patch is cumulative (git diff HEAD).
   **Key question**: does vllm-ascend subclass, override, call, import, or read
   anything this patch changed? Internal upstream changes only need adaptation
   when vllm-ascend directly depends on the behavior.
+- **No-op claims need evidence — "forward is overridden" is NOT evidence.**
+  Wrapped upstream modules (shared_experts, token_dispatcher, routed_experts,
+  moe_runner) still execute their async/stream/event logic on the Ascend
+  wrapper's behalf; a refactor of stream sync / events / ordering / dispatch
+  splits can break the wrapper without touching any overridden method.  Query
+  `get_adaptation_lessons` for the shared-expert and MoE-gate contract cases
+  (L20260819-001/002), and read `{error_content}`'s `upstream-fix-context.diff`
+  before declaring no-op.
 - **vllm-report impact map**: {vllm_report_context}
   The vllm-report MCP server is registered in opencode.jsonc. Call its tools
   DYNAMICALLY during analysis (see "vllm-report MCP Tools" section below).
