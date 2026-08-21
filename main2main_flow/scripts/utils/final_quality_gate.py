@@ -73,7 +73,7 @@ def run_final_quality_gate(
              + (" + UT" if ut_enabled else " (UT DISABLED)") + " on final diff...")
 
     fmt = _check_format(repo)
-    mypy = _check_mypy(repo, vllm_path)
+    mypy = _check_mypy(repo, vllm_path, vllm_release_path=vllm_release_path)
     if ut_enabled:
         ut = _check_ut(repo, vllm_path,
                        vllm_release_path=vllm_release_path,

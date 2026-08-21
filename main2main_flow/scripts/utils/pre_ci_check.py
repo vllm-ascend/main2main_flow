@@ -312,7 +312,8 @@ def _changed_test_py_files(repo: Path) -> list[str]:
             if f.endswith(".py") and f.startswith(("tests/", "examples/"))]
 
 
-def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
+def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
+                vllm_release_path: str | Path | None = None) -> dict:
     """Run mypy with the same core command and environment as vllm-ascend's CI.
 
     Mirrors the CI pre-commit job's "Run mypy" step: for each python version
@@ -326,6 +327,12 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
     ``./vllm-empty`` at verified commit). ``--exclude _cann_ops_custom/``
     handles the build artifact dir that CI's lint image doesn't have.
 
+    If ``vllm_release_path`` is provided, mypy runs AGAINST the pinned
+    fixed-branch tree too — a call-site that passes on main can crash
+    the release branch at runtime when a function signature changed
+    (``init_workspace_manager`` 2→3 args, PR #14517).  Both runs must
+    pass.  Cost: +3 mypy invocations (~4 min) for the release pass.
+
     Returns all errors mypy reports across all python versions - no
     added-line filtering.  CI mypy is the source of truth; if it fails,
     the adaptation must be fixed.
@@ -335,11 +342,11 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
         return {"violations": [], "detail": "mypy not installed", "skipped": True}
 
     import os as _os
-    env = _os.environ.copy()
+    base_env = _os.environ.copy()
     if vllm_path:
         vllm_abs = str(Path(vllm_path).resolve())
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{vllm_abs}:{existing}" if existing else vllm_abs
+        existing = base_env.get("PYTHONPATH", "")
+        base_env["PYTHONPATH"] = f"{vllm_abs}:{existing}" if existing else vllm_abs
         ts_print(f"\n[pre_ci] mypy: PYTHONPATH includes vllm source: {vllm_abs}")
 
     # CI's lint image runs mypy in a clean environment: no vllm package
@@ -493,21 +500,44 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
         all_violations: list[str] = []
         all_output: list[str] = []
         any_failed = False
-        for py_ver in ("3.10", "3.11", "3.12"):
-            ts_print(f"[pre_ci] === mypy --python-version {py_ver} output begin ===")
-            r = subprocess.run(
-                [*mypy_cmd, "--follow-imports", "skip", "--check-untyped-defs",
-                 "--python-version", py_ver,
-                 "--exclude", "_cann_ops_custom/",
-                 "vllm_ascend", *changed_extra],
-                cwd=str(repo), capture_output=True, text=True, env=env,
-            )
-            output = r.stdout + "\n" + r.stderr
-            ts_print(output.strip())
-            ts_print(f"[pre_ci] === mypy output end (py={py_ver}, exit={r.returncode}) ===")
-            all_output.append(f"--- python {py_ver} (exit={r.returncode}) ---\n{output}")
-            if r.returncode != 0:
-                any_failed = True
+
+        # Run mypy against each vllm tree (main + pinned release).  The
+        # release pass catches call-site signature mismatches that the
+        # main-only pass misses (init_workspace_manager 2→3 args, PR #14517).
+        trees: list[tuple[str, dict[str, str]]] = [("main", base_env)]
+        if vllm_release_path:
+            release_abs = str(Path(vllm_release_path).resolve())
+            release_env = base_env.copy()
+            # Replace (not append) the vllm source in PYTHONPATH so mypy
+            # resolves symbols against the release tree only.
+            existing = base_env.get("PYTHONPATH", "")
+            if vllm_path:
+                vllm_abs = str(Path(vllm_path).resolve())
+                existing = existing.replace(vllm_abs, "").strip(":")
+            release_env["PYTHONPATH"] = (f"{release_abs}:{existing}"
+                                        if existing else release_abs)
+            trees.append((f"release({Path(vllm_release_path).name})", release_env))
+            ts_print(f"[pre_ci] mypy: also checking against release tree: {release_abs}")
+
+        for tree_label, tree_env in trees:
+            for py_ver in ("3.10", "3.11", "3.12"):
+                ts_print(f"[pre_ci] === mypy [{tree_label}] --python-version {py_ver} "
+                         f"output begin ===")
+                r = subprocess.run(
+                    [*mypy_cmd, "--follow-imports", "skip", "--check-untyped-defs",
+                     "--python-version", py_ver,
+                     "--exclude", "_cann_ops_custom/",
+                     "vllm_ascend", *changed_extra],
+                    cwd=str(repo), capture_output=True, text=True, env=tree_env,
+                )
+                output = r.stdout + "\n" + r.stderr
+                ts_print(output.strip())
+                ts_print(f"[pre_ci] === mypy [{tree_label}] output end "
+                         f"(py={py_ver}, exit={r.returncode}) ===")
+                all_output.append(f"--- [{tree_label}] python {py_ver} "
+                                  f"(exit={r.returncode}) ---\n{output}")
+                if r.returncode != 0:
+                    any_failed = True
     finally:
         # Destroy the temporary venv (no need to restore anything - the
         # main environment was never touched).
@@ -516,8 +546,8 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
             ts_print(f"[pre_ci] mypy: destroyed temporary venv at {venv_dir}")
 
     if not any_failed:
-        ts_print("\n[pre_ci] mypy: OK (all 3 python versions clean)")
-        return {"violations": [], "detail": "mypy clean (3.10/3.11/3.12)"}
+        ts_print("\n[pre_ci] mypy: OK (all python versions clean on all trees)")
+        return {"violations": [], "detail": "mypy clean (3.10/3.11/3.12, main + release)"}
 
     _MYPY_ERR_RE = re.compile(r"^(.+\.py):(\d+):(?:\d+:)?\s*error:")
     seen: set[str] = set()
