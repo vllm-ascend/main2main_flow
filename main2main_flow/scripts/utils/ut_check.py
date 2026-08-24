@@ -289,6 +289,11 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 env["VLLM_VERSION"] = vllm_version
             env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
             env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+            # Match CI: offline mode so get_model_file / hf_hub_download
+            # fails immediately (385s→0.5s for test_maybe_update_config_
+            # non_directory_raises) instead of retrying network timeouts.
+            env["HF_HUB_OFFLINE"] = "1"
+            env["VLLM_USE_MODELSCOPE"] = "True"
             env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
             if pure_cpu:
                 # Hide NPU so platform detection sees pure CPU — matches
