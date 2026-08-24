@@ -1891,9 +1891,22 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             if mentioned:
                 step_files = [f for f in cumulative_files if f in mentioned]
             else:
-                # No file attribution from summary — leave empty; cumulative
-                # files will surface in the Unattributed row below.
-                step_files = []
+                # Fallback: the adapter didn't name files in the summary
+                # (no backtick paths, no vllm_ascend/...py mentions).
+                # Extract from the step's own patch (EACH_STEP_TARGET_PATCH_FILE,
+                # captured via `git diff HEAD` at adapt time) so the Files
+                # column isn't "—" when vllm-ascend code was actually modified
+                # (PR #14778: step summary said "guarded both methods" without
+                # naming the files → Files column was empty).
+                step_patch_path = (WORKSPACE_DIR / STEPS_DIR / s["id"]
+                                   / EACH_STEP_TARGET_PATCH_FILE)
+                if step_patch_path.exists():
+                    step_patch_files = _extract_diff_files(
+                        step_patch_path.read_text(encoding="utf-8"))
+                    step_files = [f for f in step_patch_files
+                                  if f in cumulative_files]
+                else:
+                    step_files = []
             seen_files.update(step_files)
             if is_noop and not step_files and not cause and not change:
                 # No-op step: no vllm-ascend impact — exclude from the PR
@@ -2068,7 +2081,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         head_fork = os.getenv("HEAD_FORK", "")
         draft = os.getenv("PR_DRAFT", "true").lower() == "true"
-        labels_str = os.getenv("PR_LABELS", "ready")
+        labels_str = os.getenv("PR_LABELS", "ready-all")
         labels = [lbl.strip() for lbl in labels_str.split(",") if lbl.strip()]
         branch_name = os.getenv("PR_BRANCH_NAME", "")
 

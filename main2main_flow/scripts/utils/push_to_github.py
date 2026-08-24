@@ -21,7 +21,7 @@ Environment variables:
   HEAD_FORK       — fork to push to (optional, e.g. vllm-ascend-ci/vllm-ascend)
   GH_TOKEN        — GitHub Personal Access Token (required in CI;
                     also used by git push via credential helper)
-  PR_LABELS       — comma-separated labels to add (default: "ready")
+  PR_LABELS       — comma-separated labels to add (default: "ready-all")
   PR_DRAFT        — "true" (default) or "false"
 """
 from __future__ import annotations
@@ -419,7 +419,7 @@ def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
     # Use REST API (not `gh pr edit` — that hits GraphQL which requires
     # read:org scope).  POST with a JSON array of label names.
     # --input - is REQUIRED: without it `gh api` ignores stdin and sends a
-    # nil body → 422 "Invalid request" (PRs then miss the `ready` label and
+    # nil body → 422 "Invalid request" (PRs then miss the `ready-all` label and
     # vllm-ascend's ci-gate fails with "Selected tests are required" —
     # PR #14376).
     result = subprocess.run(
@@ -427,7 +427,7 @@ def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
          "-H", "Accept: application/vnd.github+json",
          "--input", "-",
          f"/repos/{github_repo}/issues/{pr_number}/labels"],
-        input=json.dumps(labels),  # ["ready"]
+        input=json.dumps(labels),  # ["ready-all"]
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -634,7 +634,7 @@ def push_and_create_pr(
         pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
         if pr_number.isdigit():
             if labels is None:
-                labels = ["ready"]
+                labels = ["ready-all"]
             _add_labels(github_repo, pr_number, labels)
 
         # ---- persist PR URL ----
@@ -704,7 +704,7 @@ def main() -> None:
     parser.add_argument("--draft", action="store_true",
                         default=os.getenv("PR_DRAFT", "true").lower() == "true",
                         help="Create as draft PR (default: true).")
-    parser.add_argument("--labels", default=os.getenv("PR_LABELS", "ready"),
+    parser.add_argument("--labels", default=os.getenv("PR_LABELS", "ready-all"),
                         help="Comma-separated labels to add to the PR.")
     parser.add_argument("--branch-name", default="",
                         help="Branch name (auto-generated if empty).")
