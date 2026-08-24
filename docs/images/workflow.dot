@@ -1,0 +1,83 @@
+digraph main2main_flow {
+  rankdir=TB;
+  bgcolor="#f7f8fa";
+  fontname="Helvetica";
+  pad=0.4; nodesep=0.45; ranksep=0.55;
+
+  node [shape=box, style="rounded,filled", fontname="Helvetica",
+        fontsize=15, color="#2f5d8a", fillcolor="#ffffff", penwidth=1.6,
+        margin="0.28,0.16"];
+  edge [fontname="Helvetica", fontsize=12.5, color="#5a6b7d", penwidth=1.4];
+
+  subgraph cluster_main {
+    label="Main2Main flow  (per run)";
+    labelloc=t; fontsize=17; fontcolor="#1a3550";
+    style="rounded,dashed"; color="#8fb4d9"; penwidth=1.4; bgcolor="#eef4fb";
+    margin=18;
+
+    init   [label="initialize\nclone repos • vllm-report MCP"];
+    analyze [label="analyze_commit_and_plan_step\ndetect + plan steps • impact (MCP)"];
+    nocommit [label="has_no_commit — in sync\nno new commits → done",
+              fillcolor="#fdf0f0", color="#c96a6a"];
+
+    subgraph cluster_loop {
+      label="process_steps  (loop)";
+      labelloc=t; fontsize=15; fontcolor="#1a3550";
+      style="rounded,dashed"; color="#8fb4d9"; bgcolor="#f4f8fd"; margin=14;
+
+      adapter [label="opencode adapt + pre_ci\nMCP guides • lessons (fix mode reuses session)"];
+      qa      [label="adapter-qa\nreview: pass / fail"];
+      e2e     [label="_run_e2e_test\nNPU e2e tests (env-flake classified)"];
+      noop    [label="skip e2e (is_noop)\nno vllm-ascend code change",
+               fillcolor="#fff7e8", color="#d9a14f"];
+      commit  [label="git commit step\nverified.commit advanced",
+               fillcolor="#f3faf3", color="#4f9d6b"];
+      revert  [label="revert → UpgradeFailed\nbroken changes discarded",
+               fillcolor="#fdf0f0", color="#c96a6a"];
+    }
+
+    gate    [label="_final_quality_gate\nformat + mypy (dual tree) + CPU-UT batches"];
+    post    [label="generate_final_post\nsquash + PR body + description-fill"];
+    lessons [label="persist_lessons\ne2e fix rounds → vllm-report lessons"];
+    push    [label="push_to_github\nbranch + PR (label ready-all)"];
+
+    init -> analyze;
+    analyze -> nocommit [label="HasNoCommit"];
+    analyze -> cluster_loop [label="HasCommit", lhead=cluster_loop];
+    adapter -> qa;
+    qa -> adapter [label="retry < 3 (fix mode)", style=dashed, constraint=false];
+    qa -> e2e [label="pass"];
+    qa -> noop [label="is_noop"];
+    noop -> commit;
+    e2e -> commit [label="pass"];
+    e2e -> adapter [label="fail, retry < 3", style=dashed, constraint=false];
+    e2e -> revert [label="fail x3"];
+    commit -> adapter [label="next step", style=dotted, constraint=false];
+    cluster_loop -> gate [label="UpgradeCompleted", ltail=cluster_loop];
+    revert -> post [label="UpgradeFailed", constraint=false];
+    gate -> post;
+    post -> lessons;
+    lessons -> push;
+  }
+
+  subgraph cluster_loop2 {
+    label="PR CI feedback  (daily)";
+    labelloc=t; fontsize=17; fontcolor="#1f5c33";
+    style="rounded,dashed"; color="#4f9d6b"; penwidth=1.4; bgcolor="#f3faf3";
+    margin=18;
+
+    pcci  [label="PR CI (ready-all)\nfull test suite on the PR",
+           fillcolor="#f3faf3", color="#4f9d6b"];
+    track [label="track_pr_ci (daily step 10)\ndeepest exception per failed check",
+           fillcolor="#f3faf3", color="#4f9d6b"];
+    lsn   [label="lessons/<date>.json\nfailure summaries → fix guidance",
+           fillcolor="#f3faf3", color="#4f9d6b"];
+
+    pcci -> track;
+    track -> lsn;
+  }
+
+  push -> pcci [label="opens PR", color="#4f9d6b", constraint=false];
+  lsn -> adapter [label="get_adaptation_lessons → hit", style=dashed,
+                  color="#4f9d6b", constraint=false];
+}
