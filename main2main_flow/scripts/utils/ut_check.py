@@ -269,15 +269,22 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         versions: list[tuple[str, Path, str]] = []
         vpath = Path(vllm_path) if vllm_path else None
         if vpath:
-            versions.append(("main", vpath, ""))
+            versions.append(("main", vpath, "", False))
         rpath = Path(vllm_release_path) if vllm_release_path else None
         if rpath and release_tag:
-            versions.append((release_tag, rpath, release_tag))
+            versions.append((release_tag, rpath, release_tag, False))
+            # Pure-CPU release batch: hide NPU devices so platform detection
+            # takes the CPU path — matching PR CI's cpu-0 runner.  The A2
+            # mock batch uses fake npu-smi to mock NPU; some tests behave
+            # differently when NPU is truly absent (e.g. AscendMoERunner310
+            # gate attribute, PR #14750).  Both batches run on every gate
+            # round, so adapter fixes are verified on both environments.
+            versions.append((f"{release_tag}-pure-cpu", rpath, release_tag, True))
         if not versions:
             ts_print("[pre_ci] ut: no vllm paths configured, skipping")
             return {"violations": [], "detail": "no vllm paths", "skipped": True}
 
-        for label, vpath_abs, vllm_version in versions:
+        for label, vpath_abs, vllm_version, pure_cpu in versions:
             env = os.environ.copy()
             ascend_abs = str(repo.resolve())
             vllm_abs = str(vpath_abs.resolve())
@@ -290,6 +297,14 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
             env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
             env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
+            if pure_cpu:
+                # Hide NPU so platform detection sees pure CPU — matches
+                # PR CI cpu-0.  fake npu-smi still mocks conftest, but
+                # torch_npu's runtime sees no visible devices.
+                env["ASCEND_RT_VISIBLE_DEVICES"] = ""
+                env.pop("CUDA_VISIBLE_DEVICES", None)
+                ts_print(f"[pre_ci] ut: [{label}] pure-CPU env "
+                         f"(ASCEND_RT_VISIBLE_DEVICES='')")
 
             ts_print(f"\n[pre_ci] ut: === batch [{label}] "
                      f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
