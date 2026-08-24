@@ -120,7 +120,7 @@ def _extract_failure_summary(job_id: str) -> str | None:
     return " | ".join(summaries) if summaries else None
 
 
-def _get_checks(pr_number: int) -> list[dict]:
+def _get_checks(pr_number: int, skip_log_fetch: bool = False) -> list[dict]:
     checks = _gh_json(["pr", "checks", str(pr_number)],
                       fields="name,state,bucket,link")
     if not isinstance(checks, list):
@@ -137,7 +137,7 @@ def _get_checks(pr_number: int) -> list[dict]:
             "conclusion": state.lower(),
             "details_url": c.get("link", ""),
         }
-        if bucket == "fail" or state in ("FAILURE", "CANCEL", "CANCELLED"):
+        if (bucket == "fail" or state in ("FAILURE", "CANCEL", "CANCELLED")) and not skip_log_fetch:
             url = entry["details_url"] or ""
             job_id = url.rstrip("/").split("/")[-1] if "/job/" in url else ""
             if job_id.isdigit():
@@ -148,17 +148,87 @@ def _get_checks(pr_number: int) -> list[dict]:
     return result
 
 
+def _load_processed_prs(data_dir: Path) -> dict[int, str]:
+    """Return {pr_number: ci_conclusion} for PRs already recorded with
+    failure summaries in previous runs.  Used to skip re-fetching CI
+    logs for PRs whose results haven't changed."""
+    processed: dict[int, str] = {}
+    results_dir = data_dir / "vllm-ascend" / "pr_ci_results"
+    if not results_dir.exists():
+        return processed
+    for f in sorted(results_dir.glob("*.json"), reverse=True):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        for pr in data.get("prs", []):
+            num = pr.get("pr_number")
+            if num and num not in processed:
+                # Only mark as processed if the PR had failure_summary
+                # extracted (i.e., the expensive log fetch already done)
+                has_summary = any(
+                    c.get("failure_summary") for c in pr.get("checks", []))
+                if has_summary or pr.get("ci_conclusion") == "success":
+                    processed[num] = pr.get("ci_conclusion", "")
+    return processed
+
+
+def _load_prev_record(data_dir: Path, pr_number: int) -> dict | None:
+    """Load the most recent record for a PR from previous result files."""
+    results_dir = data_dir / "vllm-ascend" / "pr_ci_results"
+    if not results_dir.exists():
+        return None
+    for f in sorted(results_dir.glob("*.json"), reverse=True):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        for pr in data.get("prs", []):
+            if pr.get("pr_number") == pr_number:
+                return pr
+    return None
+
+
 def track(data_dir: Path, days: int = 7) -> dict:
     since = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)).isoformat() + "Z"
     ts_print(f"[track_pr_ci] searching main2main PRs since {since}")
     prs = _gh_pr_list(since)
     ts_print(f"[track_pr_ci] found {len(prs)} main2main PRs")
 
+    # Dedup: skip failure_summary extraction for PRs already processed
+    # (failure summaries extracted or CI passed) in previous runs.
+    processed = _load_processed_prs(data_dir)
+    if processed:
+        ts_print(f"[track_pr_ci] {len(processed)} PRs already processed "
+                 f"(will skip log fetch for these unless CI result changed)")
+
     records = []
     for pr in prs:
         pr_number = pr["number"]
+        prev_conclusion = processed.get(pr_number)
         ts_print(f"[track_pr_ci] PR #{pr_number}: {pr.get('title','')[:60]}")
-        checks = _get_checks(pr_number)
+
+        # If the PR was previously processed and CI conclusion is unchanged,
+        # reuse the previous record (skip the expensive log fetch).
+        if prev_conclusion is not None:
+            checks = _get_checks(pr_number, skip_log_fetch=True)
+            failing = [c for c in checks if c["conclusion"] in ("failure", "cancelled")]
+            passing = [c for c in checks if c["conclusion"] == "success"]
+            new_conclusion = "failure" if failing else ("success" if passing else "unknown")
+            if new_conclusion == prev_conclusion:
+                ts_print(f"[track_pr_ci] PR #{pr_number}: already processed "
+                         f"({prev_conclusion}), skipping log fetch")
+                # Load previous record to preserve failure_summary
+                prev_record = _load_prev_record(data_dir, pr_number)
+                if prev_record:
+                    prev_record["created_at"] = pr.get("createdAt", prev_record.get("created_at", ""))
+                    prev_record["state"] = pr.get("state", prev_record.get("state", ""))
+                    prev_record["already_analyzed"] = True
+                    records.append(prev_record)
+                    continue
+        else:
+            checks = _get_checks(pr_number)
+
         failing = [c for c in checks if c["conclusion"] in ("failure", "cancelled")]
         passing = [c for c in checks if c["conclusion"] == "success"]
         record = {
