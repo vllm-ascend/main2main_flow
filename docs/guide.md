@@ -188,8 +188,8 @@ vllm-ascend 用 `.github/vllm-main-verified.commit`（fallback 到 `docs/source/
 3. 跳过未修改 `vllm/` 的 commit（docs、tests、CI 脚本等不纳入步骤规划）
 4. **impact 分析路由**：若 vllm-report 数据可用，通过 MCP `get_commit_impact_batch` 批量查询每个 commit 是否影响 vllm-ascend（`ascend_affected`）。不影响 ascend 的 commit 记 0 行（`_effective_lines`），仅并入步骤推进 verified.commit，adapter 会把它判为 no-op
 5. 分组规则（按优先级）：
-   - **超大 commit 单独成步**：单个 commit 的 effective lines > `MAIN2MAIN_LINE_BUDGET`（默认 1000）时单独成步
-   - **累积分组**：其余 commit 累积到当前步，当累积的 effective lines 超过预算，或 commit 数量超过上限（动态计算，基数 10）时，将当前批次封装为一步，重新开始累积
+   - **超大 commit 单独成步**：单个 commit 的 effective lines > `MAIN2MAIN_LINE_BUDGET`（默认 2000）时单独成步
+   - **累积分组**：其余 commit 累积到当前步，当累积的 effective lines 超过 `MAIN2MAIN_LINE_BUDGET`（默认 2000），或 commit 数量超过 `MAIN2MAIN_COMMIT_BUDGET`（默认 35）时，将当前批次封装为一步，重新开始累积
 
 若所有 commit 都未修改 `vllm/`，会生成一个覆盖整个范围的 no-op step，确保 `verified.commit` 推进、e2e 仍会跑。
 

@@ -13,8 +13,8 @@ Algorithm:
   5. A single commit with vllm_changed_lines > LINE_BUDGET becomes its own step
 
 Overridable via env for tuning:
-  MAIN2MAIN_LINE_BUDGET   (default 1000 vllm/ changed lines per step)
-  MAIN2MAIN_COMMIT_BUDGET (default 20 commits per step)
+  MAIN2MAIN_LINE_BUDGET   (default 2000 vllm/ changed lines per step)
+  MAIN2MAIN_COMMIT_BUDGET (default 35 commits per step)
 
 Output:
   - <workspace>/steps.json  — machine-readable plan
@@ -30,8 +30,8 @@ from typing import Any
 
 from main2main_flow.scripts.utils.utils import run_git, ts_print
 
-LINE_BUDGET = int(os.environ.get("MAIN2MAIN_LINE_BUDGET", "1000"))
-BASE_COMMIT_COUNT_BUDGET = int(os.environ.get("MAIN2MAIN_COMMIT_BUDGET", "20"))
+LINE_BUDGET = int(os.environ.get("MAIN2MAIN_LINE_BUDGET", "2000"))
+BASE_COMMIT_COUNT_BUDGET = int(os.environ.get("MAIN2MAIN_COMMIT_BUDGET", "35"))
 
 
 # ── vllm-report MCP client ────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ def _resolve_impacts(shas: list[str], vllm_report_path: Path | None,
 # ── bucket classification ─────────────────────────────────────────────────────
 
 def _effective_lines(impact: dict | None, vllm_lines: int) -> int:
-    """Lines that count toward the 1000-line step budget.
+    """Lines that count toward the LINE_BUDGET step budget.
 
     A commit analyzed by vllm-report with ascend_affected=False contributes
     0 effective lines (plan still includes it in a step so verified.commit
