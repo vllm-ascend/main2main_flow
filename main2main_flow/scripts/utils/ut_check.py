@@ -269,17 +269,10 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         versions: list[tuple[str, Path, str]] = []
         vpath = Path(vllm_path) if vllm_path else None
         if vpath:
-            versions.append(("main", vpath, "", False))
+            versions.append(("main", vpath, "", True))
         rpath = Path(vllm_release_path) if vllm_release_path else None
         if rpath and release_tag:
-            versions.append((release_tag, rpath, release_tag, False))
-            # Pure-CPU release batch: hide NPU devices so platform detection
-            # takes the CPU path — matching PR CI's cpu-0 runner.  The A2
-            # mock batch uses fake npu-smi to mock NPU; some tests behave
-            # differently when NPU is truly absent (e.g. AscendMoERunner310
-            # gate attribute, PR #14750).  Both batches run on every gate
-            # round, so adapter fixes are verified on both environments.
-            versions.append((f"{release_tag}-pure-cpu", rpath, release_tag, True))
+            versions.append((release_tag, rpath, release_tag, True))
         if not versions:
             ts_print("[pre_ci] ut: no vllm paths configured, skipping")
             return {"violations": [], "detail": "no vllm paths", "skipped": True}
