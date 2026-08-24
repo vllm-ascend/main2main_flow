@@ -6,11 +6,16 @@ Each time vLLM's `main` advances, vllm-ascend must catch up: bump the recorded
 upstream commit, adapt any broken interfaces, and re-run e2e CI. This project
 drives that whole loop:
 
-- detect the commit gap, plan it into bite-sized steps
-- for every step, run an `opencode` AI agent to adapt the code and a
-  deterministic pre-CI check
-- run real NPU e2e tests, retry on failure (up to 3×)
-- when everything passes, push a branch and open a PR
+- detect the commit gap, plan it into bite-sized steps (commit impact routed
+  via the vllm-report knowledge base over MCP)
+- for every step, run an `opencode` AI agent to adapt the code, then a
+  deterministic pre-CI check and an independent critic review
+- run real NPU e2e tests, retry on failure (up to 3×); no-op steps skip e2e
+- a push-time quality gate re-runs format + mypy + CPU-UT on the final diff
+- lessons from fix rounds are persisted back to vllm-report for future runs
+- then push a branch and open a PR (label `ready-all` triggers PR CI, whose
+  failures are tracked back into vllm-report lessons — the full feedback loop
+  is in `docs/guide.md`)
 
 Full walkthrough lives in [`docs/guide.md`](docs/guide.md); this README only
 covers how to install and run.
@@ -87,6 +92,11 @@ kickoff --vllm-path ... --vllm-ascend-path ...
 | `SKIP_E2E_TEST` | skip the NPU e2e tests, treat as passed | `false` |
 | `PUSH_TO_GITHUB` | open a PR after success | `false` |
 | `GITHUB_REPO` | PR target, `owner/name` | — |
+| `PR_LABELS` | labels for the created PR | `ready-all` |
+| `MAIN2MAIN_MODEL` | opencode model (per-role: `_ADAPT`/`_FIX`/`_REVIEW`) | `deepseek/deepseek-chat` |
+| `MAIN2MAIN_TIMEOUT_MIN` / `MAIN2MAIN_STALE_SEC` | opencode total / idle timeouts | `30` / `300` |
+| `MAIN2MAIN_KEEP_BRANCH` | reuse the existing branch instead of resetting to `origin/main` | `false` |
+| `MAIN2MAIN_UT_SKIP_A2` | CPU-UT only, skip the A2 NPU UT batch | `false` |
 | `MAIN2MAIN_REMOTE_HOST` | SSH host running the NPU container | — |
 | `MAIN2MAIN_REMOTE_CONTAINER` | Docker container name on that host | — |
 
@@ -98,19 +108,28 @@ Everything lands under `workspace/` (recreated on every run):
 workspace/
 ├── detect.json            # base / target commits, compat tag
 ├── steps.json             # full step plan
-├── final_summary.md       # summary copied from the last successful step
-├── final_target.patch     # cumulative vllm-ascend diff
+├── final_summary.md       # PR body (Changes table)
+├── final_target.patch     # cumulative vllm-ascend diff (post-gate)
+├── final_status.json      # status / steps_completed / old & new commit
+├── gate_final_patch       # gate-regenerated cumulative patch
+├── repos/vllm-report/     # knowledge base clone (MCP server)
+├── quality_gate/          # final quality gate artifacts
 └── steps/<step-id>/
     ├── upstream.patch     # this step's vllm diff
     ├── changed_files.txt
+    ├── analysis.md        # adapter's analysis / fix notes
+    ├── result.json        # adapter's structured result (adapted / noop)
     ├── step_target.patch  # vllm-ascend diff for this step
     ├── step_summary.md    # AI-written summary
     ├── pre_ci_check.json  # deterministic pre-CI result
+    ├── review.json        # critic verdict
     ├── opencode.log       # opencode conversation log
     ├── opencode_raw.jsonl # raw event stream
     └── tests/
         ├── round-<n>-<suite>.log
-        └── round-<n>-summary.json
+        ├── round-<n>-<suite>-summary.json
+        ├── round-<n>-result.json
+        └── round-<n>-test-errors.txt
 ```
 
 ## Project layout
@@ -118,15 +137,17 @@ workspace/
 ```
 main.py                               # convenience entry point
 main2main_flow/
-├── cli.py                            # CLI (kickoff, plot, etc.)
-├── flow.py                           # Flow: nodes, routing, retry loop
+├── cli.py                            # CLI (kickoff)
+├── flow.py                           # Flow: nodes, routing, retry loop, quality gate
 ├── agents/                           # opencode agent SKILL.md + per-role reference
 │   ├── adapter/
 │   │   ├── SKILL.md                  #   adapt + fix prompt
-│   │   └── reference/                #   adapt-guide, diagnosis, error-patterns, code-structure
-│   └── adapter-qa/
-│       ├── SKILL.md                  #   independent reviewer prompt
-│       └── reference/                #   review-lessons.md
+│   │   └── reference/                #   adaptation-patterns, common-pitfalls, code-structure
+│   ├── adapter-qa/
+│   │   ├── SKILL.md                  #   independent reviewer prompt
+│   │   └── reference/                #   review-lessons.md
+│   └── description-fill/
+│       └── SKILL.md                  #   PR-description file attribution analysis
 └── scripts/
     ├── agent/
     │   └── opencode_adapter.py       # spawns `opencode run`, parses JSONL events
@@ -134,10 +155,14 @@ main2main_flow/
         ├── utils.py                  #   filename constants, git helpers, ts_print
         ├── detect_commits.py
         ├── plan_steps.py
-        ├── update_commit_reference.py
-        ├── pre_ci_check.py
+        ├── commit_ref.py             #   verified-commit reference replacement
+        ├── pre_ci_check.py           #   per-step checks (version/temp/imports/format)
+        ├── final_quality_gate.py     #   push-time gate: format + mypy + UT
+        ├── ut_check.py               #   CPU-UT runner (per-file isolation)
         ├── run_tests.py
         ├── ci_log_summary.py
+        ├── lessons.py                #   lesson submit/persist to vllm-report
+        ├── track_pr_ci.py            #   PR CI result tracking (vllm-report step 10)
         └── push_to_github.py
 ```
 

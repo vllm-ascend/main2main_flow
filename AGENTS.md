@@ -17,19 +17,24 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
 
 ## Layout
 
-- `main2main_flow/flow.py` — the Flow; node order: `initialize → analyze_commit_and_plan_step → process_steps → generate_final_post → push_to_github`. Routing uses string signals defined in `scripts/utils/utils.py` (`HasCommit`, `HasNoCommit`, `UpgradeCompleted`, `UpgradeFailed`).
-- `main2main_flow/cli.py` — CLI entry point (`kickoff`, `plot`, `run_with_trigger`).
+- `main2main_flow/flow.py` — the Flow; node order: `initialize → _warmup_mega_moe → analyze_commit_and_plan_step → process_steps (per-step _ai_analysis + _run_e2e_test, then _final_quality_gate) → generate_final_post → persist_lessons → push_to_github`. Routing uses string signals defined in `scripts/utils/utils.py` (`HasCommit`, `HasNoCommit`, `UpgradeCompleted`, `UpgradeFailed`). Two early exits: `HasNoCommit` (nothing to adapt) and `current_step == 0` after process_steps (no PR — nothing passed e2e).
+- `main2main_flow/cli.py` — CLI entry point (`kickoff`).
 - `main2main_flow/agents/` — agent SKILL.md files and per-role reference docs consumed by opencode. Each role is a self-contained directory:
-  - `adapter/SKILL.md` + `adapter/reference/` — adapt and fix modes
+  - `adapter/SKILL.md` + `adapter/reference/` — adapt and fix modes (MCP is PRIMARY, grep is FALLBACK)
   - `adapter-qa/SKILL.md` + `adapter-qa/reference/` — independent reviewer
+  - `description-fill/SKILL.md` — read-only analysis for PR-description file attribution
 - `main2main_flow/scripts/agent/opencode_adapter.py` — spawns `opencode run --format json --dangerously-skip-permissions`, streams JSONL, 30 min total / 5 min stale timeouts, supports `--session` for persistent sessions.
 - `main2main_flow/scripts/utils/` — deterministic helpers and shared utilities:
   - `utils.py` — filename constants, git helpers, `ts_print`
-  - `detect_commits.py`, `plan_steps.py`, `update_commit_reference.py` — commit detection and planning
-  - `pre_ci_check.py` — per-step: version strings, temp files, broken imports; final gate: format + mypy (venv-isolated, numpy aligned to lint image)
+  - `detect_commits.py`, `plan_steps.py` — commit detection and planning (impact routing via vllm-report MCP `get_commit_impact_batch`)
+  - `commit_ref.py` — replace the pinned verified-commit SHA across tracked vllm-ascend files
+  - `pre_ci_check.py` — per-step: version strings, temp files, broken imports (module + symbol against the pinned release tree), fast format
+  - `final_quality_gate.py` — push-time gate: full format + mypy (venv-isolated, numpy aligned to lint image, run against both pinned release tree and main tree) + CPU-UT (`ut_check.py`, per-file isolation with fake npu-smi)
   - `run_tests.py` — e2e test runner with parallel scheduling
   - `push_to_github.py` — push branch + create PR + add labels
   - `ci_log_summary.py` — test log parsing
+  - `lessons.py` — submit/persist adaptation lessons to vllm-report
+  - `track_pr_ci.py` — PR CI result tracking (vllm-report `daily_refresh.sh` step 10; kept in sync with the vllm-report copy)
 
 ## workspace/ is volatile
 
@@ -43,17 +48,21 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
 
 ## Retry & test loop semantics
 
-`process_steps`: per step, run `_ai_analysis` then `_run_e2e_test`. Pass → next step, reset `retry_count`. Fail → `retry_count++` and re-enter `_ai_analysis` in fix mode. At `retry_count >= 3` the entire flow short-circuits to `UpgradeFailed` — there is no per-step skip.
+`process_steps`: per step, run `_ai_analysis` then `_run_e2e_test`. Pass → next step, reset `retry_count`. Fail → `retry_count++` and re-enter `_ai_analysis` in fix mode. At `retry_count >= 3` the flow short-circuits to `UpgradeFailed`. Two skips:
+- adapter-declared **no-op** steps (`is_noop`, first attempt only) skip the per-step e2e and just commit the verified.commit bump
+- a **0-step run** (`current_step == 0` after process_steps) skips PR creation entirely
 
 Inside `_ai_analysis`, the attempt loop (up to 3×):
-1. **adapter** (role=adapter) — generates adaptations
-2. `run_check` — per-step pre-CI: version_strings, temp_files, broken_imports
+1. **adapter** (role=adapter) — generates adaptations, consults vllm-report via MCP
+2. `run_check` — per-step pre-CI: version_strings, temp_files, broken_imports, fast format
 3. **adapter-qa** — independent AI review (separate opencode session, no generator context)
 4. All pass → break. Any fail → retry with **adapter-fix** (role=adapter-fix, with error_logs inlined).
 
-format + mypy are NOT run per-step - they run once at push time in the
+format + mypy + UT are NOT run per-step - they run once at push time in the
 final quality gate (`final_quality_gate.py`), which fixes failures via
-adapter-fix (max 3 rounds) and re-runs e2e to confirm no regression.
+adapter-fix (max 3 rounds) and re-runs e2e to confirm no regression. UT is
+CPU-only by default (`_check_ut`, per-file isolation); `MAIN2MAIN_UT_SKIP_A2`
+skips the A2 NPU batch, `MAIN2MAIN_UT_GATE=0` disables UT in the gate.
 
 ## Env flags worth knowing
 
@@ -69,8 +78,10 @@ adapter-fix (max 3 rounds) and re-runs e2e to confirm no regression.
 | `MAIN2MAIN_WORKSPACE` | Workspace root directory (default: `<repo>/workspace`). |
 | `MAIN2MAIN_TEST_CASES` | Space-separated test paths to run. |
 | `MAIN2MAIN_KEEP_BRANCH` | Skip `git reset --hard origin/main` in vllm-ascend setup. |
-| `PR_LABELS` | Comma-separated labels for created PR (default: `ready`). |
+| `PR_LABELS` | Comma-separated labels for created PR (default: `ready-all`). |
 | `PR_DRAFT` | Create draft PR (default: `true`). |
+| `MAIN2MAIN_UT_SKIP_A2` | CPU-UT only, skip the A2 NPU UT batch (default: `false`). |
+| `MAIN2MAIN_UT_GATE` | `0` disables UT in the final quality gate (default: `1`). |
 | `MAIN2MAIN_RUN_TESTS_REMOTE` | Run tests on a remote host via SSH (`user@host` or `env`). |
 | `MAIN2MAIN_REMOTE_HOST`, `MAIN2MAIN_REMOTE_CONTAINER` | SSH host and container for remote e2e tests. |
 
