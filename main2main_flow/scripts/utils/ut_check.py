@@ -277,6 +277,24 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             ts_print("[pre_ci] ut: no vllm paths configured, skipping")
             return {"violations": [], "detail": "no vllm paths", "skipped": True}
 
+        # Pre-compile .pyc to avoid on-the-fly compilation during pytest
+        # imports.  PR CI's image has pre-compiled .pyc; PYTHONPATH source
+        # tree doesn't, making imports ~9x slower (435s vs 48s per batch).
+        # Safe: .pyc files go to __pycache__/ (gitignored, Python-version-
+        # tagged, no source modification, no pollution to E2E which uses
+        # the installed vllm package, not PYTHONPATH).
+        compile_python = (str(venv_dir / "bin" / "python")
+                          if venv_dir else sys.executable)
+        compile_paths = {str(repo.resolve())}
+        for _, vpath, _, _ in versions:
+            compile_paths.add(str(vpath.resolve()))
+        for cp in sorted(compile_paths):
+            ts_print(f"[pre_ci] ut: pre-compiling .pyc for {cp}")
+            subprocess.run(
+                [compile_python, "-m", "compileall", "-q", "-j", "0", cp],
+                capture_output=True, text=True, timeout=180,
+            )
+
         for label, vpath_abs, vllm_version, pure_cpu in versions:
             env = os.environ.copy()
             ascend_abs = str(repo.resolve())
