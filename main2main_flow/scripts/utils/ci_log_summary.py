@@ -37,6 +37,7 @@ _ENV_FLAKE_PATTERNS: list[str] = [
     r"ConnectionRefusedError",
     r"TimeoutError",
     r"torch\.cuda\.OutOfMemoryError",
+    r"torch\.OutOfMemoryError:.*NPU out of memory",
     r"OSError:.*No space left on device",
     r"RuntimeError:.*CUDA error",
     r"RuntimeError:.*NCCL",
@@ -197,6 +198,15 @@ def process_local_log(log_text: str) -> dict:
     failed_test_cases = _extract_failed_test_cases(log_text)
     failed_test_files = _extract_failed_test_files(log_text, failed_test_cases)
     all_errors = _extract_errors(log_text, failed_test_cases)
+
+    # NPU OOM surfaces at pytest level as "Engine core initialization failed";
+    # the OOM itself lives in the engine subprocess traceback. When the log
+    # contains NPU out-of-memory, reclassify those engine-init errors as
+    # environment flakes (run 32809534429: 3 e2e rounds burned on OOM).
+    if re.search(r"NPU out of memory", log_text):
+        for e in all_errors:
+            if e["category"] == "Code Bug" and "Engine core" in e["error_message"]:
+                e["category"] = "Environment Flake"
 
     code_bugs = [e for e in all_errors if e["category"] == "Code Bug"]
     env_flakes = [e for e in all_errors if e["category"] == "Environment Flake"]
