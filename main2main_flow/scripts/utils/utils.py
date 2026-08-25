@@ -73,10 +73,22 @@ def resolve_path(raw: str, name: str) -> str:
 
 
 def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
-    """Run ``bash format.sh`` and return the CompletedProcess result.
+    """Run ``bash format.sh ci`` and return the CompletedProcess result.
+
+    The ``ci`` argument makes format.sh run ``--hook-stage manual``,
+    matching CI's pre-commit job (pr_test.yaml) exactly — without it, the
+    manual-stage hooks (markdownlint) are skipped and their issues leak
+    into the PR's CI.
 
     Sets ``PRE_COMMIT_HOME`` to a persistent cache path so pre-commit hooks
     don't re-download environments on every invocation.
+
+    PRE_COMMIT_HOME is FORCED to ``~/.cache/main2main-pre-commit``: the CI
+    workflow sets /tmp/main2main-pre-commit, which is wiped on every
+    container start — format.sh then re-downloaded all hook environments
+    each run and timed out (run 32785447082: URLError Errno 110). On the
+    A2 runners ``/root/.cache`` is a bind-mounted persistent volume, so the
+    environments install once and later runs complete in seconds.
 
     After format.sh, removes the ``gitleaks`` binary that ``gitleaks.sh``
     downloads to the repo root when the system has no gitleaks in PATH.
@@ -86,13 +98,9 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
     """
     fmt_script = repo / "format.sh"
     env = os.environ.copy()
-    # setdefault: respect an explicitly-set PRE_COMMIT_HOME (workflow sets
-    # /tmp/main2main-pre-commit), don't override it with /root/... which
-    # fails on non-root runners.
-    env.setdefault("PRE_COMMIT_HOME",
-                   str(Path.home() / ".cache" / "main2main-pre-commit"))
+    env["PRE_COMMIT_HOME"] = str(Path.home() / ".cache" / "main2main-pre-commit")
     r = subprocess.run(
-        ["bash", str(fmt_script)], cwd=str(repo),
+        ["bash", str(fmt_script), "ci"], cwd=str(repo),
         capture_output=True, text=True, env=env,
     )
     gitleaks_bin = repo / "gitleaks"

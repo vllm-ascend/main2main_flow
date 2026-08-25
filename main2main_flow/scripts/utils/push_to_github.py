@@ -35,31 +35,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import run_format_sh, run_git, ts_print
+from main2main_flow.scripts.utils.utils import run_git, ts_print
 
 DEFAULT_WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
-
-
-def _run_format(repo: Path) -> None:
-    """Run format.sh to fix lint issues before commit."""
-    fmt_script = repo / "format.sh"
-    if not fmt_script.exists():
-        return
-    ts_print("[push] Running format.sh ...")
-    before = subprocess.run(
-        ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
-    ).stdout.strip()
-    ts_print("[push] === format.sh output begin ===")
-    r = run_format_sh(repo)
-    ts_print((r.stdout + "\n" + r.stderr).strip())
-    ts_print(f"[push] === format.sh output end (exit={r.returncode}) ===")
-    after = subprocess.run(
-        ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
-    ).stdout.strip()
-    if after != before:
-        ts_print(f"[push] format.sh fixed files (before → after commit)")
-    else:
-        ts_print("[push] format.sh: no files modified")
 
 
 def _wait_for_fork_ref(head_fork: str, branch: str, expected_head: str,
@@ -504,7 +482,6 @@ def push_and_create_pr(
                 # uncommitted changes (e.g. format.sh modified files).
                 branch = current_branch
                 ts_print(f"[push] Reusing branch '{branch}'")
-                _run_format(ascend_path)
                 run_git(ascend_path, "add", "-A")
                 diff_cached = subprocess.run(
                     ["git", "diff", "--cached", "--stat"], cwd=str(ascend_path),
@@ -524,7 +501,6 @@ def push_and_create_pr(
                 run_git(ascend_path, "checkout", "-b", branch)
                 ts_print(f"\n[push] Created branch '{branch}', applying patch: {patch_file}")
                 run_git(ascend_path, "apply", str(patch_file))
-                _run_format(ascend_path)
                 run_git(ascend_path, "add", "-A")
                 commit_msg = _build_commit_msg(old_commit, new_commit, ts)
                 run_git(ascend_path, "commit", "-s", "-m", commit_msg)

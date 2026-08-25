@@ -444,6 +444,17 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             self.has_no_commit()
             return
         self.process_steps()
+        # Final quality gate runs regardless of step outcomes (as long as at
+        # least one step succeeded): format + mypy + UT must always execute so
+        # lint issues never leak into the PR (run 174 pushed an E501 line
+        # because the gate only ran on the all-steps-passed path).
+        # Failures enter adapter-fix mode (max 3 rounds); each fix re-runs e2e
+        # to confirm functional correctness wasn't broken by format/mypy edits.
+        gate_passed = True
+        if self.state.current_step > 0:
+            gate_passed = self._final_quality_gate()
+            if not gate_passed:
+                self.state.final_status = UpgradeFailed
         self.generate_final_post()
         # Persist adaptation lessons (E2E fix rounds) back to vllm-report
         # before push — the clone is recreated every run, so unsaved
@@ -456,6 +467,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # and the last-attempted (broken) diff (PR #14376).  Skip the
             # push entirely.
             ts_print("[push] no steps completed, skipping PR creation")
+            return
+        if not gate_passed:
+            # Format/mypy/UT could not be satisfied after the gate's fix
+            # rounds — pushing would ship known-broken code (run 174's E501).
+            # The manual review issue is created by the workflow's
+            # final-status step; do not create a PR.
+            ts_print("[push] final quality gate failed after fix rounds, "
+                     "skipping PR creation")
             return
         self.push_to_github()
 
@@ -863,13 +882,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     return
                 continue
         self.state.final_status = UpgradeCompleted
-
-        # Final quality gate: format + mypy on the cumulative diff, before push.
-        # Failures enter adapter-fix mode (max 3 rounds); each fix re-runs e2e
-        # to confirm functional correctness wasn't broken by format/mypy edits.
-        if self.state.final_status == UpgradeCompleted:
-            if not self._final_quality_gate():
-                self.state.final_status = UpgradeFailed
 
     def _capture_step_patch(self, ascend_path: str, step_dir: Path,
                             step_id: str) -> None:
