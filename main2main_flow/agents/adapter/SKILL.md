@@ -29,32 +29,22 @@ these rules to stay on the critical path:
    bash call has fixed overhead (issue + output processing); 3 greps in
    one command is ~1/3 the cost of 3 separate calls.
 5. **Verify at edit time, not in a verification loop.** Keep every line
-   ≤120 chars AS YOU WRITE IT (the format rules below apply while
-   editing). Do NOT run `git diff | grep '^+' | awk 'length>121'`, do NOT
-   run py_compile/mypy/ruff (banned — see Rules above). Just write clean
-   lines as you go. The final quality gate re-runs format + mypy once at
-   push time and feeds exact violations back — your job is to not leave
-   obvious violations, not to exhaustively prove there are none.
+   ≤120 chars AS YOU WRITE IT; never run py_compile/mypy/ruff (banned —
+   see Rules). The push-time gate re-runs format + mypy once and feeds
+   exact violations back — don't prove there are none, just don't leave
+   obvious ones.
 6. **MCP context is the map — don't re-discover it — BUT only when it
-   covers the commit.** Two cases:
-   a. `get_adaptation_guide(sha)` RETURNED a guide (the commit was
-      analyzed): follow it directly. Do NOT grep the upstream diff hunks
-      for files the guide already identified, do NOT re-verify the
-      guide's conclusions. Grep only for CALL SITES and sibling
-      overrides (rules 9-10 in the checklist below), which the guide
-      may not enumerate.
-   b. `get_adaptation_guide(sha)` returned empty / "commit not covered"
-      (too recent, or vllm-report has no analysis yet): the guide is
-      useless — DO analyze the upstream diff yourself (grep, read,
-      reason) to find what vllm-ascend depends on. This is expected and
-      allowed. The MCP gap is the signal to explore.
+   covers the commit.** If `get_adaptation_guide(sha)` returned a guide,
+   follow it directly — grep only for CALL SITES and sibling overrides
+   (checklist 9-10). If it returned empty ("commit not covered"), the
+   guide is useless — analyze the upstream diff yourself (grep + read +
+   reason). The MCP gap is the signal to explore.
 7. **One pass per file.** Read a file, understand it, edit all needed
    spots, verify once, move on. Do NOT return to an already-edited file
    unless a later discovery proves your edit wrong.
-8. **In fix mode, fix ONLY what the error says.** Read the traceback /
-   `pre_ci_check.json` violation, fix that exact line, done. Do NOT
-   re-analyze the upstream patch or re-explore the subsystem. The
-   adaptation is done; you are fixing a specific failure.
+8. **In fix mode, fix ONLY what the error says.** Fix the exact line the
+   traceback / violation names — the adaptation is done, you are fixing
+   one failure.
 
 
 ## Repositories
@@ -160,12 +150,8 @@ The step_target.patch is cumulative (git diff HEAD).
   (L20260819-001/002), and read `{step_dir}/upstream-fix-context.diff`
   (when included in the error logs) before declaring no-op.
 - **vllm-report impact map**: {vllm_report_context}
-  The vllm-report MCP server is registered in opencode.jsonc. Call its tools
-  DYNAMICALLY during analysis (see "vllm-report MCP Tools" section below).
-  **If `get_adaptation_guide(sha)` returns a guide for this step's commit,
-  it is authoritative — do NOT re-grep what it already identified.  If it
-  returns empty (commit too recent / not covered), the guide is useless —
-  you MUST analyze the upstream diff yourself (grep + read + reason).**
+  Call the MCP tools DYNAMICALLY during analysis (see "vllm-report MCP
+  Tools" below); guide-returned/guide-empty handling is in Efficiency rule 6.
   Grepping is a fallback for files MCP didn't mention.
 - Use the Key Areas in code-structure-guide.md as an
   architecture-level supplement to vllm-report. When vllm-report is
@@ -228,12 +214,9 @@ Does this code path need to support BOTH the release version AND upstream main?
 5. Every call site passes correct number, type, AND ORDER of arguments on
    BOTH version branches. Use keyword arguments for new parameters.
 6. Override methods match the upstream signature.
-7. **Base-class attribute sync**: when upstream adds an attribute/field to a
-   base class (e.g. `GPUInputBatch.__init__` gains `use_replayssm`), every
-   vllm-ascend subclass MUST accept and set it - even if the feature is
-   NVIDIA-only. vllm's base-class code reads `self.X` at runtime; a
-   subclass that doesn't set it crashes with `AttributeError` on every
-   request. "Feature is GPU-only" is NOT a reason to skip the attribute.
+7. **Base-class attribute sync**: when upstream adds an attribute to a base
+   class, EVERY vllm-ascend subclass must accept and set it — base-class
+   code reads `self.X` at runtime, and "GPU-only" is NOT a reason to skip.
    See `reference/adaptation-patterns.md` §9.
 8. No variable aliases as base classes — use `TypeAlias` or direct class name.
 9. When fixing a version-branch bug, grep for the same pattern in ALL sibling
@@ -246,29 +229,24 @@ Does this code path need to support BOTH the release version AND upstream main?
 14. No dead code, commented-out blocks, or stale `# type: ignore` left behind.
 15. See `reference/common-pitfalls.md` §"Additional QA-level checks" for
     remaining items (registries, Triton params, getattr, path resolution, etc.).
-16. **Return type change → verify ALL return statements**: when upstream
-    changes what a method returns (e.g. `list` → `tuple[list, int]`), grep
-    every `return` in that method.  A single leftover `return old_list`
-    causes `AttributeError` at runtime — pre_ci and mypy cannot catch it.
-17. **Conditional method definition**: when using `if vllm_version_is()`
-    to define two versions of the same method (old vs new signature), the
-    `else` branch (new signature) MUST carry `# type: ignore[misc]` -
-    mypy sees two different signatures for the same name.  See
-    `reference/adaptation-patterns.md` §13.
-18. **Triton kernel signature match**: when upstream changes a Triton
-    kernel that vllm-ascend monkey-patches, the Ascend kernel's signature
-    MUST match the upstream call site exactly (Triton validates arg count
-    at launch, not at definition).  Grep the call site after changing the
-    signature.  See `reference/adaptation-patterns.md` §14.
+16. **Return type change → grep EVERY `return` in the method**: one
+   leftover old-type return slips past pre_ci and mypy.  See
+   `reference/common-pitfalls.md` §"Return type mismatch across version
+   branches".
+17. **Conditional method definition**: the `else` branch (new signature)
+   MUST carry `# type: ignore[misc]`.  See
+   `reference/adaptation-patterns.md` §13.
+18. **Triton kernel signature match**: patched kernel MUST match the
+   upstream call site exactly (validated at launch, not definition).  See
+   `reference/adaptation-patterns.md` §14.
 19. **`device_index` passed explicitly**: NPU device APIs (e.g.
-    `npu_generate_uuid()`) must receive `device_index` from
-    `self.device.index`, not rely on the ambient current device.  See
-    `reference/common-pitfalls.md` §"`device_index` must be passed
-    explicitly".
+   `npu_generate_uuid()`) take `device_index` from `self.device.index`,
+   not the ambient current device.  See `reference/common-pitfalls.md`
+   §"`device_index` must be passed explicitly (not ambient)".
 20. **No variable name shadowing**: new local variables must not shadow
-    names in enclosing scopes (module/class/outer function).  Grep the
-    file for the name before introducing it.  See
-    `reference/common-pitfalls.md` §"Variable name shadowing".
+   names in enclosing scopes; grep the file for the name before
+   introducing it.  See `reference/common-pitfalls.md` §"Variable name
+   shadowing".
 
 **Format rules — apply WHILE editing, not after:**
 
@@ -285,64 +263,49 @@ See `reference/adaptation-patterns.md` §1b.
 ### fix mode
 
 The working tree already contains the failed adaptation — do NOT start from
-scratch. Make minimal targeted fixes to the specific errors reported.
+scratch. Fix ONLY what the error says (Efficiency rule 8).
 
-**Pre-CI failures**: open `pre_ci_check.json` → each failed check has
-`violations` with exact file:line:col:CODE. Fix those specific lines.
+**Pre-CI failures**: open `pre_ci_check.json` → `violations` carry exact
+file:line:col:CODE. Fix those specific lines.
 
-**E2E test failures**: open `round-N-result.json` → check `code_bugs_count` > 0
-→ open failed tests from `suite_results[test_name]`. Read both `-summary.json`
-(structured code_bugs/env_flakes) and `.log` (raw traceback).
-1. Read the FULL traceback first — identify the exact failing path
-   (normal vs cache, with-data vs no-data, batch vs single, etc.). Do
-   NOT guess.
-2. **MUST call `get_adaptation_lessons(keywords=["<error message / test name>"])`
-   BEFORE making any fix.** This is mandatory, not optional. If it
-   returns a lesson, follow its fix_guidance directly — do NOT
-   re-analyze from scratch. Lessons are auto-recorded from past
-   main2main runs that needed E2E fix rounds; skipping the query means
-   you may repeat a mistake that is already documented. (If the MCP
-   call itself fails or the tool is unavailable, log it and continue.)
-3. Also check `reference/common-pitfalls.md` for a KNOWN failure with
-   this exact error message. If one matches, follow its fix
-   requirements directly.
+**E2E test failures**: open `round-N-result.json` → if `code_bugs_count` > 0,
+open failed tests from `suite_results[test_name]`. Read both `-summary.json`
+(structured code_bugs/env_flakes) and `.log` (raw traceback):
+1. Read the FULL traceback first — identify the exact failing path (normal
+   vs cache, with-data vs no-data, batch vs single). Do NOT guess.
+2. **MUST call `get_adaptation_lessons(keywords=["<error message / test
+   name>"])` BEFORE fixing.** Follow its fix_guidance directly — skipping
+   may repeat a documented mistake. (If the MCP call fails, log and continue.)
+3. Check `reference/common-pitfalls.md` for a KNOWN failure with this exact
+   error message; follow its fix requirements if one matches.
 4. **Multi-path check (the #1 reason E2E fixes fail on first attempt)**:
-   upstream code often reaches the same invariant via MULTIPLE paths
-   (cache path skips normal-path code; no-data path skips wrapping;
-   a different call site). Before fixing, ask: does the patched
-   function get CALLED on the failing path? Does the fix cover ALL
-   paths that reach the asserted invariant, or just the one you looked
-   at? Verify your fix against the failing path specifically. See
-   `reference/common-pitfalls.md` §"Fix covers only ONE of multiple
-   code paths".
+   does the patched function get CALLED on the failing path? Does the fix
+   cover ALL paths reaching the asserted invariant, or just the one you
+   looked at? See `reference/common-pitfalls.md` §"Fix covers only ONE of
+   multiple code paths".
 
 **ImportError is NOT an env flake** - it is a real adaptation gap. When E2E
-fails with `ImportError: cannot import name 'X' from 'Y'` where Y is a
-pinned dep (triton, torch, etc.) and X is a symbol vllm main newly
-references, add a compat stub in `vllm_ascend/__init__.py` (module-level,
-before vllm imports). See `reference/common-pitfalls.md` §"Environment
-compatibility stubs" for the triton.experimental.gluon case (PR #13137).
-Do NOT mark the step as no-op/env-flake in this case.
-When the stub imports a third-party module without `py.typed` (e.g. triton),
-add `# type: ignore[import-untyped]` to the import - otherwise CI mypy fails
-with `[import-untyped]` on the stub code itself.
+fails with `ImportError: cannot import name 'X' from 'Y'` from a pinned dep
+(triton, torch, etc.) where X is newly referenced by vllm main, add a compat
+stub in `vllm_ascend/__init__.py` (module-level, before vllm imports) — see
+`reference/common-pitfalls.md` §"Environment compatibility stubs"
+(triton.experimental.gluon case, PR #13137). Do NOT mark no-op/env-flake.
+If the stub imports a module without `py.typed` (e.g. triton), add
+`# type: ignore[import-untyped]` to the import.
 
-**Final quality gate failures (push-time format + mypy)**: after all steps
-complete, format and mypy run once on the cumulative diff.  If they fail,
-`error_logs` contains `quality_gate.json` (NOT `pre_ci_check.json`).  Its
-shape:
+**Final quality gate failures (push-time format + mypy)**: after all steps,
+format + mypy run once on the cumulative diff.  If they fail, `error_logs`
+contains `quality_gate.json` (NOT `pre_ci_check.json`):
 ```json
 {{"all_passed": false, "checks": [
   {{"name": "format", "violations": ["file.py:LINE:CODE ..."]}},
   {{"name": "mypy",  "violations": ["file.py:LINE:COL: error: ... [override]"]}}
 ]}}
 ```
-Fix format violations by `file:LINE:CODE` (E501 break line, F401 delete
-import).  Fix mypy violations per error code - see
-`reference/common-pitfalls.md` §"mypy error codes".  These are mechanical
-fixes - do NOT re-analyze the upstream patch.  After fixing, e2e re-runs
-to confirm functional correctness; if e2e fails, the fix introduced a
-regression - revert and try a different approach.
+Fix format by `file:LINE:CODE` (E501 break line, F401 delete import); fix
+mypy per error code — see `reference/common-pitfalls.md` §"mypy error
+codes". Mechanical fixes — do NOT re-analyze the upstream patch. After
+fixing, e2e re-runs; if it fails, the fix regressed — revert and retry.
 
 ## Output
 
@@ -387,43 +350,17 @@ during adaptation to query deeper information not in the injected impact map.
 
 ```
 1. START HERE — call MCP tools BEFORE grepping:
-   ├─ Call get_adaptation_guide(sha=<end_commit>) FIRST
-   │   -> Returns step-by-step impact analysis with line numbers
-   ├─ Call get_cross_project_mapping()
-   │   -> Returns patch_impact_map (vllm path -> ascend file) +
-   │      definitely_affected_paths
-   ├─ IF the guide returned DATA: adapt those files, don't grep for them.
-   └─ IF the guide returned EMPTY (commit not covered): the guide is
-      useless — analyze the upstream diff yourself (grep + read + reason).
-      This is the normal path for recent commits vllm-report hasn't
-      analyzed yet.
-   │
-2. Need to find which vllm-ascend files are affected?
-   ├─ get_cross_project_mapping() already covers this (call it)
-   ├─ Need interface inheritance details? -> get_interface_surface(repo="vllm-ascend")
-   │      (returns 8 inheritable interfaces with ascend_impl + key_methods)
-   └─ Only skip grep when MCP data exists; otherwise grep is your analysis
-   │
-3. Need to know HOW to adapt a specific change?
-   ├─ get_adaptation_guide(sha=<end_commit>) already covers this (call it)
-   ├─ Call get_patch_catalog(category="platform"|"worker")
-   │   -> Returns known patch patterns (targets/why/how/related_pr)
-   └─ Call search_analysis(keywords=["<symbol_name>"], tags=["high-risk"])
-       -> Find similar past commits and how they were adapted
-   │
-4. Need to understand a subsystem before adapting?
-   ├─ Call get_key_abstractions(repo="vllm-ascend")
-   │   -> Core abstractions with inheritance chains
-   ├─ Call get_module_info(repo="vllm-ascend", module_name="<module>")
-   │   -> Module details (files, classes, dependencies)
-   └─ Call get_development_workflows()
-       -> How to add platform patch / worker patch / new model / attention backend
-   │
-5. In fix mode, need to understand why a test failed?
-   ├─ Call search_analysis(keywords=["<error keyword from traceback>"])
-   │   -> Find commits that caused similar errors
-   └─ Call get_commit_arch_delta(repo="vllm", sha="<end_commit>")
-       -> Architecture delta: what modules/abstractions changed
+   ├─ get_adaptation_guide(sha=<end_commit>) FIRST — if it returned data,
+   │  follow it (Efficiency rule 6); if empty, analyze the diff yourself.
+   ├─ get_cross_project_mapping() — vllm path -> ascend file map; call it
+   │  before deciding which files to grep.
+   └─ Only skip grep when MCP data exists; otherwise grep is your analysis.
+2. HOW to adapt a specific change? → get_adaptation_guide (already called),
+   get_patch_catalog(category="platform"|"worker"), search_analysis(...).
+3. Understand a subsystem? → get_key_abstractions(repo="vllm-ascend"),
+   get_module_info(repo, module_name), get_development_workflows().
+4. In fix mode, why did a test fail? → search_analysis(keywords=[...]),
+   get_commit_arch_delta(repo="vllm", sha=<end_commit>).
 ```
 
 **CRITICAL**: Call MCP tools FIRST, before any grep. The tools return

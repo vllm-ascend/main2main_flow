@@ -9,29 +9,28 @@ Lines are relative to this file; read a section with `sed -n 'A,Bp' <this file>`
 
 | Section | Trigger — read when... | Lines |
 |---------|------------------------|-------|
-| Version guard direction is inverted | any `vllm_version_is` guard you write (self-check) | 36-65 |
-| Importing modules that don't exist | mypy `import-not-found` on guarded imports | 66-84 |
-| Indentation errors | inserting guard blocks into existing code | 85-90 |
-| Variable aliases as base classes | mypy `[valid-type]` / `[misc]` on `class X(_Base)` | 91-112 |
-| Missing attribute on subclass | `AttributeError: no attribute 'Y'` after upstream adds a field | 113-128 |
-| Return type mismatch across branches | release-only `AttributeError` on a return value, main passes | 129-149 |
-| Missing override in sibling class | `TypeError: missing required positional` on an unmodified class | 150-166 |
-| Positional argument order | upstream inserts a param between existing ones | 167-186 |
-| hit_length computation with wrong block_size | v0.25.1 MLA crash (segfault, no traceback) | 187-211 |
-| Processor patch blocked by early return | `Tokenizer is missing required attribute 'image_token'` | 212-232 |
-| Fix covers only ONE of multiple paths | the SAME e2e failure recurs after your fix (HunyuanVL) | 233-295 |
-| Patching symbols from deleted modules | a patch file references a deleted `vllm.X` | 296-305 |
-| `hasattr` / `try-except` instead of guard | code uses `hasattr` or `try: import` for version detection | 306-314 |
-| Output-buffer trap | upstream changes `output[:] = result` to `return result` | 315-320 |
-| Format violations (E501/F821/F841/F401) | pre_ci or gate flags a format code | 321-332 |
-| Common typos (codespell) | gate flags spelling | 333-340 |
-| Additional QA-level checks | proactive checklist before submitting (next(), super(), registries) | 341-370 |
-| Environment compatibility stubs | `ImportError` from a pinned dep (triton etc.) at import time | 371-415 |
-| triton-ascend kernel constraints | porting a Triton kernel; `CompilationError`/`KeyError` at launch | 416-465 |
-| `device_index` must be explicit | NPU device APIs in version-guarded branches | 466-487 |
-| Variable name shadowing | `AttributeError`/wrong-type errors at a call site | 488-511 |
-| mypy error codes (final gate) | final quality gate mypy failures, fix per `[code]` | 512-543 |
-| Fix mode workflow | `error_logs` contains `quality_gate.json` or `pre_ci_check.json` | 544-567 |
+| Version guard direction is inverted | any `vllm_version_is` guard you write (self-check) | 35-64 |
+| Importing modules that don't exist | mypy `import-not-found` on guarded imports | 65-83 |
+| Indentation errors | inserting guard blocks into existing code | 84-89 |
+| Variable aliases as base classes | mypy `[valid-type]` / `[misc]` on `class X(_Base)` | 90-111 |
+| Missing attribute on subclass | `AttributeError: no attribute 'Y'` after upstream adds a field | 112-121 |
+| Return type mismatch across branches | release-only `AttributeError` on a return value, main passes | 122-142 |
+| Missing override in sibling class | `TypeError: missing required positional` on an unmodified class | 143-159 |
+| Positional argument order | upstream inserts a param between existing ones | 160-179 |
+| hit_length computation with wrong block_size | v0.25.1 MLA crash (segfault, no traceback) | 180-204 |
+| Processor patch blocked by early return | `Tokenizer is missing required attribute 'image_token'` | 205-225 |
+| Fix covers only ONE of multiple paths | the SAME e2e failure recurs after your fix (HunyuanVL) | 226-288 |
+| Patching symbols from deleted modules | a patch file references a deleted `vllm.X` | 289-298 |
+| `hasattr` / `try-except` instead of guard | code uses `hasattr` or `try: import` for version detection | 299-304 |
+| Output-buffer trap | upstream changes `output[:] = result` to `return result` | 305-310 |
+| Format violations (E501/F821/F841/F401) | pre_ci or gate flags a format code | 311-322 |
+| Common typos (codespell) | gate flags spelling | 323-330 |
+| Additional QA-level checks | proactive checklist before submitting (next(), super(), registries) | 331-357 |
+| Environment compatibility stubs | `ImportError` from a pinned dep (triton etc.) at import time | 358-402 |
+| triton-ascend kernel constraints | porting a Triton kernel; `CompilationError`/`KeyError` at launch | 403-452 |
+| `device_index` must be explicit | NPU device APIs in version-guarded branches | 453-474 |
+| Variable name shadowing | `AttributeError`/wrong-type errors at a call site | 475-498 |
+| mypy error codes (final gate) | final quality gate mypy failures, fix per `[code]` | 499-530 |
 
 ## Version guard direction is inverted
 
@@ -112,19 +111,13 @@ version-guarded inside `else`.
 
 ## Missing attribute on subclass after upstream adds one
 
-**Symptom**: `AttributeError: 'AscendX' object has no attribute 'Y'` at
-runtime. Upstream added a new field/method to a base class that vllm-ascend
-subclasses, and the adapter didn't add it to the subclass.
-
-**Prevention**: When upstream adds a new attribute, method, or config field
-to a class that vllm-ascend subclasses or wraps, grep for ALL subclasses:
+**Symptom**: `AttributeError: 'AscendX' object has no attribute 'Y'` when
+upstream adds a field to a base class vllm-ascend subclasses. Add it to
+EVERY subclass — see `adaptation-patterns.md` §9 for the full rule:
 
 ```bash
 grep -rn "class.*BaseClassName" vllm_ascend/
 ```
-
-Add the new attribute to every subclass. Even if it's just a default value,
-without it the subclass will `AttributeError` at runtime.
 
 ## Return type mismatch across version branches
 
@@ -306,17 +299,14 @@ If deleted, remove the patch file. See `adaptation-patterns.md` §4.
 ## `hasattr` / `try-except` used instead of version guard
 
 **Symptom**: Code uses `if hasattr(obj, "new_field")` or `try: import X except:
-pass` instead of `vllm_version_is()`. These pass pre_ci but break when the
-upstream type changes.
-
-**Prevention**: Always use `vllm_version_is("{release_tag}")` for version
-boundaries. `hasattr`/`try-except` silently mask the wrong kind of change.
+pass` for version detection. These pass pre_ci but silently break when the
+upstream type changes — always use `vllm_version_is()` instead.
 
 ## Output-buffer trap
 
-When upstream changes from `output[:] = result` to `return result`, don't
-just add a forward redirect. Make the removed parameter optional, guard
-the return path, and guard every call site. See `adaptation-patterns.md` §1b.
+When upstream changes `output[:] = result` to `return result`, make the
+removed parameter optional, guard the return path, and guard every call
+site. See `adaptation-patterns.md` §1b.
 
 ## Format violations (E501 / F821 / F841 / F401)
 
@@ -340,14 +330,13 @@ Check every added comment and string for spelling.
 
 ## Additional QA-level checks
 
-These are caught by the QA reviewer but should be applied proactively:
+These are caught by the QA reviewer but should be applied proactively
+(the `next()` / `super().__init__()` / no-exact-version / dead-code items
+already live in the SKILL.md verify checklist):
 
-- **`next()` must have a default value**: always `next(iter, default)`, never bare `next(...)`.
-- **`super().__init__()` must be called**: every subclass `__init__` must chain to parent.
 - **Verify registries after touching KVCacheSpecRegistry**: when removing old-version
   branches, confirm `KVCacheSpecRegistry.register()` / `__init_subclass__` calls are not
   deleted. Grep: `grep -rn "register\|__init_subclass__" vllm_ascend/` near changed code.
-- **No exact version matching**: never `== "X.Y.Z"`. Use `vllm_version_is()` or `>=`.
 - **Grep before deleting**: before removing any function/env-var/utility, grep the full
   call chain. Even if a function appears single-version, multiple patch files may depend
   on it.
@@ -361,8 +350,6 @@ These are caught by the QA reviewer but should be applied proactively:
 - **No `logging.debug` on TorchDynamo compile path**: guard with
   `if not torch.compiler.is_compiling()`.
 - **Resolve paths before chaining**: call `.resolve()` before `.parents[N]` on `Path`.
-- **Remove dead code**: commented-out experimental lines, `# "FusedMoE": AscendFusedMoE,`
-  blocks left for reference — remove them.
 - **Clean up stale `# type: ignore`**: when editing nearby code, remove redundant
   type-ignore comments and meaningless annotations.
 - **Document default value changes**: when changing a parameter's default (e.g.
@@ -541,30 +528,3 @@ Fix per-code:
 changed the base class signature - grep for ALL overrides of that method
 and update every one (see §"Missing override in sibling class").
 
-## Fix mode workflow
-
-**Branch A - final quality gate (push-time format + mypy)**:
-If `error_logs` contains `quality_gate.json` (not `pre_ci_check.json`):
-1. Read `quality_gate.json` -> `checks[].violations` (format + mypy sections)
-2. For each format violation: fix `file:LINE:CODE` directly (E501 break line,
-   F401 delete import, F841 remove var). No upstream analysis needed.
-3. For each mypy violation: fix per error code (see mypy error codes above).
-   `[import-not-found]`/`[import-untyped]` -> `# type: ignore`; others -> fix code.
-4. Do NOT re-analyze upstream patch - these are mechanical fixes.
-5. After fixing, the gate re-runs format+mypy; if still failing, retry (max 3).
-   Then e2e re-runs to confirm no functional regression.
-
-**Branch B - per-step pre_ci / e2e failure**:
-1. Extract search term from error (method name, config field, class name)
-2. Search upstream patch (`{patch_path}`) for that term
-3. Identify upstream intent: rename, removal, new parameter, new method
-4. Map to vllm-ascend code that depends on it - use MCP tools if the
-   mapping is unclear:
-   - `get_cross_project_mapping()` for full vllm<->ascend path/class map
-   - `get_interface_surface(repo="vllm-ascend")` for inheritable interfaces
-   - `search_analysis(keywords=["<search term>"])` for similar past commits
-   - `get_adaptation_guide(sha=<end_commit>)` if vllm-report analyzed it
-5. Decide if `vllm_version_is` guard is needed
-6. Open pre_ci_check.json -> read violations -> fix each file:line:col:CODE
-   (format is NOT checked per-step anymore - it runs at push time via
-   Branch A. Only version_strings/temp_files/broken_imports run per-step.)

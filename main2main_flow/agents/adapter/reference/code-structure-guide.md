@@ -8,8 +8,8 @@ policy. Read only the sections needed for the current step.
 
 | Section | Trigger — read when... | Lines |
 |---------|------------------------|-------|
-| vLLM Key Areas to Focus On | mapping an upstream change to likely vllm-ascend files | 21-82 |
-| File Mapping (via vllm-report) | vllm-report unavailable; need manual fallback routing | 85-91 |
+| vLLM Key Areas to Focus On | mapping an upstream change to likely vllm-ascend files | 21-84 |
+| File Mapping (via vllm-report) | vllm-report unavailable; need manual fallback routing | 85-94 |
 
 This file may need refreshing when vllm-ascend structure changes. On the final
 main2main step, check whether the vllm-ascend files/directories or mappings below
@@ -84,13 +84,11 @@ require vLLM Ascend adaptation:
 
 ## File Mapping (via vllm-report)
 
-The static File Mapping Table has been replaced by vllm-report's dynamic
-`patch_impact_map` and `definitely_affected_paths`, which are injected
-per-step as `{vllm_report_context}` in the Code Exploration section above.
-vllm-report's maps are extracted from vllm-ascend's `patch/__init__.py`
-registration code, so they reflect the actual patch wiring (not just
-directory-level guesses).
+The static File Mapping Table is replaced by vllm-report's dynamic
+`patch_impact_map` and `definitely_affected_paths`, injected per-step as
+`{vllm_report_context}`. They are extracted from vllm-ascend's
+`patch/__init__.py` registration code, so they reflect actual patch wiring.
 
 When vllm-report is unavailable (clone failed or commit not covered), fall
-back to the Key Areas and File Locations above to manually route changed
-upstream paths to vllm-ascend files via grep.
+back to the Key Areas above to manually route changed upstream paths to
+vllm-ascend files via grep.

@@ -11,46 +11,22 @@ Lines are relative to this file; read a section with `sed -n 'A,Bp' <this file>`
 
 | Section | Trigger — read when... | Lines |
 |---------|------------------------|-------|
-| MCP tool selection | unsure which vllm-report tool answers the question | 32-54 |
-| §1 Upstream adds a parameter | a new param appears in an upstream signature | 55-66 |
-| §1b Removes a parameter + return change | a param is removed AND return semantics change | 67-83 |
-| §2 Constructor/factory signature change | a constructor or factory changes signature | 84-95 |
-| §3 Class moved to another module | a class moves modules upstream | 96-112 |
-| §4 Upstream deletes a patched module | vllm-ascend patches a module upstream deleted | 113-116 |
-| §5 Upstream fixes a bug with a workaround | upstream bugfix supersedes an ascend workaround | 117-126 |
-| §6 Refactoring too large for guards | >50 lines of guarded code | 127-137 |
-| §7 Runtime check Ascend can't satisfy | upstream adds an NPU-unsatisfiable check | 138-145 |
-| §8 PyTorch API not on NPU | upstream uses a torch API missing on NPU | 146-153 |
-| §9 Base class adds attr/method | base class gains fields/methods (incl. NVIDIA-only trap) | 154-194 |
-| §10 Method signature change — ALL overrides | a method signature changes; grep every override | 195-205 |
-| §11 Processor registrations removed | upstream unregisters processors | 206-214 |
-| §12 `next()` calls | changed code contains bare `next(...)` | 215-226 |
-| §13 Params added to an overridden method | overridden method gains params (two-version def) | 227-264 |
-| §14 Triton kernel signature change | a patched Triton kernel changes signature | 265-295 |
-| Mypy prevention | final mypy errors on guards/imports/overrides | 296-301 |
-
-## Using MCP tools to identify the right pattern
-
-Before picking a pattern below, use vllm-report MCP tools to confirm the
-upstream change type and find affected vllm-ascend code:
-
-- **Unsure which files are affected?** -> `get_cross_project_mapping()` for
-  vllm path -> ascend patch file mapping; `get_interface_surface()` for
-  inheritance chains.
-- **Need a step-by-step guide for this commit?** ->
-  `get_adaptation_guide(sha=<end_commit>)` returns line-numbered adaptation
-  steps if vllm-report has analyzed the commit.
-- **Seen a similar change before?** -> `search_analysis(keywords=["<changed
-  symbol>"])` finds past commits with the same pattern and their
-  `ascend_impact` analysis.
-- **Need to know how a patch category works?** ->
-  `get_patch_catalog(category="platform"|"worker")` returns known patch
-  patterns with `targets`, `why`, `how`, `related_pr`.
-- **Need to understand the subsystem architecture?** ->
-  `get_key_abstractions(repo="vllm-ascend")` for core abstractions;
-  `get_development_workflows()` for how to add patches/models.
-
-Limit to 2-3 MCP calls per step. If a tool fails, fall back to grep.
+| §1 Upstream adds a parameter | a new param appears in an upstream signature | 31-42 |
+| §1b Removes a parameter + return change | a param is removed AND return semantics change | 43-59 |
+| §2 Constructor/factory signature change | a constructor or factory changes signature | 60-71 |
+| §3 Class moved to another module | a class moves modules upstream | 72-88 |
+| §4 Upstream deletes a patched module | vllm-ascend patches a module upstream deleted | 89-92 |
+| §5 Upstream fixes a bug with a workaround | upstream bugfix supersedes an ascend workaround | 93-102 |
+| §6 Refactoring too large for guards | >50 lines of guarded code | 103-113 |
+| §7 Runtime check Ascend can't satisfy | upstream adds an NPU-unsatisfiable check | 114-121 |
+| §8 PyTorch API not on NPU | upstream uses a torch API missing on NPU | 122-129 |
+| §9 Base class adds attr/method | base class gains fields/methods (incl. NVIDIA-only trap) | 130-170 |
+| §10 Method signature change — ALL overrides | a method signature changes; grep every override | 171-181 |
+| §11 Processor registrations removed | upstream unregisters processors | 182-190 |
+| §12 `next()` calls | changed code contains bare `next(...)` | 191-202 |
+| §13 Params added to an overridden method | overridden method gains params (two-version def) | 203-240 |
+| §14 Triton kernel signature change | a patched Triton kernel changes signature | 241-271 |
+| Mypy prevention | final mypy errors on guards/imports/overrides | 272-278 |
 
 ## 1. Upstream adds a parameter
 
