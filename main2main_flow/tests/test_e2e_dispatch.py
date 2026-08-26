@@ -233,6 +233,45 @@ def test_compute_test_groups_select_tests_missing(tmp_path: Path) -> None:
         pass
 
 
+def test_apply_minimal_filter_no_env() -> None:
+    groups = [{"npu_type": "a2", "num_npus": 1, "tests": "a.py b.py"}]
+    assert e2e_dispatch.apply_minimal_filter(groups) == groups
+
+
+def test_apply_minimal_filter_selects(monkeypatch) -> None:
+    groups = [
+        {"npu_type": "a2", "num_npus": 1, "runner": "linux-aarch64-a2b1-8",
+         "tests": "tests/e2e/a2/test_qwen3_0_6b.py "
+                  "tests/e2e/a2/test_eagle.py tests/e2e/a2/test_dflash.py"},
+        {"npu_type": "a3", "num_npus": 2, "runner": "linux-aarch64-a3-800i-16-cn12-001",
+         "tests": "tests/e2e/a3_2/test_prefix_caching.py"},
+        {"npu_type": "a3", "num_npus": 4, "runner": "linux-aarch64-a3-800i-16-cn12-001",
+         "tests": "tests/e2e/a3_4/test_pipeline_parallel.py "
+                  "tests/e2e/a3_4/test_data_parallel_tp2.py"},
+    ]
+    monkeypatch.setenv(
+        "MAIN2MAIN_E2E_MINIMAL",
+        "a2: test_eagle.py test_dflash.py\na3: test_prefix_caching.py test_pipeline_parallel.py")
+    out = e2e_dispatch.apply_minimal_filter(groups)
+    chips = [g["npu_type"] for g in out]
+    assert chips == ["a2", "a3", "a3"]
+    assert out[0]["tests"].split() == [
+        "tests/e2e/a2/test_eagle.py", "tests/e2e/a2/test_dflash.py"]
+    # 2-card group keeps only the matching test; 4-card group drops the rest
+    assert out[1]["tests"] == "tests/e2e/a3_2/test_prefix_caching.py"
+    assert out[2]["tests"] == "tests/e2e/a3_4/test_pipeline_parallel.py"
+
+
+def test_apply_minimal_filter_unknown_chip_dropped(monkeypatch) -> None:
+    groups = [
+        {"npu_type": "310p", "num_npus": 1, "tests": "tests/e2e/310p/test_z.py"},
+        {"npu_type": "a2", "num_npus": 1, "tests": "tests/e2e/a2/test_x.py"},
+    ]
+    monkeypatch.setenv("MAIN2MAIN_E2E_MINIMAL", "a2: test_x.py")
+    out = e2e_dispatch.apply_minimal_filter(groups)
+    assert [g["npu_type"] for g in out] == ["a2"]
+
+
 def test_build_test_errors_detail_contract(tmp_path: Path) -> None:
     adir = _make_artifact_dir(
         tmp_path, "a2", 8,

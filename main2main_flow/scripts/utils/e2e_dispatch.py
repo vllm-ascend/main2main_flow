@@ -130,7 +130,41 @@ def compute_test_groups(ascend_path: Path, base_sha: str,
         if image_tag:
             g["image_tag"] = image_tag
         rewritten.append(g)
-    return rewritten
+    return apply_minimal_filter(rewritten)
+
+
+def apply_minimal_filter(groups: list[dict]) -> list[dict]:
+    """Keep only the tests named in MAIN2MAIN_E2E_MINIMAL (per-chip lines).
+
+    Format: one line per chip — ``<chip>: <test> <test> ...``, where each
+    test is a substring match on the test path.  Used for cheap validation
+    runs on the fork: chips not named are dropped entirely, and named chips
+    keep only the groups that contain a match (with the matching tests).
+    No env → the full ready-all groups pass through unchanged.
+    """
+    spec = os.getenv("MAIN2MAIN_E2E_MINIMAL", "").strip()
+    if not spec:
+        return groups
+    wanted: dict[str, list[str]] = {}
+    for line in spec.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        chip, _, tests = line.partition(":")
+        wanted[chip.strip()] = [t.strip() for t in tests.split() if t.strip()]
+    out: list[dict] = []
+    for g in groups:
+        names = wanted.get(g.get("npu_type", ""))
+        if not names:
+            continue
+        kept = [t for t in g.get("tests", "").split()
+                if any(n in t for n in names)]
+        if not kept:
+            continue
+        g = dict(g)
+        g["tests"] = " ".join(kept)
+        out.append(g)
+    return out
 
 
 def _map_changed_to_tests(ascend_path: Path,

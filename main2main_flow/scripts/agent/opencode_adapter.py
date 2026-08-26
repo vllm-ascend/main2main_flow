@@ -29,8 +29,11 @@ _AGENT_DIR = Path(__file__).parent.parent.parent / "agents"
 # killed the model mid-work repeatedly (run 32809534429: 6 kills), and each
 # SIGKILL+resume made the session context larger and every later call slower.
 # 60min halves the kill count; the stale/event-stale checks below still bound
-# genuinely stuck sessions.
-_TIMEOUT_MINUTES = 60
+# genuinely stuck sessions.  Validation runs on the fork set
+# MAIN2MAIN_ADAPTER_TIMEOUT_MINUTES=10 to keep the loop testable — a killed
+# session resumes with the short continue prompt, so an under-budget test
+# run still exercises the real path.
+_TIMEOUT_MINUTES = int(os.environ.get("MAIN2MAIN_ADAPTER_TIMEOUT_MINUTES", "60"))
 _STALE_SECONDS = 300
 # No JSONL progress event (step_start/tool_use/text/step_finish) for this
 # long → kill.  The stdout-based stale check misses sessions that stream
