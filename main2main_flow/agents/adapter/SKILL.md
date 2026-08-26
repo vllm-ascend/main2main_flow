@@ -126,14 +126,14 @@ a fix pattern (generic versions of the failures in run 31581543851, PR
    (grep the attribute-access chain of the bare object) instead of
    running tests — running is banned and each run costs a full e2e round.
 
-## Cumulative Step Model
+## Accumulated Step Model
 
 The vllm-ascend working tree already contains all successful adaptations from previous steps:
 1. Read {previous_step_summary_path} if it exists
 2. Reuse prior guards, helpers, imports, and patterns
 3. Never revert prior adaptations unless the current change proves them obsolete
 
-The step_target.patch is cumulative (git diff HEAD).
+The step_target.patch is accumulated (git diff HEAD).
 
 ## Code Exploration
 
@@ -181,7 +181,7 @@ The step_target.patch is cumulative (git diff HEAD).
 3. Apply minimal changes — do not refactor unrelated code
 4. **Apply the Format rules and mypy prevention rules below WHILE editing**
    (format + mypy are NOT checked per-step - they run once at push time on
-   the cumulative diff. Apply the rules BY READING as you edit — NEVER run
+   the accumulated diff. Apply the rules BY READING as you edit — NEVER run
    mypy/ruff/py_compile to check (banned, see Rules above). If the final
    gate fails, the exact `file:LINE:CODE` is fed back via
    `quality_gate.json` in fix mode).
@@ -294,7 +294,7 @@ If the stub imports a module without `py.typed` (e.g. triton), add
 `# type: ignore[import-untyped]` to the import.
 
 **Final quality gate failures (push-time format + mypy)**: after all steps,
-format + mypy run once on the cumulative diff.  If they fail, `error_logs`
+format + mypy run once on the accumulated diff.  If they fail, `error_logs`
 contains `quality_gate.json` (NOT `pre_ci_check.json`):
 ```json
 {{"all_passed": false, "checks": [
@@ -314,7 +314,7 @@ Write to {step_dir}/:
 | file | content |
 |------|---------|
 | analysis.md | subsystems touched, changes, version guard assessment |
-| step_summary.md | cumulative summary (preserve prior, append `{step_id}` section) |
+| step_summary.md | accumulated summary (preserve prior, append `{step_id}` section) |
 | result.json | `{{"status": "adapted" \| "noop", "files_touched": [...]}}` — write LAST |
 
 ### step_summary.md

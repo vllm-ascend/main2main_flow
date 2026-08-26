@@ -182,7 +182,16 @@ def _check_fast_format(repo: Path) -> dict:
     if after != snapshot:
         ts_print("[pre_ci] format: ruff-check auto-fixed the changed files")
         return {"violations": [], "detail": "ruff-check auto-fixed the changed files"}
-    violations = [l for l in output.splitlines() if l.strip()][:20]
+    # Same real-error extraction as _check_format: hook-level, skipping
+    # auto-fix noise and env failures (e.g. aarch64 hook binary on amd64
+    # runner -> "[Errno 8] Exec format error"), so the step's fix loop
+    # never churns on environment problems.
+    violations: list[str] = []
+    for hook_name, hook_lines in _iter_failed_hooks(output):
+        violations.extend(l for l in hook_lines if _is_real_error(l))
+    violations = violations[:20]
+    if not violations:
+        return {"violations": [], "detail": "ruff-check skipped (hook env error)", "skipped": True}
     return {"violations": violations,
             "detail": f"{len(violations)} ruff violation(s) (not auto-fixable)"}
 

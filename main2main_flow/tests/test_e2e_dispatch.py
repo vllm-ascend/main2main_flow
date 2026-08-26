@@ -39,16 +39,38 @@ def _make_artifact_dir(tmp_path: Path, chip: str, num_npus: int,
                        entries: list[dict], elapsed: float = 42.0) -> Path:
     adir = tmp_path / f"main2main-e2e-round-1-{chip}"
     adir.mkdir(parents=True)
-    tests = []
+    suite = {}
     for e in entries:
         if e["log"]:
-            (adir / e["log"]).write_text(e["log_text"], encoding="utf-8")
-        tests.append({k: e[k] for k in
-                      ("name", "passed", "exit_code", "elapsed", "log",
-                       "status")})
-    (adir / "results.json").write_text(
-        json.dumps({"chip": chip, "npu_type": chip, "num_npus": num_npus,
-                    "elapsed_s": elapsed, "tests": tests}),
+            # Log files carry the parse-side slug naming (round-<N>-<slug>.log)
+            # so build_test_errors_detail can excerpt them.
+            slug = e["name"].replace("/", "__").replace(".py", "")
+            (adir / f"round-1-{slug}.log").write_text(
+                e["log_text"], encoding="utf-8")
+            if not e["passed"]:
+                (adir / f"round-1-{slug}-summary.json").write_text(
+                    json.dumps({"failed_test_files_count": 1,
+                                "failed_test_cases_count": 1,
+                                "code_bugs": ["boom"]}),
+                    encoding="utf-8")
+        passed = e["passed"]
+        suite[e["name"]] = {
+            "cards_required": num_npus,
+            "run_suite_exit_code": 0 if passed else 1,
+            "ci_result": "passed" if passed else "failed",
+            "summary_error": None,
+            "code_bugs_count": 0 if passed else 1,
+            "env_flakes_count": 0,
+            "failed_test_files_count": 0 if passed else 1,
+            "failed_test_cases_count": 0 if passed else 1,
+            "not_run": e["status"] == "NOT_RUN",
+        }
+    (adir / "round-1-result.json").write_text(
+        json.dumps({"can_commit": all(e["passed"] for e in entries),
+                    "ci_result": ("passed" if all(e["passed"] for e in entries)
+                                  else "failed"),
+                    "suite_results": suite, "rounds": [],
+                    "elapsed_s": elapsed}),
         encoding="utf-8")
     return adir
 
@@ -105,10 +127,11 @@ def test_parse_artifacts_not_run(tmp_path: Path) -> None:
 
 
 def test_parse_artifacts_missing_chip_drops(tmp_path: Path) -> None:
-    # results.json unparseable -> chip dropped; empty suite -> summary_error.
+    # round-N-result.json unparseable -> chip dropped; empty suite ->
+    # summary_error.
     adir = tmp_path / "main2main-e2e-round-1-a3"
     adir.mkdir()
-    (adir / "results.json").write_text("{broken", encoding="utf-8")
+    (adir / "round-1-result.json").write_text("{broken", encoding="utf-8")
     result = e2e_dispatch.parse_exec_artifacts(tmp_path, 1, 0)
     assert result["ci_result"] == "failed"
     assert result["can_commit"] is False
@@ -234,3 +257,86 @@ def test_build_test_errors_detail_no_failures(tmp_path: Path) -> None:
     detail = build_test_errors_detail({}, 1, tmp_path,
                                       tmp_path / "round-1-result.json")
     assert detail is None
+
+
+def _full_groups() -> list[dict]:
+    return [
+        {"num_npus": 1, "npu_type": "a2", "runner": "linux-aarch64-a2b1-8",
+         "tests": "tests/e2e/a2/test_a.py tests/e2e/a2/test_b.py",
+         "partition": "1-1", "image_tag": "9.1.0-910b-ubuntu22.04-py3.12"},
+        {"num_npus": 4, "npu_type": "a3", "runner": "linux-aarch64-a3-800i-16-cn12-001",
+         "tests": "tests/e2e/a3_4/test_c.py", "partition": "1-1",
+         "image_tag": "9.1.0-a3-ubuntu22.04-py3.12"},
+    ]
+
+
+def test_incremental_groups_failing_only(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(e2e_dispatch, "run_git", lambda *a, **k: "")
+    result = e2e_dispatch.incremental_test_groups(
+        tmp_path, "abc123", ["tests/e2e/a2/test_b.py"], _full_groups())
+    assert result is not None
+    assert len(result) == 1
+    assert result[0]["tests"] == "tests/e2e/a2/test_b.py"  # group shrunk
+    assert result[0]["npu_type"] == "a2"
+    assert result[0]["num_npus"] == 1  # routing metadata preserved
+    assert result[0]["image_tag"] == "9.1.0-910b-ubuntu22.04-py3.12"
+
+
+def test_incremental_groups_with_diff_impact(monkeypatch,
+                                             tmp_path: Path) -> None:
+    monkeypatch.setattr(e2e_dispatch, "run_git",
+                        lambda *a, **k: "vllm_ascend/foo.py\n")
+    monkeypatch.setattr(
+        e2e_dispatch, "_map_changed_to_tests",
+        lambda *a, **k: ["tests/e2e/a3_4/test_c.py",
+                         "tests/ut/attention/not_in_gpu_suite.py"])
+    result = e2e_dispatch.incremental_test_groups(
+        tmp_path, "abc123", ["tests/e2e/a2/test_a.py"], _full_groups())
+    assert result is not None
+    by_type = {g["npu_type"]: g["tests"] for g in result}
+    assert "tests/e2e/a2/test_a.py" in by_type["a2"]
+    # impact ∪ failing, deduped; routed via the full groups (test_c keeps
+    # its a3 x4 routing even though it was also a failing test).  The UT
+    # target has no group in the GPU suite → dropped (quality gate covers).
+    assert by_type["a3"] == "tests/e2e/a3_4/test_c.py"
+    for g in result:
+        assert g["npu_type"] in ("a2", "a3")
+        assert g["num_npus"] in (1, 4)
+
+
+def test_incremental_groups_drops_unmapped_targets(monkeypatch,
+                                                   tmp_path: Path) -> None:
+    # CPU-UT targets (not in the GPU full groups) must not leak into the
+    # fix round — the quality gate covers them.
+    monkeypatch.setattr(e2e_dispatch, "run_git",
+                        lambda *a, **k: "vllm_ascend/foo.py\n")
+    monkeypatch.setattr(e2e_dispatch, "_map_changed_to_tests",
+                        lambda *a, **k: ["tests/ut/attention/test_x.py"])
+    result = e2e_dispatch.incremental_test_groups(
+        tmp_path, "abc123", ["tests/e2e/a2/test_b.py"], _full_groups())
+    assert result is not None
+    assert len(result) == 1
+    assert result[0]["tests"] == "tests/e2e/a2/test_b.py"
+
+
+def test_incremental_groups_unmappable_failing(monkeypatch,
+                                               tmp_path: Path) -> None:
+    monkeypatch.setattr(e2e_dispatch, "run_git", lambda *a, **k: "")
+    result = e2e_dispatch.incremental_test_groups(
+        tmp_path, "abc123", ["tests/e2e/a2/never_scheduled.py"],
+        _full_groups())
+    assert result is None
+
+
+def test_incremental_groups_mapping_failure(monkeypatch,
+                                            tmp_path: Path) -> None:
+    monkeypatch.setattr(e2e_dispatch, "run_git",
+                        lambda *a, **k: "vllm_ascend/foo.py\n")
+    def boom(*a, **k):
+        raise RuntimeError("yaml broken")
+    monkeypatch.setattr(e2e_dispatch, "_map_changed_to_tests", boom)
+    # Impact mapping fails → failing set alone still covers completeness.
+    result = e2e_dispatch.incremental_test_groups(
+        tmp_path, "abc123", ["tests/e2e/a2/test_b.py"], _full_groups())
+    assert result is not None
+    assert result[0]["tests"] == "tests/e2e/a2/test_b.py"

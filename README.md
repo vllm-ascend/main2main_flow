@@ -109,9 +109,9 @@ workspace/
 ├── detect.json            # base / target commits, compat tag
 ├── steps.json             # full step plan
 ├── final_summary.md       # PR body (Changes table)
-├── final_target.patch     # cumulative vllm-ascend diff (post-gate)
+├── final_target.patch     # accumulated vllm-ascend diff (post-gate)
 ├── final_status.json      # status / steps_completed / old & new commit
-├── gate_final_patch       # gate-regenerated cumulative patch
+├── gate_final_patch       # gate-regenerated accumulated patch
 ├── repos/vllm-report/     # knowledge base clone (MCP server)
 ├── quality_gate/          # final quality gate artifacts
 └── steps/<step-id>/

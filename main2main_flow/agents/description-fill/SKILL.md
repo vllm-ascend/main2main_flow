@@ -1,12 +1,12 @@
 ---
 name: description-fill
-description: Analyze unattributed files in the cumulative patch and write Cause/Change entries for the PR description.
+description: Analyze unattributed files in the accumulated patch and write Cause/Change entries for the PR description.
 ---
 # description-fill
 
 ## Task
 
-The cumulative patch contains files that were changed by the adapter but NOT
+The accumulated patch contains files that were changed by the adapter but NOT
 mentioned in any `step_summary.md` entry.  These are "unattributed" files.
 The PR description's Changes table would otherwise list them in a catch-all
 "(unattributed)" row with no analysis.
@@ -27,7 +27,7 @@ Files / Upstream vLLM change / vllm-ascend adaptation columns.
 
 | field | value |
 |-------|-------|
-| cumulative patch | {patch_path} |
+| accumulated patch | {patch_path} |
 | unattributed files | {changed_files_path} |
 | existing step summaries | {previous_step_summary_path} |
 | archive dir | {step_dir} |
@@ -67,7 +67,7 @@ Append ONE entry per unattributed file (or group) to
 
 1. Read `{changed_files_path}` — the list of unattributed file paths
    (one per line).
-2. Read `{patch_path}` — the cumulative patch.  Focus on the diff hunks
+2. Read `{patch_path}` — the accumulated patch.  Focus on the diff hunks
    for the unattributed files.
 3. Read `{previous_step_summary_path}` — understand what's already
    analyzed (don't duplicate).

@@ -22,6 +22,7 @@ result and test-errors.txt are byte-identical for fix mode.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import subprocess
@@ -57,7 +58,6 @@ class E2EDispatchConfig:
     vllm: str = ""
     base_ref: str = "main"
     timeout_min: int = 480
-    rounds: int = 3
 
     @classmethod
     def from_env(cls, target_commit: str = "") -> "E2EDispatchConfig":
@@ -70,7 +70,6 @@ class E2EDispatchConfig:
             vllm=target_commit or os.getenv("TARGET_COMMIT", ""),
             base_ref=os.getenv("MAIN2MAIN_E2E_BASE_REF", "main"),
             timeout_min=int(os.getenv("MAIN2MAIN_E2E_TIMEOUT_MIN", "480")),
-            rounds=int(os.getenv("MAIN2MAIN_E2E_ROUNDS", "3")),
         )
 
 
@@ -134,6 +133,137 @@ def compute_test_groups(ascend_path: Path, base_sha: str,
     return rewritten
 
 
+def _map_changed_to_tests(ascend_path: Path,
+                          changed_files: list[str]) -> list[str]:
+    """Map changed source files to test paths via test_config.yaml modules.
+
+    Uses the same ``source_file_dependencies`` prefix matching as
+    select_tests.py, but deliberately ignores the ``optional`` flag: 62 of
+    69 modules are ``optional: false`` (always-on), which makes
+    select_tests' diff-based matching return the full suite for any
+    non-empty diff — useless for incremental fix rounds.  The returned
+    paths may be directories or files (including ``::nodeid`` suffixes);
+    the caller intersects them with the ready-all full groups, so CPU-UT
+    targets naturally fall away (the final quality gate runs those).
+    """
+    config_path = ascend_path / ".github/workflows/scripts/test_config.yaml"
+    try:
+        import yaml
+        with open(config_path) as f:
+            modules = list(yaml.safe_load_all(f))[0]
+    except Exception:
+        return []
+    changed = set(changed_files)
+    tests: set[str] = set()
+    for module in modules:
+        deps = module.get("source_file_dependencies") or []
+        if any(f == dep or f.startswith(dep.rstrip("/") + "/")
+               for f in changed for dep in deps):
+            tests.update(module.get("tests") or [])
+    for f in changed:
+        if f.startswith("tests/") and f.endswith(".py"):
+            tests.add(f)  # a changed test file runs itself
+    return sorted(tests)
+
+
+def incremental_test_groups(ascend_path: Path, base_sha: str,
+                            failing: list[str],
+                            full_groups: list[dict]) -> list[dict] | None:
+    """Fix-round groups: failing tests ∪ tests hit by the new commits.
+
+    Round 1 runs the full ready-all suite (baseline).  A fix round re-runs
+    only (a) the failing tests — carried over from *full_groups* so their
+    num_npus/npu_type routing stays authoritative — and (b) every GPU test
+    that test_config.yaml maps to the adapter's NEW commits since
+    *base_sha* (the last dispatch HEAD): changed files → module
+    ``source_file_dependencies`` → module tests, intersected with the
+    ready-all groups so routing metadata is preserved.  This is what keeps
+    a fix from silently breaking other cases: anything the new code
+    touches re-runs, the round-1 full pass stands as baseline for
+    everything else, and the final quality gate re-runs the full CPU UT
+    suite on the final tree.
+
+    Returns None when completeness cannot be guaranteed (a failing test
+    that no full group maps — fall back to the full suite).
+    """
+    remaining = set(failing)
+    groups: list[dict] = []
+    for g in full_groups:
+        keep = [t for t in g.get("tests", "").split() if t in remaining]
+        if keep:
+            ng = dict(g)
+            ng["tests"] = " ".join(keep)
+            groups.append(ng)
+            remaining -= set(keep)
+    if remaining:
+        ts_print(f"[e2e-dispatch] {len(remaining)} failing test(s) "
+                 f"unmappable to full groups: {sorted(remaining)}")
+        return None
+    changed = run_git(ascend_path, "diff", "--name-only", base_sha)
+    try:
+        mapped = _map_changed_to_tests(ascend_path, changed.splitlines()) \
+            if changed.strip() else []
+    except Exception as exc:
+        ts_print(f"[e2e-dispatch] diff-impact mapping failed: {exc} — "
+                 f"impact group empty")
+        mapped = []
+    if mapped:
+        # Route mapped targets via the full groups (their ready-all
+        # superset), expanding directories; targets absent from the GPU
+        # suite (CPU UT) are dropped — the quality gate covers them.
+        all_tests = _index_tests(full_groups)
+        for target in mapped:
+            # Config test targets may be files or directories (no trailing
+            # slash); directories expand against the full group index.
+            node = target.split("::")[0]
+            if node in all_tests:
+                candidates = [node]
+            else:
+                candidates = sorted(t for t in all_tests
+                                    if t.startswith(node + "/"))
+            for t in candidates:
+                g = _group_of(full_groups, t)
+                ng = dict(g)
+                ng["tests"] = t
+                groups.append(ng)
+        n = sum(len(g["tests"].split()) for g in groups)
+        ts_print(f"[e2e-dispatch] diff impact: {len(changed.splitlines())} "
+                 f"file(s) -> {n} test(s) mapped")
+    # Merge by routing key (npu_type, num_npus); dedup by test path.
+    by_key = {}
+    meta = {}
+    for g in groups:
+        key = (g.get("npu_type", ""), int(g.get("num_npus", 1)))
+        meta.setdefault(key, {
+            k: g.get(k) for k in ("npu_type", "num_npus", "runner",
+                                  "image_tag")})
+        by_key.setdefault(key, set()).update(g.get("tests", "").split())
+    merged = []
+    for key, tests in by_key.items():
+        if not tests:
+            continue
+        g = dict(meta[key])
+        g["tests"] = " ".join(sorted(tests))
+        merged.append(g)
+    covered = {t for g in merged for t in g["tests"].split()}
+    if not set(failing) <= covered:
+        ts_print("[e2e-dispatch] incremental groups failed completeness "
+                 "check — falling back to full suite")
+        return None
+    return merged
+
+
+def _index_tests(full_groups: list[dict]) -> set[str]:
+    return {t for g in full_groups for t in g.get("tests", "").split()}
+
+
+def _group_of(full_groups: list[dict], test: str) -> dict:
+    for g in full_groups:
+        if test in g.get("tests", "").split():
+            return g
+    raise KeyError(test)
+
+
 # =============================================================================
 # signal branch + dispatch
 # =============================================================================
@@ -180,7 +310,10 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
         run_git(wt, "commit", "-m",
                 "main2main: e2e signal (accumulated patch + test_groups)")
         sha = run_git(wt, "rev-parse", "HEAD").strip()
-        _push_via_proxy(wt, head_fork, f"HEAD:{branch}", "--force")
+        # The worktree is detached, so git cannot guess the refs/heads/
+        # prefix for a shorthand dst (it only infers it when the src is a
+        # ref under refs/{heads,tags}/); qualify it explicitly.
+        _push_via_proxy(wt, head_fork, f"HEAD:refs/heads/{branch}", "--force")
         ts_print(f"[e2e-dispatch] signal branch {head_fork}:{branch} "
                  f"pushed at {sha[:12]}")
     finally:
@@ -190,12 +323,45 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
     return sha
 
 
+def _gh_retry(args: list[str], retries: int = 4, base_delay: float = 8,
+              timeout_s: int = 120) -> subprocess.CompletedProcess:
+    """Run a gh command with retries + exponential backoff.
+
+    Dispatch and artifact download cross the network; transient failures
+    (5xx, timeouts, proxy blips) must not kill the run.  Fails hard only
+    after all retries are exhausted.
+    """
+    last: subprocess.CompletedProcess | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True,
+                               timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            r = None
+        if r is not None and r.returncode == 0:
+            return r
+        last = r
+        if attempt < retries:
+            delay = base_delay * (2 ** (attempt - 1))
+            ts_print(f"[e2e-dispatch] gh {' '.join(args[:5])}... failed "
+                     f"(attempt {attempt}/{retries}) — retrying in "
+                     f"{delay:.0f}s")
+            time.sleep(delay)
+    detail = ""
+    if last is not None:
+        detail = (last.stderr.strip() or last.stdout.strip())[:500]
+    raise RuntimeError(f"gh {' '.join(args[:5])}... failed after "
+                       f"{retries} attempts: {detail or 'timeout'}")
+
+
 def dispatch_workflow(repo: str, workflow_name: str, ref: str,
                       inputs: dict | None = None) -> int:
     """Dispatch a workflow_dispatch run and return its run id.
 
     The dispatch API answers 204 without a run id; poll the run list for
-    the workflow's newest run on *ref* created after the POST.
+    the workflow's newest run on *ref* created after the POST.  The list
+    API lags the POST by up to a minute (indexing delay), so allow a
+    generous window; transient query failures just extend the wait.
     """
     if not os.environ.get("GH_TOKEN"):
         raise RuntimeError("GH_TOKEN required for workflow dispatch")
@@ -203,12 +369,12 @@ def dispatch_workflow(repo: str, workflow_name: str, ref: str,
             f"repos/{repo}/actions/workflows/{workflow_name}/dispatches",
             "-f", f"ref={ref}"]
     if inputs:
-        args += ["-f", f"inputs={json.dumps(inputs)}"]
-    r = subprocess.run(args, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"workflow dispatch failed: {r.stderr.strip() or r.stdout.strip()}")
-    deadline = time.time() + 60
+        # -F (typed field) parses the JSON into an object; -f would send
+        # the JSON as a string, and the API rejects inputs with HTTP 422
+        # "is not an object".
+        args += ["-F", f"inputs={json.dumps(inputs)}"]
+    _gh_retry(args)
+    deadline = time.time() + 180
     while time.time() < deadline:
         time.sleep(3)
         rr = subprocess.run(
@@ -283,13 +449,55 @@ def wait_prep(cfg: E2EDispatchConfig, run_id: int,
 
 def _download_artifacts(repo: str, run_id: int, pattern: str,
                         dest_dir: Path) -> None:
-    r = subprocess.run(
-        ["gh", "run", "download", "--repo", repo, str(run_id),
-         "--pattern", pattern, "-D", str(dest_dir)],
-        capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"gh run download failed: {r.stderr.strip() or r.stdout.strip()}")
+    """Download the round artifacts with retries and a wait budget.
+
+    Artifacts of a just-completed run can take seconds to minutes to be
+    finalized (and listed) on GitHub, and the download itself crosses the
+    network — both need retries with backoff.  Fails hard only after the
+    wait budget is exhausted.
+    """
+    names: list[str] = []
+    matches: list[str] = []
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        try:
+            r = _gh_retry(
+                ["gh", "api", "--paginate",
+                 f"repos/{repo}/actions/runs/{run_id}/artifacts"],
+                retries=3, base_delay=5)
+            data = json.loads(r.stdout)
+            names = [a["name"] for a in data.get("artifacts", [])
+                     if not a.get("expired", False)]
+        except Exception as exc:
+            ts_print(f"[e2e-dispatch] run {run_id}: artifact list query "
+                     f"failed ({exc}) — retrying")
+            time.sleep(15)
+            continue
+        matches = [n for n in names if fnmatch.fnmatch(n, pattern)]
+        if matches:
+            break
+        ts_print(f"[e2e-dispatch] run {run_id}: artifacts matching "
+                 f"{pattern!r} not finalized yet (listed: "
+                 f"{names or 'none'}) — waiting 15s")
+        time.sleep(15)
+    if not matches:
+        raise RuntimeError(f"no artifacts matching {pattern!r} for run "
+                           f"{run_id} after 600s (listed: {names})")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    got: list[str] = []
+    for attempt in range(1, 6):
+        _gh_retry(["gh", "run", "download", "--repo", repo, str(run_id),
+                   "--pattern", pattern, "-D", str(dest_dir)],
+                  retries=2, base_delay=8)
+        got = [p.name for p in dest_dir.glob(f"{pattern}*") if p.is_dir()]
+        if len(got) >= len(matches):
+            return
+        ts_print(f"[e2e-dispatch] run {run_id}: download returned but only "
+                 f"{len(got)}/{len(matches)} artifact dir(s) present "
+                 f"(attempt {attempt}/5) — retrying")
+        time.sleep(15 * attempt)
+    raise RuntimeError(f"artifact download incomplete for run {run_id}: "
+                       f"got {len(got)}/{len(matches)} dirs")
 
 
 def _slug(test: str) -> str:

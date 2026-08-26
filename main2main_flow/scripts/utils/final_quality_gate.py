@@ -3,7 +3,7 @@
 Runs once after all steps complete (in generate_final_post, before
 push_to_github).  This is the main2main equivalent of CI's pre-commit
 "Run mypy" + "Run pre-commit" + CPU-UT steps - by running them here on
-the final cumulative diff, we catch format/mypy/UT issues in the exact
+the final accumulated diff, we catch format/mypy/UT issues in the exact
 environment CI will use, and give the adapter a chance to fix them
 before push.
 
@@ -39,7 +39,7 @@ def run_final_quality_gate(
     log_dir: Path,
     vllm_release_path: str | Path | None = None,
 ) -> tuple[bool, list[str]]:
-    """Run format + mypy on the final cumulative diff, before push.
+    """Run format + mypy on the final accumulated diff, before push.
 
     UT gate runs the CPU-UT batch against BOTH the target main checkout
     and the pinned release tag (vllm_release_path, e.g. v0.26.0) when

@@ -22,8 +22,7 @@ digraph main2main_flow {
 
       adapter [label="opencode adapt + pre_ci\nMCP guides • lessons (fix mode reuses session)"];
       qa      [label="adapter-qa\nreview: pass / fail"];
-      e2e     [label="_run_e2e_test\nNPU e2e tests (env-flake classified)"];
-      noop    [label="skip e2e (is_noop)\nno vllm-ascend code change",
+      noop    [label="per-step e2e skipped (cumulative)\nE2E external — tested once across all steps",
                fillcolor="#fff7e8", color="#d9a14f"];
       commit  [label="git commit step\nverified.commit advanced",
                fillcolor="#f3faf3", color="#4f9d6b"];
@@ -31,26 +30,51 @@ digraph main2main_flow {
                fillcolor="#fdf0f0", color="#c96a6a"];
     }
 
+    subgraph cluster_e2e {
+      label="external E2E  (A2/A3/310P GPU runners)";
+      labelloc=t; fontsize=15; fontcolor="#1a3550";
+      style="rounded,dashed"; color="#8fb4d9"; bgcolor="#f4f8fd"; margin=14;
+
+      prep    [label="round=prep — prepare-<chip>\nenv: vllm + ascend editable + csrc cache\nmarker .ready (idempotent)",
+               fillcolor="#eef4fc"];
+      signal  [label="push signal branch\naccumulated patch + test_groups.json"];
+      groups  [label="compute_test_groups\nround-1 ready-all full suite (same as PR CI)"];
+      exec    [label="round=N — e2e-<chip> (needs prepare)\nround 1: full • fix rounds: failing ∪ diff impact\nrun_tests.py local mode • --skip-setup",
+               fillcolor="#eef4fc"];
+      arts    [label="artifacts main2main-e2e-round-<N>-<chip>\nround-N-result.json + logs + expected_tests.json",
+               fillcolor="#eef4fc"];
+      parse   [label="parse_exec_artifacts\nsuite_results • NOT_RUN backfill • attribution",
+               fillcolor="#eef4fc"];
+    }
+
     gate    [label="_final_quality_gate\nformat + mypy (dual tree) + CPU-UT (runs always)"];
+    nopush  [label="gate failed → no PR\nmanual review issue (final-status step)",
+             fillcolor="#fdf0f0", color="#c96a6a"];
     post    [label="generate_final_post\nsquash + PR body + description-fill"];
     lessons [label="persist_lessons\n→ vllm-report lessons/<date>.json"];
     push    [label="push_to_github\nbranch + PR (label ready-all)"];
 
     init -> analyze;
+    init -> prep [label="pre-start round=prep\n(schedule step 0 / dispatch_prep)",
+                  style=dashed, constraint=false];
     analyze -> nocommit [label="HasNoCommit"];
     analyze -> adapter [label="HasCommit"];
     adapter -> qa;
     qa -> adapter [label="retry < 3 (fix mode)", style=dashed, constraint=false];
-    qa -> e2e [label="pass"];
     qa -> noop [label="is_noop"];
+    qa -> commit [label="pass"];
     noop -> commit;
-    e2e -> commit [label="pass"];
-    e2e -> adapter [label="fail, retry < 3", style=dashed, constraint=false];
-    e2e -> revert [label="fail x3"];
     commit -> adapter [label="next step", style=dotted, constraint=false];
-    commit -> gate [label="all steps passed"];
-    e2e -> lessons [label="retry success → lessons", style=dashed,
-                    constraint=false, color="#4f9d6b"];
+    commit -> signal [label="all steps passed"];
+    signal -> groups;
+    groups -> exec;
+    prep -> exec [label="env ready (.ready)", style=dashed, color="#8fb4d9",
+                  constraint=false];
+    exec -> arts;
+    arts -> parse;
+    parse -> adapter [label="fail → fix round (incremental:\nfailing ∪ diff impact, ≤ rounds)", style=dashed, constraint=false];
+    parse -> revert [label="fail after N rounds", style=dashed, constraint=false];
+    parse -> gate [label="pass"];
     revert -> gate [label="successful steps only", constraint=false];
     gate -> post [label="pass"];
     gate -> nopush [label="fail after 3 fix rounds"];
@@ -74,20 +98,6 @@ digraph main2main_flow {
 
     pcci -> track [label="failed checks"];
     track -> lsn [label="deepest exception"];
-  }
-
-
-  subgraph cluster_loop2 {
-    label="PR CI feedback  (daily)";
-    labelloc=t; fontsize=17; fontcolor="#1f5c33";
-    style="rounded,dashed"; color="#4f9d6b"; penwidth=1.4; bgcolor="#f3faf3";
-    margin=18;
-
-    pcci  [label="PR CI (ready-all)\nfull test suite on the PR",
-           fillcolor="#f3faf3", color="#4f9d6b"];
-    track [label="track_pr_ci (daily step 10)\ndeepest exception per failed check",
-           fillcolor="#f3faf3", color="#4f9d6b"];
-    pcci -> track [label="failed checks"];
   }
 
 

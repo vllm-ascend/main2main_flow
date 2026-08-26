@@ -18,11 +18,10 @@ from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
-from main2main_flow.scripts.utils.run_tests import (
-    build_test_errors_detail, run_tests)
+from main2main_flow.scripts.utils.run_tests import build_test_errors_detail
 from main2main_flow.scripts.utils.e2e_dispatch import (
-    E2EDispatchConfig, compute_test_groups, dispatch_prep, run_external_e2e,
-    wait_prep)
+    E2EDispatchConfig, compute_test_groups, dispatch_prep,
+    run_external_e2e)
 from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
 from main2main_flow.scripts.utils.utils import (
@@ -47,7 +46,7 @@ def _extract_diff_files(patch_text: str,
 
     Parses ``diff --git a/<path> b/<path>`` headers.  Skips paths in *exclude*
     (default: tracking/metadata files).  Used by ``generate_final_post`` to
-    read the cumulative patch's file list as the source of truth — per-step
+    read the accumulated patch's file list as the source of truth — per-step
     patches are incremental (last-retry-wins) and lose earlier retries' files.
     """
     files: list[str] = []
@@ -267,9 +266,9 @@ class Main2MainState(BaseModel):
     changed_files: list[str] = []
 
     # Whether the LAST step's e2e ran and passed.  The last step's e2e runs
-    # on the cumulative state (all prior steps' commits + this step's patch),
+    # on the accumulated state (all prior steps' commits + this step's patch),
     # so it subsumes earlier steps.  When the last step skipped its e2e (or
-    # failed), the cumulative state is unvalidated and the final quality gate
+    # failed), the accumulated state is unvalidated and the final quality gate
     # must run the regression e2e — the agent's no-op judgment can be wrong.
     last_step_e2e_passed: bool = False
 
@@ -299,12 +298,9 @@ class Main2MainState(BaseModel):
     # creation failed — UT gate tests main only.
     vllm_release_path: str = ""
 
-    # External E2E (MAIN2MAIN_E2E_MODE=cumulative): the ready-all test
-    # groups computed once from the accumulated tree (reused across fix
-    # rounds — the test set doesn't change) and the prep workflow run id
-    # pre-started at run() so the first round doesn't wait for setup.
+    # External E2E: the ready-all test groups computed from the accumulated
+    # tree (reused across the gate regression — the test set rarely changes).
     e2e_groups: list = []
-    e2e_prep_run_id: int = 0
 
 
 class Main2MainFlow:
@@ -404,10 +400,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ts_print(f"[adapter-qa] {step_id}: fail (no review.json found)")
         return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
 
-    @staticmethod
-    def _e2e_mode() -> str:
-        return os.getenv("MAIN2MAIN_E2E_MODE", "legacy")
-
     def _e2e_cfg(self) -> E2EDispatchConfig:
         """Build the external-E2E config, resolving the vllm ref when the
         run has no explicit TARGET_COMMIT (scheduled runs test vllm main —
@@ -424,27 +416,25 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 setattr(self.state, k, v)
         self.initialize()
         self._warmup_mega_moe()
-        # External E2E (cumulative): pre-start the three runners' environment
-        # prep in parallel with the main flow, so the first E2E round does not
-        # wait for csrc builds / dependency installs.  schedule_main2main.yaml
+        # External E2E: pre-start the three runners' environment prep in
+        # parallel with the main flow, so the first per-step E2E round does
+        # not wait for csrc builds / dependency installs.  The workflow
         # dispatches the prep as its step 0 (earliest possible) and records
         # the run id; reuse it instead of double-dispatching.
-        e2e_cfg = self._e2e_cfg()
-        prep_run_id = 0
-        if self._e2e_mode() == "cumulative":
-            if not e2e_cfg.vllm:
-                ts_print("[e2e] MAIN2MAIN_E2E_MODE=cumulative but no vllm "
-                         "commit (TARGET_COMMIT) — falling back to legacy E2E")
-            else:
+        if os.getenv("MAIN2MAIN_E2E_REPO"):
+            try:
+                e2e_cfg = self._e2e_cfg()
+            except Exception as exc:
+                ts_print(f"[e2e] external E2E config invalid ({exc})")
+                e2e_cfg = None
+            if e2e_cfg is not None and e2e_cfg.vllm:
                 try:
                     env_prep = os.getenv("MAIN2MAIN_E2E_PREP_RUN_ID", "")
                     if env_prep.isdigit():
-                        prep_run_id = int(env_prep)
                         ts_print(f"[e2e] reusing workflow-dispatched prep "
-                                 f"run {prep_run_id}")
+                                 f"run {env_prep}")
                     else:
-                        prep_run_id = dispatch_prep(e2e_cfg)
-                    self.state.e2e_prep_run_id = prep_run_id
+                        dispatch_prep(e2e_cfg)
                 except Exception as exc:
                     ts_print(f"[e2e] prep dispatch FAILED ({exc}) — exec "
                              f"rounds will inline-setup until the env exists")
@@ -453,22 +443,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             self.has_no_commit()
             return
         self.process_steps()
-        # Cumulative E2E: after all steps adapted, run the full ready-all
-        # suite once on the three runners (test selection identical to PR
-        # CI); failing tests are attributed to owning steps and adapter-fixed
-        # for up to MAIN2MAIN_E2E_ROUNDS rounds.
-        e2e_passed = True
-        if self._e2e_mode() == "cumulative" and self.state.current_step > 0:
-            e2e_passed = self._run_cumulative_e2e_with_fix_loop(
-                e2e_cfg, prep_run_id)
-            if not e2e_passed:
-                self.state.final_status = UpgradeFailed
-        # Final quality gate runs regardless of step outcomes (as long as at
-        # least one step succeeded): format + mypy + UT must always execute so
-        # lint issues never leak into the PR (run 174 pushed an E501 line
-        # because the gate only ran on the all-steps-passed path).
-        # Failures enter adapter-fix mode (max 3 rounds); each fix re-runs e2e
-        # to confirm functional correctness wasn't broken by format/mypy edits.
+        # The quality gate runs only when at least one step succeeded (the
+        # main-branch rule).  Per-step E2E failures were already handled
+        # inside process_steps (fix rounds -> revert + UpgradeFailed), so
+        # reaching this point with current_step > 0 means every successful
+        # step was verified on the external A2/A3 runners.
         gate_passed = True
         if self.state.current_step > 0:
             gate_passed = self._final_quality_gate()
@@ -915,8 +894,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         """Capture the working-tree diff as step_target.patch and set state.
 
         Used by the no-adaptation branches (SKIP_AI_ANALYSIS / empty upstream
-        patch) where cur_patch_path must point at an existing file - run_tests'
-        setup_env exits if the patch is missing.
+        patch) where cur_patch_path must point at an existing file for
+        downstream consumers (signal-branch push, adapter analysis).
         """
         subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
                        capture_output=True)
@@ -975,7 +954,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     # attempt > 1: we fixed something — confirm format/mypy
                     # edits didn't break functionality.  last_step_e2e_passed
                     # False: the LAST step skipped its per-step e2e (no-op
-                    # judgment may be wrong) or failed — the cumulative state
+                    # judgment may be wrong) or failed — the accumulated state
                     # is unvalidated, so the regression e2e is the last
                     # guarantee before push.
                     ts_print(f"[final_quality_gate] fix attempt {attempt}: passed "
@@ -997,7 +976,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     # fix the same gate failure in one pass.
                     submit_gate_lesson(self.state.vllm_report_path, error_logs)
                 ts_print(f"\n[final_quality_gate] PASSED (attempt {attempt})")
-                # Regenerate the cumulative patch from the CURRENT working
+                # Regenerate the accumulated patch from the CURRENT working
                 # tree so it includes format/mypy fixes made by the gate.
                 # Use `git diff <original_ascend_ref>` (baseline -> working
                 # tree): `git diff HEAD` would only contain uncommitted fixes
@@ -1093,80 +1072,46 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ts_print(f"[final_quality_gate] regenerated patch ({len(new_patch)} bytes) "
                  f"for regression e2e")
 
-        # Use the CUMULATIVE changed files (baseline -> final tree) for test
+        # Use the ACCUMULATED changed files (baseline -> final tree) for test
         # selection.  The last step's changed_files only covers that step, but
         # gate format/mypy fixes can touch ANY file in the repo (mypy runs the
         # whole tree), so the regression e2e must cover all accumulated changes.
-        cumulative_files = run_git(
+        accumulated_files = run_git(
             ascend_path, "diff", "--name-only", self.state.original_ascend_ref
         ).strip().splitlines()
-        cumulative_files = [f for f in cumulative_files if f]
+        accumulated_files = [f for f in accumulated_files if f]
 
-        if self._e2e_mode() == "cumulative":
-            # External E2E: the working tree (format/mypy fixes included) is
-            # pushed to the signal branch and the exec workflow re-runs the
-            # ready-all suite on the already-prepared environments — no
-            # reinstall.  The gate's fix loop (revert -> adapter-fix -> retry)
-            # stays compatible: each attempt re-pushes the current tree.
-            return self._run_external_gate_regression(step_id, cumulative_files)
-
-        # Save and override env vars to skip vllm reinstall + preserve ascend tree.
-        saved_skip_pip = os.environ.get("SKIP_PIP_INSTALL", "")
-        saved_keep_branch = os.environ.get("MAIN2MAIN_KEEP_BRANCH", "")
-        os.environ["SKIP_PIP_INSTALL"] = "true"
-        os.environ["MAIN2MAIN_KEEP_BRANCH"] = "true"
-        try:
-            result = run_tests(
-                vllm_path=vllm_path,
-                vllm_commit=self.state.cur_vllm_commit,
-                ascend_path=ascend_path,
-                ascend_commit=self.state.cur_ascend_commit,
-                patch_path=str(patch_path),
-                step_id=step_id,
-                select_by_files=cumulative_files or None,
-                test_cases=_resolve_test_cases(),
-                test_timeouts=_resolve_test_timeouts(),
-                remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
-                round_number=0,
-                log_dir=str(WORKSPACE_DIR / STEPS_DIR),
-            )
-        finally:
-            if saved_skip_pip:
-                os.environ["SKIP_PIP_INSTALL"] = saved_skip_pip
-            else:
-                os.environ.pop("SKIP_PIP_INSTALL", None)
-            if saved_keep_branch:
-                os.environ["MAIN2MAIN_KEEP_BRANCH"] = saved_keep_branch
-            else:
-                os.environ.pop("MAIN2MAIN_KEEP_BRANCH", None)
-
-        test_passed = result.get("can_commit", False)
-        ts_print(f"\n[final_quality_gate] regression e2e: {'PASSED' if test_passed else 'FAILED'}")
-        return test_passed
+        # External E2E: the working tree (format/mypy fixes included) is
+        # pushed to the signal branch and the exec workflow re-runs the
+        # ready-all suite on the already-prepared environments — no
+        # reinstall.  The gate's fix loop (revert -> adapter-fix -> retry)
+        # stays compatible: each attempt re-pushes the current tree.
+        return self._run_external_gate_regression(step_id, accumulated_files)
 
     def _run_external_gate_regression(self, step_id,
-                                      cumulative_files: list[str]) -> bool:
-        """Gate regression via the external E2E (round 0, cumulative mode).
+                                      accumulated_files: list[str]) -> bool:
+        """Gate regression on the external A2/A3 runners (round 0).
 
         The working tree — format/mypy fixes included, whether committed or
         not — is pushed to the signal branch and the exec workflow re-runs
         the ready-all suite on the already-prepared runner environments.
-        Reuses the cumulative test groups when available (gate fixes rarely
+        Reuses the computed test groups when available (gate fixes rarely
         change the test set); recomputes otherwise.
         """
         ascend_path = self.state.vllm_ascend_path
         cfg = self._e2e_cfg()
-        if not cfg.vllm:
-            ts_print("[final_quality_gate] cumulative E2E requested but no "
-                     "vllm commit (TARGET_COMMIT) — regression treated as "
-                     "failed")
+        if not os.getenv("MAIN2MAIN_E2E_REPO") or not cfg.vllm:
+            ts_print("[final_quality_gate] external E2E requested but "
+                     f"MAIN2MAIN_E2E_REPO={'set' if os.getenv('MAIN2MAIN_E2E_REPO') else 'unset'}, "
+                     "vllm commit (TARGET_COMMIT) missing — regression "
+                     "treated as failed")
             return False
         if not self.state.e2e_groups:
             base_sha = self.state.original_ascend_ref or \
                 resolve_squash_baseline(ascend_path)
             try:
                 self.state.e2e_groups = compute_test_groups(
-                    Path(ascend_path), base_sha, cumulative_files)
+                    Path(ascend_path), base_sha, accumulated_files)
             except Exception as exc:
                 ts_print(f"[final_quality_gate] compute_test_groups failed: "
                          f"{exc}")
@@ -1183,163 +1128,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ts_print(f"\n[final_quality_gate] regression e2e: "
                  f"{'PASSED' if test_passed else 'FAILED'}")
         return test_passed
-
-    def _run_cumulative_e2e_with_fix_loop(self, cfg: E2EDispatchConfig,
-                                          prep_run_id: int) -> bool:
-        """Run the full ready-all suite on A2/A3/310P with fix rounds.
-
-        The accumulated patch + test_groups.json are pushed to the signal
-        branch; the exec workflow runs the ready-all suite (test selection
-        identical to PR CI, routed by test_config.yaml).  Failing tests are
-        attributed to owning steps (last-wins) and fixed through the
-        existing adapter-fix contract (self.state.test_errors); each fix
-        commits and re-dispatches (≤ cfg.rounds rounds).  The prepared
-        runner environments are reused across rounds — no reinstall.
-        """
-        ascend_path = self.state.vllm_ascend_path
-        vllm_path = self.state.vllm_path
-        if prep_run_id:
-            prep = wait_prep(cfg, prep_run_id)
-            if prep.get("status") == "timed_out":
-                ts_print(f"[e2e] prep run {prep_run_id} timed out — exec "
-                         f"rounds will inline-setup until the env exists")
-        base_sha = self.state.original_ascend_ref or \
-            resolve_squash_baseline(ascend_path)
-        if not self.state.e2e_groups:
-            changed = [f for f in run_git(
-                ascend_path, "diff", "--name-only", base_sha
-            ).strip().splitlines() if f]
-            try:
-                self.state.e2e_groups = compute_test_groups(
-                    Path(ascend_path), base_sha, changed)
-            except Exception as exc:
-                ts_print(f"[e2e] compute_test_groups failed: {exc}")
-                return False
-            if not self.state.e2e_groups:
-                ts_print("[e2e] no test groups computed (no changes?) — "
-                         "nothing to run")
-                return True
-            n = sum(len(g.get("tests", "").split())
-                    for g in self.state.e2e_groups)
-            ts_print(f"[e2e] {len(self.state.e2e_groups)} group(s), {n} "
-                     f"test(s) across A2/A3/310P")
-
-        for round_number in range(1, cfg.rounds + 1):
-            ts_print(f"\n[e2e] === cumulative round {round_number}/"
-                     f"{cfg.rounds} ===")
-            try:
-                result = run_external_e2e(
-                    cfg, Path(ascend_path), self.state.e2e_groups,
-                    WORKSPACE_DIR / STEPS_DIR, round_number, step_id=0)
-            except Exception as exc:
-                ts_print(f"[e2e] round {round_number} dispatch/parse FAILED: "
-                         f"{exc}")
-                return False
-            if result.get("can_commit", False):
-                ts_print(f"[e2e] cumulative suite PASSED in round "
-                         f"{round_number}")
-                return True
-            failing = [t for t, r in result.get("suite_results", {}).items()
-                       if r.get("ci_result") != "passed"]
-            if not failing:
-                ts_print(f"[e2e] round {round_number}: "
-                         f"{result.get('ci_result')} with no failing tests "
-                         f"({result.get('summary_error') or '?'}) — cannot "
-                         f"fix")
-                return False
-            # Fix-mode contract: test_errors = [detail file, result json].
-            # The adapter (role=adapter-fix) reads these directly.  _ai_analysis
-            # clears state.test_errors after pre_ci passes, so it must be set
-            # fresh before EVERY owner's fix (not once for the whole loop).
-            ci_dir = WORKSPACE_DIR / STEPS_DIR / "0" / "tests"
-            detail_file = build_test_errors_detail(
-                result.get("suite_results", {}), round_number, ci_dir,
-                ci_dir / f"round-{round_number}-result.json")
-            result_json = ci_dir / f"round-{round_number}-result.json"
-            test_errors = (
-                [str(detail_file), str(result_json)] if detail_file
-                else [str(result_json)])
-            owners = self._locate_owning_steps(failing)
-            ts_print(f"[e2e] round {round_number}: {len(failing)} failing "
-                     f"test(s) -> {len(owners)} owning step(s): "
-                     f"{[s['id'] for s in owners]}")
-            fixed_any = False
-            for step in owners:
-                idx = self.state.steps.index(step)
-                self.state.current_step = idx
-                self.state.retry_count = 0
-                self.state.last_step_is_noop = False
-                self.state.test_errors = list(test_errors)
-                ts_print(f"[e2e] fixing owning step {step['id']} "
-                         f"(round {round_number})")
-                if self._ai_analysis():
-                    run_git(ascend_path, "add", "-A")
-                    subprocess.run(
-                        ["git", "commit", "-s", "-m",
-                         f"main2main: e2e fix round {round_number} "
-                         f"({step['id']})"],
-                        cwd=ascend_path, capture_output=True)
-                    fixed_any = True
-                else:
-                    ts_print(f"[e2e] step {step['id']} adapter-fix exhausted "
-                             f"its attempts")
-                # Owning steps can be EARLIER steps: _ai_analysis checked
-                # vllm out at the step's end_commit.  Restore vllm to the
-                # final cumulative commit so the tree stays consistent.
-                last_vllm = self.state.steps[-1]["end_commit"]
-                run_git(vllm_path, "checkout", last_vllm)
-                run_git(vllm_path, "checkout", "--", ".")
-                self.state.cur_vllm_commit = last_vllm
-            if not fixed_any:
-                ts_print(f"[e2e] round {round_number}: no owning step "
-                         f"fixable — exhausted")
-                return False
-        return False
-
-    def _locate_owning_steps(self, failing_tests: list[str]) -> list[dict]:
-        """Attribute failing test files to the owning steps (last-wins).
-
-        For each failing test, find the LAST step whose ascend commit
-        (`main2main: step N` messages over base..HEAD, oldest first) changed
-        a file whose stem mentions the test's module token (test stem minus
-        the `test_` prefix).  Tests with no match fall back to all steps.
-        """
-        ascend_path = self.state.vllm_ascend_path
-        steps = self.state.steps
-        if not steps:
-            return []
-        commit_files: list[list[str]] = []
-        for step in steps:
-            r = subprocess.run(
-                ["git", "log", "--format=%H", "-1",
-                 "--fixed-strings", f"main2main: step {step['id']} ("],
-                cwd=ascend_path, capture_output=True, text=True,
-            )
-            sha = r.stdout.strip()
-            if not sha:
-                commit_files.append([])
-                continue
-            r = subprocess.run(
-                ["git", "show", "--name-only", "--format=", sha],
-                cwd=ascend_path, capture_output=True, text=True,
-            )
-            commit_files.append(
-                [f for f in r.stdout.strip().splitlines() if f])
-        owners: list[dict] = []
-        seen: set[int] = set()
-        for test in failing_tests:
-            stem = Path(test.replace("::", "/")).stem
-            token = stem.removeprefix("test_")
-            match = -1
-            for i, files in enumerate(commit_files):
-                for f in files:
-                    fstem = Path(f).stem
-                    if fstem == token or (token and token in fstem):
-                        match = i
-            if 0 <= match < len(steps) and match not in seen:
-                seen.add(match)
-                owners.append(steps[match])
-        return owners or steps
 
     def _ai_analysis(self) -> bool:
         step = self.state.steps[self.state.current_step]
@@ -1654,6 +1442,52 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         return True
 
+    def _run_external_step_e2e(self, changed: list[str]) -> bool:
+        """Per-step E2E on the external A2/A3 runners."""
+        if not os.getenv("MAIN2MAIN_E2E_REPO"):
+            ts_print("[run_e2e_test] MAIN2MAIN_E2E_REPO not set — external "
+                     "E2E is the only execution path, treating step as failed")
+            return False
+        step = self.state.steps[self.state.current_step]
+        step_id = step["id"]
+        ts_print(f"run_e2e_test: {step_id} round={self.state.retry_count} "
+                 f"(external)")
+        cfg = self._e2e_cfg()
+        ascend_path = Path(self.state.vllm_ascend_path)
+        base_sha = self.state.original_ascend_ref or \
+            resolve_squash_baseline(ascend_path)
+        try:
+            groups = compute_test_groups(ascend_path, base_sha, changed)
+        except Exception as exc:
+            ts_print(f"[run_e2e_test] {step_id}: compute_test_groups "
+                     f"failed: {exc}")
+            return False
+        if not groups:
+            ts_print(f"[run_e2e_test] {step_id}: no test groups for changed "
+                     f"files — nothing to run")
+            return True
+        result = run_external_e2e(
+            cfg, ascend_path, groups, WORKSPACE_DIR / STEPS_DIR,
+            self.state.retry_count, step_id=step_id)
+        test_passed = result.get("can_commit", False)
+        self.state.last_step_e2e_passed = test_passed
+        ts_print(f"test_passed={test_passed}, "
+                 f"ci_result={result.get('ci_result')}")
+        if not test_passed:
+            # Fix-mode contract (same as the local path): test_errors =
+            # [detail file, result json] so the adapter's fix round reads
+            # the per-test error details directly.
+            tests_dir = WORKSPACE_DIR / STEPS_DIR / str(step_id) / "tests"
+            summary_log = tests_dir / \
+                f"round-{self.state.retry_count}-result.json"
+            detail_file = build_test_errors_detail(
+                result.get("suite_results", {}), self.state.retry_count,
+                tests_dir, summary_log)
+            self.state.test_errors = (
+                [str(detail_file), str(summary_log)] if detail_file
+                else [str(summary_log)])
+        return test_passed
+
     def _run_e2e_test(self):
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
@@ -1663,15 +1497,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             return True
 
-        if self._e2e_mode() == "cumulative":
-            # E2E is external: the per-step round is skipped entirely — the
-            # accumulated patch is tested ONCE across all steps on the three
-            # runners (_run_cumulative_e2e_with_fix_loop).  last_step_e2e_passed
-            # stays False so the final gate still runs the regression round.
-            ts_print(f"[run_e2e_test] {step_id}: E2E external (cumulative "
-                     f"mode), skipping per-step local e2e")
-            return True
-
         changed = [f for f in (self.state.changed_files or []) if f]
         if not _has_source_changes(changed):
             self.state.last_step_e2e_passed = False
@@ -1679,53 +1504,16 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                      f"({changed or '(none)'}), skipping e2e")
             return True
 
-        ts_print(f"The adaptation patch is at: {self.state.cur_patch_path}")
-        result = run_tests(
-            vllm_path=self.state.vllm_path,
-            vllm_commit=self.state.cur_vllm_commit,
-            ascend_path=self.state.vllm_ascend_path,
-            ascend_commit=self.state.cur_ascend_commit,
-            patch_path=self.state.cur_patch_path or None,
-            step_id=step_id,
-            select_by_files=changed,
-            test_cases=_resolve_test_cases(),
-            test_timeouts=_resolve_test_timeouts(),
-            remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
-            round_number=self.state.retry_count,
-            log_dir=str(WORKSPACE_DIR / STEPS_DIR),
-        )
-
-        test_passed = result.get("can_commit", False)
-        # Write the e2e result dict to a known path so fix-mode error_logs
-        # can reference it.  run_tests also writes this file, but the dict
-        # is already returned — write it here so the path is predictable.
-        tests_dir = WORKSPACE_DIR / STEPS_DIR / str(step_id) / "tests"
-        tests_dir.mkdir(parents=True, exist_ok=True)
-        summary_log = str(tests_dir / f"round-{self.state.retry_count}-result.json")
-        summary_log_path = Path(summary_log)
-        if not summary_log_path.exists():
-            summary_log_path.write_text(
-                json.dumps(result, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-        ts_print(f"test_passed={test_passed}, ci_result={result.get('ci_result')}")
-        self.state.last_step_e2e_passed = test_passed
-
-        if not test_passed:
-            # Collect per-test error details for fix mode: for each failed
-            # test, read its -summary.json (structured code_bugs/env_flakes)
-            # and the tail of its .log (raw traceback).  Both are inlined
-            # so the agent sees the error directly without extra file ops.
-            detail_file = build_test_errors_detail(
-                result.get("suite_results", {}), self.state.retry_count,
-                tests_dir, Path(summary_log))
-            self.state.test_errors = (
-                [str(detail_file), summary_log] if detail_file else [summary_log])
-
-        return test_passed
+        # Same rule as main's per-step e2e — a step with source changes must
+        # be verified before commit — but executed on the external A2/A3
+        # runners: the accumulated patch (prior commits + this step's
+        # working-tree changes) is pushed to the signal branch, dispatched
+        # as an exec round, and this flow waits for that run's artifacts
+        # before deciding commit / adapter-fix / revert.
+        return self._run_external_step_e2e(changed)
 
     def _fill_unattributed_analysis(self, unattributed: list[str],
-                                     cumulative_patch_path: Path) -> list[dict]:
+                                     accumulated_patch_path: Path) -> list[dict]:
         """Invoke description-fill agent to analyze unattributed files.
 
         Returns a list of dicts (same shape as ``step_items`` entries) with
@@ -1746,12 +1534,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             unattributed_files_path.write_text(
                 "\n".join(unattributed) + "\n", encoding="utf-8")
             # Build a FILTERED patch containing only the unattributed files'
-            # diffs.  Passing the full cumulative patch wastes tokens on files
+            # diffs.  Passing the full accumulated patch wastes tokens on files
             # the agent doesn't need to analyze (those already attributed to
             # steps).  If filtering fails, fall back to the full patch.
             filtered_patch_path = fill_dir / "unattributed.patch"
             try:
-                full_patch = cumulative_patch_path.read_text(encoding="utf-8")
+                full_patch = accumulated_patch_path.read_text(encoding="utf-8")
                 filtered_lines: list[str] = []
                 in_hunk = False
                 current_file: str = ""
@@ -1773,8 +1561,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                          f"{len(full_patch.splitlines())} lines)")
             except Exception as e:
                 ts_print(f"[generate_final_post] patch filtering failed ({e}), "
-                         f"using full cumulative patch")
-                patch_for_agent = cumulative_patch_path
+                         f"using full accumulated patch")
+                patch_for_agent = accumulated_patch_path
             # Concatenate all existing step summaries as previous context.
             prev_summaries: list[str] = []
             for i in range(self.state.current_step):
@@ -1902,8 +1690,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         return items
 
     def generate_final_post(self):
-        # The last successful step's patch is cumulative: git diff HEAD after all
-        # successful adaptations. Prefer its cumulative summary, and fall back to
+        # The last successful step's patch is accumulated: git diff HEAD after all
+        # successful adaptations. Prefer its accumulated summary, and fall back to
         # concatenating available step summaries if the last one is missing.
         # Squash per-step checkpoint commits into one so the PR always has a
         # single commit.  Must run BEFORE the current_step==0 check because
@@ -1953,7 +1741,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         step_dir = WORKSPACE_DIR / STEPS_DIR / last_step["id"]
         final_summary_path = WORKSPACE_DIR / FINAL_SUMMARY_FILE
         step_patch = step_dir / EACH_STEP_TARGET_PATCH_FILE
-        # Prefer the gate-regenerated cumulative patch (includes format/mypy
+        # Prefer the gate-regenerated accumulated patch (includes format/mypy
         # fixes made by the final quality gate).  The step patch was captured
         # BEFORE the gate, so it lacks those fixes.
         gate_patch = WORKSPACE_DIR / "gate_final_patch"
@@ -1968,50 +1756,50 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # noop, its step_target.patch only contains the tracking file
             # (`git diff HEAD` after commits = uncommitted delta only).
             # Copying that produces an EMPTY file list in the PR description.
-            # Detect this and regenerate the true cumulative diff from git.
+            # Detect this and regenerate the true accumulated diff from git.
             step_patch_text = step_patch.read_text(encoding="utf-8")
             if _extract_diff_files(step_patch_text):
                 shutil.copy2(step_patch, WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE)
             else:
                 ts_print("[generate_final_post] last step patch has no real "
-                         "files — regenerating cumulative diff from git "
+                         "files — regenerating accumulated diff from git "
                          "(gate_final_patch missing)")
                 subprocess.run(["git", "add", "-N", "."], cwd=str(ascend_path),
                                capture_output=True)
-                cumulative_patch = run_git(
+                accumulated_patch = run_git(
                     ascend_path, "diff", self.state.original_ascend_ref)
                 (WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE).write_text(
-                    cumulative_patch, encoding="utf-8")
-                ts_print(f"[generate_final_post] regenerated cumulative diff "
-                         f"({len(cumulative_patch.splitlines())} lines) as "
+                    accumulated_patch, encoding="utf-8")
+                ts_print(f"[generate_final_post] regenerated accumulated diff "
+                         f"({len(accumulated_patch.splitlines())} lines) as "
                          f"final_target.patch")
 
         # Build PR body: concise numbered list matching PR #5595 style.
         # Each item: "Adapt <files> due to [commit](link) — <cause>"
         commit_url = "https://github.com/vllm-project/vllm/commit"
 
-        # Source of truth for the file list: the cumulative patch
+        # Source of truth for the file list: the accumulated patch
         # (gate_final_patch or fall-back step patch) copied to
         # FINAL_TARGET_PATCH_FILE above.  Per-step EACH_STEP_TARGET_PATCH_FILE
         # is incremental (captured via `git diff HEAD` at adapt time), so when
         # step-1 is retried multiple times only the last retry's files survive
         # — earlier retries' files would be lost from the description.  The
-        # cumulative patch captures all changes since original_ascend_ref.
-        cumulative_patch_path = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
-        cumulative_files: list[str] = []
-        if cumulative_patch_path.exists():
-            cumulative_files = _extract_diff_files(
-                cumulative_patch_path.read_text(encoding="utf-8"))
-            ts_print(f"\n[generate_final_post] cumulative patch has "
-                     f"{len(cumulative_files)} file(s) for PR description")
+        # accumulated patch captures all changes since original_ascend_ref.
+        accumulated_patch_path = WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE
+        accumulated_files: list[str] = []
+        if accumulated_patch_path.exists():
+            accumulated_files = _extract_diff_files(
+                accumulated_patch_path.read_text(encoding="utf-8"))
+            ts_print(f"\n[generate_final_post] accumulated patch has "
+                     f"{len(accumulated_files)} file(s) for PR description")
         else:
-            ts_print("[generate_final_post] WARNING: cumulative patch file "
+            ts_print("[generate_final_post] WARNING: accumulated patch file "
                      "missing — PR description will have no file list")
 
         # Collect per-step: adapted files, cause, and triggering commit.
         # Files per step are attributed via the step_summary.md header
         # ("- {step_id}: Adapted — <files>") plus backtick-quoted paths in the
-        # Change: field.  Files in the cumulative patch not mentioned in any
+        # Change: field.  Files in the accumulated patch not mentioned in any
         # step summary are surfaced in a separate "Unattributed" row.
         step_items: list[dict] = []
         seen_files: set[str] = set()
@@ -2080,9 +1868,9 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     cause = " ".join(parts)
                 elif collecting == "change":
                     change = " ".join(parts)
-            # Attribute cumulative files to this step via the summary header
+            # Attribute accumulated files to this step via the summary header
             # and the Change: field's backtick-quoted paths.  Falls back to
-            # mentioning all cumulative files for the step if the adapter
+            # mentioning all accumulated files for the step if the adapter
             # didn't follow the SKILL.md header format but the step is the
             # only one (single-step flow).
             header_files = _parse_summary_files(ssp_text, s["id"])
@@ -2096,7 +1884,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 f"{cause} {change}"))
             mentioned = header_files | change_files | text_files
             if mentioned:
-                step_files = [f for f in cumulative_files if f in mentioned]
+                step_files = [f for f in accumulated_files if f in mentioned]
             else:
                 # Fallback: the adapter didn't name files in the summary
                 # (no backtick paths, no vllm_ascend/...py mentions).
@@ -2111,7 +1899,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     step_patch_files = _extract_diff_files(
                         step_patch_path.read_text(encoding="utf-8"))
                     step_files = [f for f in step_patch_files
-                                  if f in cumulative_files]
+                                  if f in accumulated_files]
                 else:
                     step_files = []
             seen_files.update(step_files)
@@ -2127,20 +1915,20 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 "upstream_links": upstream_links,
             })
 
-        # Files changed in the cumulative patch but not mentioned in any
+        # Files changed in the accumulated patch but not mentioned in any
         # step summary.  These are real adaptations (or sync-commit changes)
         # that the adapter didn't attribute to a step.  Invoke the
         # description-fill agent to analyze each one and produce proper
         # Cause/Change entries, so the PR description has full analysis
         # (not just a catch-all file list).
-        unattributed = [f for f in cumulative_files if f not in seen_files]
+        unattributed = [f for f in accumulated_files if f not in seen_files]
         unattributed_items: list[dict] = []
         if unattributed:
             ts_print(f"[generate_final_post] {len(unattributed)} file(s) in "
-                     "cumulative patch but not mentioned in any step summary — "
+                     "accumulated patch but not mentioned in any step summary — "
                      "invoking description-fill agent to analyze them")
             unattributed_items = self._fill_unattributed_analysis(
-                unattributed, cumulative_patch_path)
+                unattributed, accumulated_patch_path)
 
         # Get the commit date of the target vllm commit for the PR description.
 
@@ -2198,7 +1986,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 upstream = item.get("cause") or "(unattributed)"
             adapt = item.get("change") or "—"
             parts.append(f"| {files_str} | {upstream} | {adapt} |")
-        # Completeness guard: EVERY file in the cumulative patch must appear
+        # Completeness guard: EVERY file in the accumulated patch must appear
         # in the description.  Files covered by neither step attribution nor
         # the description-fill agent (e.g. agent partially failed) would
         # otherwise vanish silently — surface them in a catch-all row so
@@ -2208,16 +1996,16 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             covered.update(item["files"])
         for item in unattributed_items:
             covered.update(item["files"])
-        missing = [f for f in cumulative_files if f not in covered]
+        missing = [f for f in accumulated_files if f not in covered]
         if missing:
             files_str = "<br>".join(f"`{f}`" for f in missing) or "—"
             parts.append(
                 f"| {files_str} | (unattributed) "
-                f"| see cumulative patch — description-fill agent produced no analysis |"
+                f"| see accumulated patch — description-fill agent produced no analysis |"
             )
-        if not step_items and not cumulative_files:
+        if not step_items and not accumulated_files:
             # All steps were no-op (upstream range had no vllm-ascend impact)
-            # and the cumulative patch has no real files — the table would be
+            # and the accumulated patch has no real files — the table would be
             # header-only, which renders as a broken empty PR description.
             parts.append("| (no vllm-ascend adaptation in this range) | — | — |")
         parts.append("")

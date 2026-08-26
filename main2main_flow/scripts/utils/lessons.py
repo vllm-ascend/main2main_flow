@@ -206,7 +206,7 @@ def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
     root_cause = ("The gate found failures that per-step e2e did not — "
                   "version-dependent UT expectations (vllm_version_is), "
                   "test isolation/mock requirements, or format/mypy issues "
-                  "surfacing only on the cumulative state.")
+                  "surfacing only on the accumulated state.")
     fix_guidance = [
         "Check if the failing UT needs a vllm_version_is('0.26.0') branch "
         "or a version guard",

@@ -40,7 +40,7 @@ and does not improve review quality.
 | release tag | {release_tag} |
 | upstream vllm patch | {patch_path} |
 
-## Cumulative vllm-ascend Diff (excerpt)
+## Accumulated vllm-ascend Diff (excerpt)
 
 {diff_content}
 

@@ -623,7 +623,7 @@ def push_and_create_pr(
         _close_old_main2main_prs(github_repo, pr_number)
 
         # ---- update baseline ref for next day's incremental run ----
-        # The branch we just pushed contains the cumulative adaptation
+        # The branch we just pushed contains the accumulated adaptation
         # state; mark it as the baseline so tomorrow's run can rebase on
         # top instead of starting from upstream/main.
         if branch:

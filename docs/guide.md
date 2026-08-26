@@ -127,6 +127,13 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `MAIN2MAIN_REMOTE_HOST`、`MAIN2MAIN_REMOTE_CONTAINER` | SSH 主机和容器名，远程 e2e 用 | — |
 | `MAIN2MAIN_UT_SKIP_A2` | 设为 `true` 只跑 CPU-UT，跳过 A2 NPU UT batch | `false` |
 | `MAIN2MAIN_UT_GATE` | 设为 `0` 跳过质量门禁中的 UT 检查（仅 format + mypy） | `1` |
+| `MAIN2MAIN_E2E_REPO` | external e2e 目标 fork 仓库（`owner/name`） | `vllm-ascend-ci/vllm-ascend` |
+| `MAIN2MAIN_E2E_WORKFLOW` | external e2e workflow 文件名 | `main2main-e2e.yaml` |
+| `MAIN2MAIN_E2E_BRANCH` | signal branch 名（携带累计 patch + test_groups.json） | `main2main_e2e` |
+| `MAIN2MAIN_E2E_DISPATCH_REF` | workflow 的 dispatch ref（fork 分支） | `main` |
+| `MAIN2MAIN_E2E_BASE_REF` | workflow input `base_ref`（ascend 基准分支） | `main` |
+| `MAIN2MAIN_E2E_TIMEOUT_MIN` | 每轮等待 e2e run 的超时分钟；超时会 cancel 该 run 并判为失败（必须 > e2e job 的 `timeout_minutes`，默认 480） | `480` |
+| `MAIN2MAIN_FLOW_REF` | main2main_flow 自身 checkout 的分支 ref（sync 到 exec runner 用） | `main` |
 | `SKIP_TRACK_PR_CI` | 跳过 vllm-report `daily_refresh.sh` 的 step 10（PR CI 追踪，见下文生态闭环） | `false` |
 
 ---
@@ -136,6 +143,8 @@ SKIP_AI_ANALYSIS=true kickoff \
 整个 Flow 由 `Main2MainFlow` 类（`main2main_flow/flow.py`）驱动，节点顺序为：
 
 `initialize` → `_warmup_mega_moe` → `analyze_commit_and_plan_step` → `process_steps`（循环 `_ai_analysis` + `_run_e2e_test`，最多重试 3 次；全部成功后执行 `_final_quality_gate`）→ `generate_final_post` → `persist_lessons` → `push_to_github`
+
+per-step 的 `_run_e2e_test` 与 main 分支的判定规则一致——`SKIP_E2E_TEST` / adapter 判 no-op / 仅非源码改动时跳过；**有源码改动的 step 必跑 e2e**，只是执行位置从本地换到外部 A2/A3 runner：累积 patch 推送到 signal branch 后 dispatch exec round，主流程**等待该 run 完成并取回 artifact 结果**，再决定 commit / adapter-fix 重试 / revert（详见 [external E2E](#external-e2ea2a3310p)）。全部 step 通过后进入 final quality gate；gate 的 regression e2e 同样派发到外部 runner（round 0）复验 format/mypy 修复没有破坏功能。
 
 流程通过字符串信号传递控制权：`HasCommit`、`HasNoCommit`、`UpgradeCompleted`、`UpgradeFailed`，定义在 `scripts/utils/utils.py`。注意两个提前退出的分支：
 
@@ -316,9 +325,33 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 
 ---
 
+### External E2E（A2/A3/310P）
+
+每个有源码改动的 step，其 per-step e2e 都派发到外部 **A2（8 卡）/ A3（16 卡）/ 310P（4 卡）三台 GPU runner** 上跑（与 main 分支"是否跑 e2e"的判定规则一致）。测试调度与 PR CI 一致（`select_tests.py` ready-all + `test_config.yaml` 路由），执行引擎与 PR CI 相同（`run_tests.py` 贪心 bin-packing 并行）。测试选择由该 step 的 `changed_files` 决定（`compute_test_groups`，CPU 目标丢弃——由质量门禁覆盖）。
+
+#### 架构
+
+- **workflow**：`main2main-e2e.yaml`（vllm-ascend fork 上），通过 `gh workflow run` 派发，round 参数区分阶段：
+  - `round=prep`：只跑 `prepare-<chip>` job——在 runner 持久文件系统上构建环境（vllm + ascend editable 安装、csrc 缓存、310p 算子校验），完成后写 `.ready` marker。主流程启动时（`dispatch_prep`）即派发，与适配过程并行，正式 e2e 开始前环境已就绪
+  - `round=N`：`e2e-<chip>` job（`needs: prepare`）——checkout signal branch（累积 patch + `test_groups.json`），按 `npu_type` 过滤本 chip 的测试组，跑 `run_tests.py` local mode（`--skip-setup`），上传 artifact `main2main-e2e-round-<N>-<chip>`
+- **signal branch**（`MAIN2MAIN_E2E_BRANCH`，默认 `main2main_e2e`）：主进程每次派发前 force-push 的临时分支，携带当前累积 patch + `test_groups.json`，exec 轮据此同步代码
+- **结果回传**：主进程下载各 chip artifact，`parse_exec_artifacts` 把每 chip 的 `round-N-result.json`（已由 `ci_log_summary.py` 分类）合并成 run_tests()-shaped 结果；job 崩溃未上传的 chip 按 `expected_tests.json` 回填 `NOT_RUN`
+- **超时**：每轮等待 `MAIN2MAIN_E2E_TIMEOUT_MIN`（默认 480min）；超时**会 cancel 该 run** 并判为失败（进入 fix 循环）。该值必须大于 e2e job 的 `timeout_minutes`（workflow input，默认同样 480），否则主进程会在 job 合法运行时抢先 cancel
+
+#### 跨 run 的等待-继续衔接
+
+E2E 从本地同步执行改为远程派发后，主进程与测试 run 不在同一 runner 上，衔接点如下：
+
+- **派发**：`run_external_e2e` 把累积 patch（前序 step 的 commit + 本 step 工作区改动）force-push 到 signal branch，`test_groups.json` 一并携带，然后 `gh workflow run` 派发 `round=<retry_count>` 的 exec run
+- **等待反馈**：`wait_for_run` 轮询该 run 直到结束/超时；结束后 `_download_artifacts` 取回各 chip 的 `round-N-result.json`，`parse_exec_artifacts` 合并成结果 dict——失败测试进入 adapter-fix 契约（`test_errors` 指向 detail 文件 + 结果 json）
+- **继续**：主进程据此决定 commit（通过）/ adapter 重试（失败且 `retry_count < 3`，重新派发下一轮）/ revert + `UpgradeFailed`（3 轮耗尽）。gate 的 regression e2e 复用同一机制（round 0）
+- **环境复用**：runner 环境由 prep run 预热，跨 step 跨轮复用，exec 轮不再重复安装依赖
+
+---
+
 ### Step 3c — `_final_quality_gate`
 
-`process_steps` 全部步骤成功后、push 前执行的质量门禁，在**最终累计 diff** 上复刻 CI 的三个检查（format / mypy / UT），任何一项不过就进入 adapter fix 模式（最多 3 轮），每轮 fix 后重新确认。
+per-step e2e 全部通过后、push 前执行的质量门禁，在**最终累积 diff** 上复刻 CI 的三个检查（format / mypy / UT），任何一项不过就进入 adapter fix 模式（最多 3 轮），每轮 fix 后重新确认。
 
 - **format**：跑完整 `bash format.sh`
 - **mypy**：`_check_mypy` 用 lint 等价的隔离 venv（`--system-site-packages` + 按 triton-ascend metadata 安装匹配的 numpy），对**固定版本树**和 **main 树**各跑一遍（`vllm_release_path` 存在时额外 +3 次调用，约 4 分钟），捕获只在 release 分支暴露的签名不匹配
@@ -350,7 +383,7 @@ push 之前把本 run 的适配经验沉淀回 vllm-report 的 lessons（clone �
 
 ### Step 5 — `push_to_github`
 
-仅在 `PUSH_TO_GITHUB=true` **且至少有 1 步成功**时执行（0 步完成时 `flow.run` 直接跳过 push）。否则打印提示后跳过。
+仅在 `PUSH_TO_GITHUB=true` **且至少有 1 步成功（per-step e2e 已通过）、final quality gate 通过**时执行（0 步完成或 gate 失败时 `flow.run` 直接跳过 push，只生成 manual review issue）。否则打印提示后跳过。
 
 **执行流程**：
 
