@@ -18,7 +18,11 @@ from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
-from main2main_flow.scripts.utils.run_tests import run_tests
+from main2main_flow.scripts.utils.run_tests import (
+    build_test_errors_detail, run_tests)
+from main2main_flow.scripts.utils.e2e_dispatch import (
+    E2EDispatchConfig, compute_test_groups, dispatch_prep, run_external_e2e,
+    wait_prep)
 from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
 from main2main_flow.scripts.utils.utils import (
@@ -117,46 +121,6 @@ def _resolve_test_cases() -> list[str] | None:
         result.append(t)
 
     return result or None
-
-
-_ERROR_SIGNATURES = re.compile(
-    r"Traceback \(most recent call last\)|Traceback:"
-    r"|EngineCore failed|exited unexpectedly"
-    r"|\[UC\]\[E\]|\[ERROR\]|\[TIMEOUT\]"
-    r"|\b(?:ValueError|RuntimeError|TypeError|KeyError|AttributeError|"
-    r"AssertionError|ImportError|ValidationError|IndexError|"
-    r"OverflowError|OSError)\b"
-)
-
-
-def _extract_error_excerpt(log_text: str, max_chars: int = 4000) -> str | None:
-    """Extract windows around error signatures from a test log.
-
-    A test that hangs after a crash (e.g. a server died but the test keeps
-    polling for readiness) buries the real traceback under minutes of log
-    noise, so cutting the tail loses the cause.  Search the whole log for
-    error signatures and return the surrounding context instead.
-    """
-    matches = list(_ERROR_SIGNATURES.finditer(log_text))
-    if not matches:
-        return None
-    parts: list[str] = []
-    total = 0
-    prev_end = -1
-    for m in matches:
-        start = max(0, m.start() - 200)
-        end = min(len(log_text), m.end() + 800)
-        if start <= prev_end:
-            continue
-        piece = log_text[start:end]
-        if total + len(piece) > max_chars:
-            parts.append(f"... (truncated, {len(matches) - len(parts)} more matches)")
-            break
-        line_no = log_text.count("\n", 0, m.start()) + 1
-        parts.append(f"...[log line {line_no}]\n{piece}")
-        total += len(piece)
-        prev_end = end
-    return "\n\n---\n\n".join(parts) if parts else None
 
 
 def _resolve_test_timeouts() -> dict[str, int] | None:
@@ -335,6 +299,13 @@ class Main2MainState(BaseModel):
     # creation failed — UT gate tests main only.
     vllm_release_path: str = ""
 
+    # External E2E (MAIN2MAIN_E2E_MODE=cumulative): the ready-all test
+    # groups computed once from the accumulated tree (reused across fix
+    # rounds — the test set doesn't change) and the prep workflow run id
+    # pre-started at run() so the first round doesn't wait for setup.
+    e2e_groups: list = []
+    e2e_prep_run_id: int = 0
+
 
 class Main2MainFlow:
 
@@ -433,17 +404,65 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ts_print(f"[adapter-qa] {step_id}: fail (no review.json found)")
         return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
 
+    @staticmethod
+    def _e2e_mode() -> str:
+        return os.getenv("MAIN2MAIN_E2E_MODE", "legacy")
+
+    def _e2e_cfg(self) -> E2EDispatchConfig:
+        """Build the external-E2E config, resolving the vllm ref when the
+        run has no explicit TARGET_COMMIT (scheduled runs test vllm main —
+        use the checkout's HEAD, the same commit the workflow checked out)."""
+        cfg = E2EDispatchConfig.from_env(self.state.target_commit)
+        if not cfg.vllm:
+            cfg.vllm = run_git(self.state.vllm_path,
+                               "rev-parse", "HEAD").strip()
+        return cfg
+
     def run(self, inputs: dict | None = None):
         if inputs:
             for k, v in inputs.items():
                 setattr(self.state, k, v)
         self.initialize()
         self._warmup_mega_moe()
+        # External E2E (cumulative): pre-start the three runners' environment
+        # prep in parallel with the main flow, so the first E2E round does not
+        # wait for csrc builds / dependency installs.  schedule_main2main.yaml
+        # dispatches the prep as its step 0 (earliest possible) and records
+        # the run id; reuse it instead of double-dispatching.
+        e2e_cfg = self._e2e_cfg()
+        prep_run_id = 0
+        if self._e2e_mode() == "cumulative":
+            if not e2e_cfg.vllm:
+                ts_print("[e2e] MAIN2MAIN_E2E_MODE=cumulative but no vllm "
+                         "commit (TARGET_COMMIT) — falling back to legacy E2E")
+            else:
+                try:
+                    env_prep = os.getenv("MAIN2MAIN_E2E_PREP_RUN_ID", "")
+                    if env_prep.isdigit():
+                        prep_run_id = int(env_prep)
+                        ts_print(f"[e2e] reusing workflow-dispatched prep "
+                                 f"run {prep_run_id}")
+                    else:
+                        prep_run_id = dispatch_prep(e2e_cfg)
+                    self.state.e2e_prep_run_id = prep_run_id
+                except Exception as exc:
+                    ts_print(f"[e2e] prep dispatch FAILED ({exc}) — exec "
+                             f"rounds will inline-setup until the env exists")
         signal = self.analyze_commit_and_plan_step()
         if signal == HasNoCommit:
             self.has_no_commit()
             return
         self.process_steps()
+        # Cumulative E2E: after all steps adapted, run the full ready-all
+        # suite once on the three runners (test selection identical to PR
+        # CI); failing tests are attributed to owning steps and adapter-fixed
+        # for up to MAIN2MAIN_E2E_ROUNDS rounds.
+        e2e_passed = True
+        if self._e2e_mode() == "cumulative" and self.state.current_step > 0:
+            e2e_passed = self._run_cumulative_e2e_with_fix_loop(
+                e2e_cfg, prep_run_id)
+            if not e2e_passed:
+                self.state.final_status = UpgradeFailed
         # Final quality gate runs regardless of step outcomes (as long as at
         # least one step succeeded): format + mypy + UT must always execute so
         # lint issues never leak into the PR (run 174 pushed an E501 line
@@ -730,6 +749,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         31504773494).  Pre-importing the module here compiles it once, before
         any test starts.
         """
+        if os.getenv("MAIN2MAIN_SKIP_NPU_WARMUP", "false").lower() == "true":
+            ts_print("[init] MAIN2MAIN_SKIP_NPU_WARMUP=true, "
+                     "skipping mega_moe warmup")
+            return
+        if shutil.which("npu-smi") is None:
+            ts_print("[init] npu-smi not found (CPU runner) — skipping "
+                     "mega_moe warmup")
+            return
         try:
             ts_print("[init] warming up CANN mega_moe op (JIT compile once)...")
             subprocess.run(
@@ -1075,6 +1102,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ).strip().splitlines()
         cumulative_files = [f for f in cumulative_files if f]
 
+        if self._e2e_mode() == "cumulative":
+            # External E2E: the working tree (format/mypy fixes included) is
+            # pushed to the signal branch and the exec workflow re-runs the
+            # ready-all suite on the already-prepared environments — no
+            # reinstall.  The gate's fix loop (revert -> adapter-fix -> retry)
+            # stays compatible: each attempt re-pushes the current tree.
+            return self._run_external_gate_regression(step_id, cumulative_files)
+
         # Save and override env vars to skip vllm reinstall + preserve ascend tree.
         saved_skip_pip = os.environ.get("SKIP_PIP_INSTALL", "")
         saved_keep_branch = os.environ.get("MAIN2MAIN_KEEP_BRANCH", "")
@@ -1108,6 +1143,203 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         test_passed = result.get("can_commit", False)
         ts_print(f"\n[final_quality_gate] regression e2e: {'PASSED' if test_passed else 'FAILED'}")
         return test_passed
+
+    def _run_external_gate_regression(self, step_id,
+                                      cumulative_files: list[str]) -> bool:
+        """Gate regression via the external E2E (round 0, cumulative mode).
+
+        The working tree — format/mypy fixes included, whether committed or
+        not — is pushed to the signal branch and the exec workflow re-runs
+        the ready-all suite on the already-prepared runner environments.
+        Reuses the cumulative test groups when available (gate fixes rarely
+        change the test set); recomputes otherwise.
+        """
+        ascend_path = self.state.vllm_ascend_path
+        cfg = self._e2e_cfg()
+        if not cfg.vllm:
+            ts_print("[final_quality_gate] cumulative E2E requested but no "
+                     "vllm commit (TARGET_COMMIT) — regression treated as "
+                     "failed")
+            return False
+        if not self.state.e2e_groups:
+            base_sha = self.state.original_ascend_ref or \
+                resolve_squash_baseline(ascend_path)
+            try:
+                self.state.e2e_groups = compute_test_groups(
+                    Path(ascend_path), base_sha, cumulative_files)
+            except Exception as exc:
+                ts_print(f"[final_quality_gate] compute_test_groups failed: "
+                         f"{exc}")
+                return False
+        try:
+            result = run_external_e2e(
+                cfg, Path(ascend_path), self.state.e2e_groups,
+                WORKSPACE_DIR / STEPS_DIR, round_number=0, step_id=step_id)
+        except Exception as exc:
+            ts_print(f"[final_quality_gate] regression e2e dispatch FAILED: "
+                     f"{exc}")
+            return False
+        test_passed = result.get("can_commit", False)
+        ts_print(f"\n[final_quality_gate] regression e2e: "
+                 f"{'PASSED' if test_passed else 'FAILED'}")
+        return test_passed
+
+    def _run_cumulative_e2e_with_fix_loop(self, cfg: E2EDispatchConfig,
+                                          prep_run_id: int) -> bool:
+        """Run the full ready-all suite on A2/A3/310P with fix rounds.
+
+        The accumulated patch + test_groups.json are pushed to the signal
+        branch; the exec workflow runs the ready-all suite (test selection
+        identical to PR CI, routed by test_config.yaml).  Failing tests are
+        attributed to owning steps (last-wins) and fixed through the
+        existing adapter-fix contract (self.state.test_errors); each fix
+        commits and re-dispatches (≤ cfg.rounds rounds).  The prepared
+        runner environments are reused across rounds — no reinstall.
+        """
+        ascend_path = self.state.vllm_ascend_path
+        vllm_path = self.state.vllm_path
+        if prep_run_id:
+            prep = wait_prep(cfg, prep_run_id)
+            if prep.get("status") == "timed_out":
+                ts_print(f"[e2e] prep run {prep_run_id} timed out — exec "
+                         f"rounds will inline-setup until the env exists")
+        base_sha = self.state.original_ascend_ref or \
+            resolve_squash_baseline(ascend_path)
+        if not self.state.e2e_groups:
+            changed = [f for f in run_git(
+                ascend_path, "diff", "--name-only", base_sha
+            ).strip().splitlines() if f]
+            try:
+                self.state.e2e_groups = compute_test_groups(
+                    Path(ascend_path), base_sha, changed)
+            except Exception as exc:
+                ts_print(f"[e2e] compute_test_groups failed: {exc}")
+                return False
+            if not self.state.e2e_groups:
+                ts_print("[e2e] no test groups computed (no changes?) — "
+                         "nothing to run")
+                return True
+            n = sum(len(g.get("tests", "").split())
+                    for g in self.state.e2e_groups)
+            ts_print(f"[e2e] {len(self.state.e2e_groups)} group(s), {n} "
+                     f"test(s) across A2/A3/310P")
+
+        for round_number in range(1, cfg.rounds + 1):
+            ts_print(f"\n[e2e] === cumulative round {round_number}/"
+                     f"{cfg.rounds} ===")
+            try:
+                result = run_external_e2e(
+                    cfg, Path(ascend_path), self.state.e2e_groups,
+                    WORKSPACE_DIR / STEPS_DIR, round_number, step_id=0)
+            except Exception as exc:
+                ts_print(f"[e2e] round {round_number} dispatch/parse FAILED: "
+                         f"{exc}")
+                return False
+            if result.get("can_commit", False):
+                ts_print(f"[e2e] cumulative suite PASSED in round "
+                         f"{round_number}")
+                return True
+            failing = [t for t, r in result.get("suite_results", {}).items()
+                       if r.get("ci_result") != "passed"]
+            if not failing:
+                ts_print(f"[e2e] round {round_number}: "
+                         f"{result.get('ci_result')} with no failing tests "
+                         f"({result.get('summary_error') or '?'}) — cannot "
+                         f"fix")
+                return False
+            # Fix-mode contract: test_errors = [detail file, result json].
+            # The adapter (role=adapter-fix) reads these directly.  _ai_analysis
+            # clears state.test_errors after pre_ci passes, so it must be set
+            # fresh before EVERY owner's fix (not once for the whole loop).
+            ci_dir = WORKSPACE_DIR / STEPS_DIR / "0" / "tests"
+            detail_file = build_test_errors_detail(
+                result.get("suite_results", {}), round_number, ci_dir,
+                ci_dir / f"round-{round_number}-result.json")
+            result_json = ci_dir / f"round-{round_number}-result.json"
+            test_errors = (
+                [str(detail_file), str(result_json)] if detail_file
+                else [str(result_json)])
+            owners = self._locate_owning_steps(failing)
+            ts_print(f"[e2e] round {round_number}: {len(failing)} failing "
+                     f"test(s) -> {len(owners)} owning step(s): "
+                     f"{[s['id'] for s in owners]}")
+            fixed_any = False
+            for step in owners:
+                idx = self.state.steps.index(step)
+                self.state.current_step = idx
+                self.state.retry_count = 0
+                self.state.last_step_is_noop = False
+                self.state.test_errors = list(test_errors)
+                ts_print(f"[e2e] fixing owning step {step['id']} "
+                         f"(round {round_number})")
+                if self._ai_analysis():
+                    run_git(ascend_path, "add", "-A")
+                    subprocess.run(
+                        ["git", "commit", "-s", "-m",
+                         f"main2main: e2e fix round {round_number} "
+                         f"({step['id']})"],
+                        cwd=ascend_path, capture_output=True)
+                    fixed_any = True
+                else:
+                    ts_print(f"[e2e] step {step['id']} adapter-fix exhausted "
+                             f"its attempts")
+                # Owning steps can be EARLIER steps: _ai_analysis checked
+                # vllm out at the step's end_commit.  Restore vllm to the
+                # final cumulative commit so the tree stays consistent.
+                last_vllm = self.state.steps[-1]["end_commit"]
+                run_git(vllm_path, "checkout", last_vllm)
+                run_git(vllm_path, "checkout", "--", ".")
+                self.state.cur_vllm_commit = last_vllm
+            if not fixed_any:
+                ts_print(f"[e2e] round {round_number}: no owning step "
+                         f"fixable — exhausted")
+                return False
+        return False
+
+    def _locate_owning_steps(self, failing_tests: list[str]) -> list[dict]:
+        """Attribute failing test files to the owning steps (last-wins).
+
+        For each failing test, find the LAST step whose ascend commit
+        (`main2main: step N` messages over base..HEAD, oldest first) changed
+        a file whose stem mentions the test's module token (test stem minus
+        the `test_` prefix).  Tests with no match fall back to all steps.
+        """
+        ascend_path = self.state.vllm_ascend_path
+        steps = self.state.steps
+        if not steps:
+            return []
+        commit_files: list[list[str]] = []
+        for step in steps:
+            r = subprocess.run(
+                ["git", "log", "--format=%H", "-1",
+                 "--fixed-strings", f"main2main: step {step['id']} ("],
+                cwd=ascend_path, capture_output=True, text=True,
+            )
+            sha = r.stdout.strip()
+            if not sha:
+                commit_files.append([])
+                continue
+            r = subprocess.run(
+                ["git", "show", "--name-only", "--format=", sha],
+                cwd=ascend_path, capture_output=True, text=True,
+            )
+            commit_files.append(
+                [f for f in r.stdout.strip().splitlines() if f])
+        owners: list[dict] = []
+        seen: set[int] = set()
+        for test in failing_tests:
+            stem = Path(test.replace("::", "/")).stem
+            token = stem.removeprefix("test_")
+            match = -1
+            for i, files in enumerate(commit_files):
+                for f in files:
+                    fstem = Path(f).stem
+                    if fstem == token or (token and token in fstem):
+                        match = i
+            if 0 <= match < len(steps) and match not in seen:
+                seen.add(match)
+                owners.append(steps[match])
+        return owners or steps
 
     def _ai_analysis(self) -> bool:
         step = self.state.steps[self.state.current_step]
@@ -1431,6 +1663,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             return True
 
+        if self._e2e_mode() == "cumulative":
+            # E2E is external: the per-step round is skipped entirely — the
+            # accumulated patch is tested ONCE across all steps on the three
+            # runners (_run_cumulative_e2e_with_fix_loop).  last_step_e2e_passed
+            # stays False so the final gate still runs the regression round.
+            ts_print(f"[run_e2e_test] {step_id}: E2E external (cumulative "
+                     f"mode), skipping per-step local e2e")
+            return True
+
         changed = [f for f in (self.state.changed_files or []) if f]
         if not _has_source_changes(changed):
             self.state.last_step_e2e_passed = False
@@ -1475,67 +1716,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # test, read its -summary.json (structured code_bugs/env_flakes)
             # and the tail of its .log (raw traceback).  Both are inlined
             # so the agent sees the error directly without extra file ops.
-            test_errors_detail = tests_dir / f"round-{self.state.retry_count}-test-errors.txt"
-            detail_parts = []
-            for test_name, tr in result.get("suite_results", {}).items():
-                if tr.get("ci_result") == "passed":
-                    continue
-                # env_flake_pass tests are ALSO included: their logs often
-                # carry the real root cause that the classifier smoothed over
-                # (e.g. torch_npu npugraph FX compile crash "too many values
-                # to unpack (expected 20)" classified as Engine-core-init
-                # failure — run 31952700363).  Without the excerpt the adapter
-                # cannot tell a true env issue from a real bug and burns fix
-                # rounds guessing.
-                parts = [f"=== {test_name} ==="]
-                # Log content FIRST — the excerpt carries the actual failure.
-                # A hang after a crash buries the traceback under
-                # READY/polling noise (plain tail cut loses the cause), and an
-                # empty structured summary (timeout-killed tests have no pytest
-                # output) misled the adapter into dismissing real bugs as
-                # "resource kill" (run 31376860112: disaggregated_encoder's
-                # eps=0.0 ValueError sat in the excerpt, but the empty
-                # [summary] above it won).  Excerpt first, tail as fallback,
-                # timeout note only when neither yields anything.
-                lp = Path(tr.get("log_path", ""))
-                log_text = ""
-                if lp.exists():
-                    try:
-                        log_text = lp.read_text(encoding='utf-8', errors='replace')
-                    except Exception:
-                        parts.append("[log]\n(could not read)")
-                if log_text:
-                    excerpt = _extract_error_excerpt(log_text)
-                    if excerpt:
-                        parts.append(f"[log excerpt]\n{excerpt}")
-                    else:
-                        parts.append(f"[log tail]\n...\n{log_text[-3000:]}")
-                if not log_text and tr.get("run_suite_exit_code") == -9:
-                    parts.append("[NOTE] process was killed by the suite timeout "
-                                 "(exit -9) and its log is empty — likely a hang "
-                                 "with no error output")
-                # Structured summary AFTER the log excerpt — secondary.  A
-                # timeout-killed test has an empty summary (no pytest output);
-                # flag it so the agent does not dismiss the excerpt's real
-                # failure as a "resource kill" again.
-                sp = Path(tr.get("summary_path", ""))
-                if sp.exists():
-                    try:
-                        summary_text = sp.read_text(encoding='utf-8')[:4000]
-                    except Exception:
-                        summary_text = "(could not read)"
-                    if '"code_bugs": []' in summary_text.replace(" ", ""):
-                        summary_text += ("\n[NOTE] structured summary is empty — the test was "
-                                         "killed by the suite timeout (no pytest output). "
-                                         "The [log excerpt] above IS the failure; do not "
-                                         "dismiss it as a resource kill.")
-                    parts.append(f"[summary]\n{summary_text}")
-                detail_parts.append("\n\n".join(parts))
-            if detail_parts:
-                test_errors_detail.write_text("\n\n---\n\n".join(detail_parts), encoding="utf-8")
-                self.state.test_errors = [str(test_errors_detail), summary_log]
-            else:
-                self.state.test_errors = [summary_log]
+            detail_file = build_test_errors_detail(
+                result.get("suite_results", {}), self.state.retry_count,
+                tests_dir, Path(summary_log))
+            self.state.test_errors = (
+                [str(detail_file), summary_log] if detail_file else [summary_log])
 
         return test_passed
 
