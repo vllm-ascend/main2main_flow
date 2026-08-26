@@ -6,7 +6,9 @@ authors = [{ name = "vllm-ascend-ci", email = "vllm-ascend-ci@example.com" }]
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "pydantic>=2.0",
-    "pyyaml>=6.0"
+    "pyyaml>=6.0",
+    # do not re-add `ripgrep`: the internal PyPI mirror only proxies its
+    # sdist, whose metadata build hangs pip in the runner container
 ]
 
 [project.scripts]

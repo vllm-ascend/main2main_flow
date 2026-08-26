@@ -4,6 +4,31 @@
 > upstream-main code in the `else`/`not` branch and OLD release code in the
 > `if` branch. If you write a guard the other way around, it is **wrong**.
 
+## Index
+
+Read only the section whose trigger matches your change — never the whole file.
+Lines are relative to this file; read a section with `sed -n 'A,Bp' <this file>`.
+
+| Section | Trigger — read when... | Lines |
+|---------|------------------------|-------|
+| MCP tool selection | unsure which vllm-report tool answers the question | 32-54 |
+| §1 Upstream adds a parameter | a new param appears in an upstream signature | 55-66 |
+| §1b Removes a parameter + return change | a param is removed AND return semantics change | 67-83 |
+| §2 Constructor/factory signature change | a constructor or factory changes signature | 84-95 |
+| §3 Class moved to another module | a class moves modules upstream | 96-112 |
+| §4 Upstream deletes a patched module | vllm-ascend patches a module upstream deleted | 113-116 |
+| §5 Upstream fixes a bug with a workaround | upstream bugfix supersedes an ascend workaround | 117-126 |
+| §6 Refactoring too large for guards | >50 lines of guarded code | 127-137 |
+| §7 Runtime check Ascend can't satisfy | upstream adds an NPU-unsatisfiable check | 138-145 |
+| §8 PyTorch API not on NPU | upstream uses a torch API missing on NPU | 146-153 |
+| §9 Base class adds attr/method | base class gains fields/methods (incl. NVIDIA-only trap) | 154-194 |
+| §10 Method signature change — ALL overrides | a method signature changes; grep every override | 195-205 |
+| §11 Processor registrations removed | upstream unregisters processors | 206-214 |
+| §12 `next()` calls | changed code contains bare `next(...)` | 215-226 |
+| §13 Params added to an overridden method | overridden method gains params (two-version def) | 227-264 |
+| §14 Triton kernel signature change | a patched Triton kernel changes signature | 265-295 |
+| Mypy prevention | final mypy errors on guards/imports/overrides | 296-301 |
+
 ## Using MCP tools to identify the right pattern
 
 Before picking a pattern below, use vllm-report MCP tools to confirm the

@@ -21,10 +21,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from main2main_flow.scripts.agent.toolguard import guard_env
 from main2main_flow.scripts.utils.utils import ts_print
 
 _AGENT_DIR = Path(__file__).parent.parent.parent / "agents"
-_TIMEOUT_MINUTES = 30
+# A step adaptation needs ~570 tool calls at ~14s/call (~2h); a 30min cap
+# killed the model mid-work repeatedly (run 32809534429: 6 kills), and each
+# SIGKILL+resume made the session context larger and every later call slower.
+# 60min halves the kill count; the stale/event-stale checks below still bound
+# genuinely stuck sessions.
+_TIMEOUT_MINUTES = 60
 _STALE_SECONDS = 300
 # No JSONL progress event (step_start/tool_use/text/step_finish) for this
 # long → kill.  The stdout-based stale check misses sessions that stream
@@ -33,6 +39,18 @@ _STALE_SECONDS = 300
 _EVENT_STALE_SECONDS = 600
 _MAX_STALE_RETRIES = 3
 _DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
+
+# Per-file budget for inlining error_logs content into the prompt.  Kept
+# moderate: the prompt is re-processed on every tool call, so unbounded error
+# text slows each call.  Head+tail truncation (not head-only) preserves the
+# last failure's summary and the final traceback.
+_ERROR_INLINE_LIMIT = 24000
+
+# Prompts larger than this are piped to opencode via stdin instead of
+# being passed as a positional argv element (Linux MAX_ARG_STRLEN = 128 KiB
+# per argument; execve fails E2BIG beyond it — run 32873364134).
+_MAX_ARGV_PROMPT_CHARS = 100_000
+_ERROR_INLINE_HEAD_FRAC = 0.6
 
 # Per-role model overrides.  The analysis/fix roles do mechanical routing
 # (read diff, map symbols, edit) where deep per-call reasoning is not
@@ -97,9 +115,18 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
         # re-processes the full prompt, so ~32KB of static reference text
         # (~8K tokens) made each call slow (adapter prompt was 53.6K chars).
         # Pass absolute paths instead; the model reads only the section it
-        # needs, when it needs it.
+        # needs, when it needs it.  The docs are index-first (## Index table
+        # with line ranges per section) so a section read is one `sed` call.
         ref_dir = _AGENT_DIR / agent_dir / "reference"
-        ref_content = "\n".join(f"- {rf}: {ref_dir / rf}" for rf in ref_names)
+        ref_content = (
+            "Reference docs are index-first: each starts with a `## Index` "
+            "table of sections and their line ranges. Read ONLY the index and "
+            "the sections whose trigger matches your change "
+            "(e.g. `sed -n 'A,Bp' <path>`) — never read a whole reference file. "
+            "Content you read earlier in this session is already in your "
+            "context; do not re-read it.\n"
+            + "\n".join(f"- {rf}: {ref_dir / rf}" for rf in ref_names)
+        )
         refs_loaded = ref_names
 
     ctx["reference_content"] = ref_content
@@ -110,31 +137,39 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     # Inline error content from error_logs files (if any).
     # error_logs is a JSON array of file paths, e.g. ["/path/a.txt", "/path/b.json"].
     # Fall back to newline-separated for backward compatibility.
+    # Truncation keeps BOTH ends: e2e test-errors.txt appends per-test blocks
+    # (log excerpt + structured summary), so a head-only cut silently drops
+    # every failure past the first few — including the last test's summary,
+    # which carries the code_bugs verdict the adapter needs to distinguish a
+    # real bug from an env flake.  The tail of a crashed/hung log also holds
+    # the final traceback; keep it.
     error_content = ""
     error_logs_raw = inputs.get("error_logs", "").strip()
     if error_logs_raw:
+        def _read_error_file(p: str) -> str:
+            try:
+                text = Path(p).read_text(encoding="utf-8")
+            except Exception:
+                return f"(could not read {p})"
+            if len(text) <= _ERROR_INLINE_LIMIT:
+                return text
+            head = int(_ERROR_INLINE_LIMIT * _ERROR_INLINE_HEAD_FRAC)
+            mark = f"\n...[truncated {len(text) - _ERROR_INLINE_LIMIT} chars]...\n"
+            tail = _ERROR_INLINE_LIMIT - head - len(mark)
+            return text[:head] + mark + text[-tail:]
+
         try:
             paths = json.loads(error_logs_raw)
             if isinstance(paths, list):
-                parts = []
-                for p in paths:
-                    pp = Path(p)
-                    if pp.exists():
-                        try:
-                            parts.append(pp.read_text(encoding="utf-8")[:16000])
-                        except Exception:
-                            parts.append(f"(could not read {p})")
+                parts = [_read_error_file(p) for p in paths if Path(p).exists()]
                 error_content = "\n\n".join(parts)
         except (json.JSONDecodeError, ValueError):
             # Legacy: one path per line
-            parts = []
-            for p in error_logs_raw.splitlines():
-                p = p.strip()
-                if p and Path(p).exists():
-                    try:
-                        parts.append(Path(p).read_text(encoding="utf-8")[:16000])
-                    except Exception:
-                        parts.append(f"(could not read {p})")
+            parts = [
+                _read_error_file(p.strip())
+                for p in error_logs_raw.splitlines()
+                if p.strip() and Path(p.strip()).exists()
+            ]
             error_content = "\n\n".join(parts)
     ctx["error_content"] = error_content or "(none)"
 
@@ -151,17 +186,17 @@ progress event). This is continuation retry {retry}/{_MAX_STALE_RETRIES}.
 
 The full task prompt, reference docs, and rules are already in this session's
 context — do NOT expect them to be repeated here. Re-read them from the
-session history if needed.
+session history if needed. Any file content you read before the termination
+(e.g. `sed` output, reference sections, code) is also still in your context —
+do NOT re-read those files; go straight to editing or writing.
 
 Do not start from scratch. The current vllm-ascend working tree may already
 contain partial code changes from the previous attempt. These files may also
 contain partial results:
 
   - {step_dir}/analysis.md
-  - {step_dir}/review.md
+  - {step_dir}/review.json  (critic output — only if adapter-qa ran for this step)
   - {step_dir}/step_summary.md
-  - {step_dir}/opencode.log
-  - {step_dir}/opencode_raw.jsonl
 
 First inspect the existing changes and generated files. Reuse prior work, then
 continue any unfinished adaptation, static review, and step_summary.md updates.
@@ -328,14 +363,32 @@ def _run_once(
     ]
     if session_id:
         cmd += ["--session", session_id]
-    cmd += ["--", prompt]
+
+    # Linux caps a single argv element at 128 KiB (MAX_ARG_STRLEN): a
+    # fix-mode prompt carrying several inlined test-errors logs exceeds
+    # that and execve dies with E2BIG (run 32873364134: 131 KB prompt →
+    # OSError [Errno 7] Argument list too long, killing the fix loop).
+    # opencode also accepts the message via piped stdin (EOF terminates
+    # it), so route oversized prompts there instead of argv.
+    stdin_prompt = len(prompt) > _MAX_ARGV_PROMPT_CHARS
+    if not stdin_prompt:
+        cmd += ["--", prompt]
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.PIPE if stdin_prompt else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=stderr_fh or subprocess.DEVNULL,
         text=True,
         bufsize=1,
+        env=guard_env(),
     )
+    if stdin_prompt:
+        # opencode blocks until stdin reaches EOF — write and close now.
+        assert proc.stdin is not None
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+        ts_print(f"[opencode] prompt {len(prompt)} chars routed via stdin "
+                 f"(argv would exceed the 128 KiB per-arg limit)")
 
     lines_queue: queue.Queue[str | None] = queue.Queue()
 

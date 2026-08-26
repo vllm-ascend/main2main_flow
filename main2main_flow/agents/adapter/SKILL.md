@@ -95,6 +95,13 @@ these rules to stay on the critical path:
   `BatchReqState` import broke the whole v0.27.1 lane — ImportError + a
   third positional arg to `init_workspace_manager`).
 - Static analysis only — do not import vllm/vllm-ascend, run tests, launch models, or require NPU/GPU
+- Use `rg` for symbol search (installed) — one call covers what a loop of `grep` calls would take; batch related lookups into a single invocation
+- Reference docs (`adaptation-patterns.md`, `common-pitfalls.md`,
+  `code-structure-guide.md`) are **index-first**: each starts with a `## Index`
+  table mapping sections to line ranges. Read ONLY the index and the sections
+  whose trigger matches your change — e.g. `sed -n 'A,Bp' <file>`. Never read a
+  whole reference file. Content you already read in this session stays in your
+  context — do not re-read it in later attempts or after resume
 - **DO NOT run mypy, ruff, pre-commit, py_compile, or any linter/checker/compiler command.** Ever. During adaptation, only read code and edit files.
 - Never read raw CI logs — use inlined error content above
 - Do NOT treat ModuleNotFoundError or missing NPU/GPU from local commands as adaptation failures
@@ -150,8 +157,8 @@ The step_target.patch is cumulative (git diff HEAD).
   wrapper's behalf; a refactor of stream sync / events / ordering / dispatch
   splits can break the wrapper without touching any overridden method.  Query
   `get_adaptation_lessons` for the shared-expert and MoE-gate contract cases
-  (L20260819-001/002), and read `{error_content}`'s `upstream-fix-context.diff`
-  before declaring no-op.
+  (L20260819-001/002), and read `{step_dir}/upstream-fix-context.diff`
+  (when included in the error logs) before declaring no-op.
 - **vllm-report impact map**: {vllm_report_context}
   The vllm-report MCP server is registered in opencode.jsonc. Call its tools
   DYNAMICALLY during analysis (see "vllm-report MCP Tools" section below).

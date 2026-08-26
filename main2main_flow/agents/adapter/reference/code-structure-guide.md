@@ -4,6 +4,13 @@ Use this guide as a stable routing reference when mapping upstream vLLM changes
 to likely vllm-ascend files. These tables describe code structure, not workflow
 policy. Read only the sections needed for the current step.
 
+## Index
+
+| Section | Trigger — read when... | Lines |
+|---------|------------------------|-------|
+| vLLM Key Areas to Focus On | mapping an upstream change to likely vllm-ascend files | 21-82 |
+| File Mapping (via vllm-report) | vllm-report unavailable; need manual fallback routing | 85-91 |
+
 This file may need refreshing when vllm-ascend structure changes. On the final
 main2main step, check whether the vllm-ascend files/directories or mappings below
 became stale during the upgrade. If they changed, update this file to match the

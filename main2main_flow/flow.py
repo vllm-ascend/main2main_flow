@@ -1343,11 +1343,21 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             else:
                 ts_print(f"[ai_analysis] {step_id}: critic passed")
 
-            if pre_ci_passed and review_passed:
+            # QA (adapter-qa) gets exactly one fix round: attempt 1 issues are
+            # fixed by attempt 2, then e2e is the arbiter regardless of review
+            # outcome. Static review cannot settle semantic disputes (e.g.
+            # packed-vs-summed KV pools), so iterating it further burns time
+            # without converging; e2e verdict is the only signal that matters.
+            # pre_ci stays a hard gate across all 3 attempts.
+            if pre_ci_passed and (review_passed or attempt >= 2):
+                if not review_passed:
+                    ts_print(f"[ai_analysis] {step_id}: critic still has issues after "
+                             f"1 fix round — proceeding to e2e anyway")
                 break
 
-        if not (pre_ci_passed and review_passed):
-            ts_print(f"[ai_analysis] {step_id}: FAILED after 3 attempts — skipping e2e")
+        if not pre_ci_passed:
+            ts_print(f"[ai_analysis] {step_id}: FAILED after 3 attempts "
+                     f"(pre_ci never passed) — skipping e2e")
             self.state.test_errors = error_logs if error_logs else []
             return False
 

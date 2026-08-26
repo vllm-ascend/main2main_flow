@@ -2,6 +2,37 @@
 
 Mistakes that break CI or cause silent failures.
 
+## Index
+
+Read only the section whose symptom matches your failure — never the whole file.
+Lines are relative to this file; read a section with `sed -n 'A,Bp' <this file>`.
+
+| Section | Trigger — read when... | Lines |
+|---------|------------------------|-------|
+| Version guard direction is inverted | any `vllm_version_is` guard you write (self-check) | 36-65 |
+| Importing modules that don't exist | mypy `import-not-found` on guarded imports | 66-84 |
+| Indentation errors | inserting guard blocks into existing code | 85-90 |
+| Variable aliases as base classes | mypy `[valid-type]` / `[misc]` on `class X(_Base)` | 91-112 |
+| Missing attribute on subclass | `AttributeError: no attribute 'Y'` after upstream adds a field | 113-128 |
+| Return type mismatch across branches | release-only `AttributeError` on a return value, main passes | 129-149 |
+| Missing override in sibling class | `TypeError: missing required positional` on an unmodified class | 150-166 |
+| Positional argument order | upstream inserts a param between existing ones | 167-186 |
+| hit_length computation with wrong block_size | v0.25.1 MLA crash (segfault, no traceback) | 187-211 |
+| Processor patch blocked by early return | `Tokenizer is missing required attribute 'image_token'` | 212-232 |
+| Fix covers only ONE of multiple paths | the SAME e2e failure recurs after your fix (HunyuanVL) | 233-295 |
+| Patching symbols from deleted modules | a patch file references a deleted `vllm.X` | 296-305 |
+| `hasattr` / `try-except` instead of guard | code uses `hasattr` or `try: import` for version detection | 306-314 |
+| Output-buffer trap | upstream changes `output[:] = result` to `return result` | 315-320 |
+| Format violations (E501/F821/F841/F401) | pre_ci or gate flags a format code | 321-332 |
+| Common typos (codespell) | gate flags spelling | 333-340 |
+| Additional QA-level checks | proactive checklist before submitting (next(), super(), registries) | 341-370 |
+| Environment compatibility stubs | `ImportError` from a pinned dep (triton etc.) at import time | 371-415 |
+| triton-ascend kernel constraints | porting a Triton kernel; `CompilationError`/`KeyError` at launch | 416-465 |
+| `device_index` must be explicit | NPU device APIs in version-guarded branches | 466-487 |
+| Variable name shadowing | `AttributeError`/wrong-type errors at a call site | 488-511 |
+| mypy error codes (final gate) | final quality gate mypy failures, fix per `[code]` | 512-543 |
+| Fix mode workflow | `error_logs` contains `quality_gate.json` or `pre_ci_check.json` | 544-567 |
+
 ## Version guard direction is inverted
 
 **Symptom**: New upstream-main behavior runs on the release version instead, or
