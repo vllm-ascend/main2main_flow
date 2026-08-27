@@ -58,6 +58,9 @@ class E2EDispatchConfig:
     vllm: str = ""
     base_ref: str = "main"
     timeout_min: int = 480
+    # run id of the dispatching main run; the e2e workflow's hold guard
+    # uses it to recognize exec runs from this main run.
+    main_run_id: str = ""
 
     @classmethod
     def from_env(cls, target_commit: str = "") -> "E2EDispatchConfig":
@@ -70,6 +73,7 @@ class E2EDispatchConfig:
             vllm=target_commit or os.getenv("TARGET_COMMIT", ""),
             base_ref=os.getenv("MAIN2MAIN_E2E_BASE_REF", "main"),
             timeout_min=int(os.getenv("MAIN2MAIN_E2E_TIMEOUT_MIN", "480")),
+            main_run_id=os.getenv("MAIN2MAIN_E2E_MAIN_RUN_ID", ""),
         )
 
 
@@ -701,7 +705,8 @@ def run_external_e2e(cfg: E2EDispatchConfig, ascend_path: Path,
     inputs = {"vllm": cfg.vllm, "base_ref": cfg.base_ref,
               "round": str(round_number),
               "signal_branch": cfg.signal_branch,
-              "flow_ref": cfg.flow_ref}
+              "flow_ref": cfg.flow_ref,
+              "main_run_id": cfg.main_run_id}
     run_id = dispatch_workflow(cfg.repo, cfg.workflow, cfg.dispatch_ref,
                                inputs)
     ts_print(f"[e2e-dispatch] exec run {run_id} started (round "
