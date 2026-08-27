@@ -119,7 +119,12 @@ def compute_test_groups(ascend_path: Path,
             groups_json = line[len("test_groups="):]
             break
     if not groups_json:
-        return []
+        # select_tests exited 0 but emitted no test_groups= line — a broken
+        # matcher (format change, wrong args), NOT "nothing to run".  Only
+        # an explicit empty group list may be treated as no match.
+        raise RuntimeError(
+            "select_tests.py emitted no test_groups= line (exit 0); "
+            f"stdout head: {r.stdout.strip()[:400]}")
     try:
         groups = json.loads(groups_json)
     except json.JSONDecodeError as exc:

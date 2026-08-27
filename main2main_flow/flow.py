@@ -437,7 +437,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         dispatch_prep(e2e_cfg)
                 except Exception as exc:
                     ts_print(f"[e2e] prep dispatch FAILED ({exc}) — exec "
-                             f"rounds will inline-setup until the env exists")
+                             f"rounds will inline-setup until the env exists "
+                             f"(degraded)")
+                    # GitHub Actions annotation: renders as an error in the
+                    # workflow UI instead of a line in a long log.  Escape
+                    # the annotation command's special chars (% \r \n).
+                    escaped = str(exc).replace("%", "%25").replace(
+                        "\r", "%0D").replace("\n", "%0A")
+                    print(f"::error title=main2main e2e-prep::prep dispatch "
+                          f"FAILED — {escaped}")
         signal = self.analyze_commit_and_plan_step()
         if signal == HasNoCommit:
             self.has_no_commit()
@@ -1459,8 +1467,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                      f"failed: {exc}")
             return False
         if not groups:
-            ts_print(f"[run_e2e_test] {step_id}: no test groups for changed "
-                     f"files — nothing to run")
+            ts_print(f"[run_e2e_test] {step_id}: no test groups for "
+                     f"{len(changed)} changed file(s) — nothing to run")
             return True
         result = run_external_e2e(
             cfg, ascend_path, groups, WORKSPACE_DIR / STEPS_DIR,

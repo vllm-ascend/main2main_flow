@@ -11,6 +11,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from main2main_flow.scripts.utils import e2e_dispatch
 from main2main_flow.scripts.utils.run_tests import build_test_errors_detail
 
@@ -228,6 +230,23 @@ def test_compute_test_groups(monkeypatch, tmp_path: Path) -> None:
 def test_compute_test_groups_empty_changed_files(tmp_path: Path) -> None:
     # No changed files -> nothing to match, return [] without touching select_tests.py.
     assert e2e_dispatch.compute_test_groups(tmp_path, []) == []
+
+
+def test_compute_test_groups_missing_test_groups_line(monkeypatch,
+                                                      tmp_path: Path) -> None:
+    # select_tests exits 0 but emits no test_groups= line — a broken
+    # matcher must FAIL, not be mistaken for "no tests to run".
+    select_script = tmp_path / ".github/workflows/scripts/select_tests.py"
+    select_script.parent.mkdir(parents=True)
+    select_script.write_text("#!/bin/false\n", encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="matched_modules=\nhas_tests=false\n", stderr="")
+
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="no test_groups= line"):
+        e2e_dispatch.compute_test_groups(tmp_path, ["vllm/x.py"])
 
 
 def test_apply_minimal_filter_no_env() -> None:
