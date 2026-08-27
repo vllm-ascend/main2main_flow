@@ -327,7 +327,7 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 
 ### External E2E（A2/A3/310P）
 
-每个有源码改动的 step，其 per-step e2e 都派发到外部 **A2（8 卡）/ A3（16 卡）/ 310P（4 卡）三台 GPU runner** 上跑（与 main 分支"是否跑 e2e"的判定规则一致）。测试调度与 PR CI 一致（`select_tests.py` ready-all + `test_config.yaml` 路由），执行引擎与 PR CI 相同（`run_tests.py` 贪心 bin-packing 并行）。测试选择由该 step 的 `changed_files` 决定（`compute_test_groups`，CPU 目标丢弃——由质量门禁覆盖）。
+每个有源码改动的 step，其 per-step e2e 都派发到外部 **A2（8 卡）/ A3（16 卡）/ 310P（4 卡）三台 NPU runner** 上跑（与 main 分支"是否跑 e2e"的判定规则一致）。测试调度与 PR CI 一致（`select_tests.py` ready-all + `test_config.yaml` 路由），执行引擎与 PR CI 相同（`run_tests.py` 贪心 bin-packing 并行）。测试选择由该 step 的 `changed_files` 决定（`compute_test_groups`，CPU 目标丢弃——由质量门禁覆盖）。
 
 #### 架构
 

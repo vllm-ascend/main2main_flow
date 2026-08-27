@@ -1,6 +1,6 @@
 """External E2E dispatcher: CPU-side control of the three-runner (A2/A3/310P) E2E.
 
-The main2main flow runs on a pure-CPU runner; E2E tests run on three GPU
+The main2main flow runs on a pure-CPU runner; E2E tests run on three NPU
 runners via the single ``main2main-e2e.yaml`` workflow:
 
 - round ``prep`` only runs the ``prepare-<chip>`` jobs (csrc cache, deps,
@@ -216,7 +216,7 @@ def incremental_test_groups(ascend_path: Path, base_sha: str,
 
     Round 1 runs the full ready-all suite (baseline).  A fix round re-runs
     only (a) the failing tests — carried over from *full_groups* so their
-    num_npus/npu_type routing stays authoritative — and (b) every GPU test
+    num_npus/npu_type routing stays authoritative — and (b) every NPU-suite test
     that test_config.yaml maps to the adapter's NEW commits since
     *base_sha* (the last dispatch HEAD): changed files → module
     ``source_file_dependencies`` → module tests, intersected with the
@@ -252,7 +252,7 @@ def incremental_test_groups(ascend_path: Path, base_sha: str,
         mapped = []
     if mapped:
         # Route mapped targets via the full groups (their ready-all
-        # superset), expanding directories; targets absent from the GPU
+        # superset), expanding directories; targets absent from the NPU
         # suite (CPU UT) are dropped — the quality gate covers them.
         all_tests = _index_tests(full_groups)
         for target in mapped:

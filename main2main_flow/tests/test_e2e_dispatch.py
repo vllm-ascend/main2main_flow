@@ -352,7 +352,7 @@ def test_incremental_groups_with_diff_impact(monkeypatch,
     assert "tests/e2e/a2/test_a.py" in by_type["a2"]
     # impact ∪ failing, deduped; routed via the full groups (test_c keeps
     # its a3 x4 routing even though it was also a failing test).  The UT
-    # target has no group in the GPU suite → dropped (quality gate covers).
+    # target has no group in the NPU suite → dropped (quality gate covers).
     assert by_type["a3"] == "tests/e2e/a3_4/test_c.py"
     for g in result:
         assert g["npu_type"] in ("a2", "a3")
@@ -361,7 +361,7 @@ def test_incremental_groups_with_diff_impact(monkeypatch,
 
 def test_incremental_groups_drops_unmapped_targets(monkeypatch,
                                                    tmp_path: Path) -> None:
-    # CPU-UT targets (not in the GPU full groups) must not leak into the
+    # CPU-UT targets (not in the NPU full groups) must not leak into the
     # fix round — the quality gate covers them.
     monkeypatch.setattr(e2e_dispatch, "run_git",
                         lambda *a, **k: "vllm_ascend/foo.py\n")
