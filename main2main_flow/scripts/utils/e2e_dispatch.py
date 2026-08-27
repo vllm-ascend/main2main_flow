@@ -53,6 +53,8 @@ class E2EDispatchConfig:
     repo: str = "vllm-ascend-ci/vllm-ascend"
     workflow: str = "main2main-e2e.yaml"
     signal_branch: str = "main2main_e2e"
+    # fork carrying the signal branch (the adapted code); empty = cfg.repo
+    signal_repo: str = ""
     dispatch_ref: str = "main"
     flow_ref: str = "main"
     vllm: str = ""
@@ -68,6 +70,7 @@ class E2EDispatchConfig:
             repo=os.getenv("MAIN2MAIN_E2E_REPO", "vllm-ascend-ci/vllm-ascend"),
             workflow=os.getenv("MAIN2MAIN_E2E_WORKFLOW", "main2main-e2e.yaml"),
             signal_branch=os.getenv("MAIN2MAIN_E2E_BRANCH", "main2main_e2e"),
+            signal_repo=os.getenv("MAIN2MAIN_E2E_SIGNAL_REPO", ""),
             dispatch_ref=os.getenv("MAIN2MAIN_E2E_DISPATCH_REF", "main"),
             flow_ref=os.getenv("MAIN2MAIN_FLOW_REF", "main"),
             vllm=target_commit or os.getenv("TARGET_COMMIT", ""),
@@ -767,11 +770,12 @@ def run_external_e2e(cfg: E2EDispatchConfig, ascend_path: Path,
     ci_dir = Path(log_dir) / str(step_id) / "tests"
     ci_dir.mkdir(parents=True, exist_ok=True)
     if push_before:
-        push_signal_branch(ascend_path, cfg.signal_branch, cfg.repo,
-                           groups_json)
+        push_signal_branch(ascend_path, cfg.signal_branch,
+                           cfg.signal_repo or cfg.repo, groups_json)
     inputs = {"vllm": cfg.vllm, "base_ref": cfg.base_ref,
               "round": str(round_number),
               "signal_branch": cfg.signal_branch,
+              "signal_repo": cfg.signal_repo,
               "flow_ref": cfg.flow_ref,
               "main_run_id": cfg.main_run_id}
     run_id = dispatch_workflow(cfg.repo, cfg.workflow, cfg.dispatch_ref,
