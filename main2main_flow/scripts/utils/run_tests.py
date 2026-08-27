@@ -10,6 +10,9 @@ cards within each round: a one_card test takes 1 card, so up to ``total_cards``
 of them run concurrently; a two_card test takes 2, so two can share a 4-card
 runner. Each test gets its own ``ASCEND_RT_VISIBLE_DEVICES`` so processes do not
 collide on the same device. Pass ``--sequential`` to force one-test-per-round.
+On dual-die NPUs (A3: dies 0-1, 2-3, ... live on one physical card and must
+be used together) pass ``--pair-aligned-devices`` — every test then starts on
+an even die and odd dies are never assigned to any task.
 
 Execution targets:
   - Local:       run directly (no --remote)
@@ -179,16 +182,42 @@ def _schedule_rounds(tests: list[str], total_cards: int,
     return rounds
 
 
+def _validate_pair_aligned(phy_ids: list[int]) -> None:
+    """Reject device sets that split a dual-die card's pair across tasks.
+
+    The A3 is a dual-die package: dies 0-1, 2-3, ... live on the same
+    physical card and must be used together.  The runner's visible device
+    list must therefore be closed under pairing (id ^ 1 present for every
+    id) — anything else means the device plugin allocated individual dies
+    and no software-side alignment can fix it.
+    """
+    present = set(phy_ids)
+    lone = [i for i in phy_ids if (i ^ 1) not in present]
+    if lone:
+        raise ValueError(
+            "visible devices must form complete dual-die pairs (0-1, 2-3, "
+            f"4-5, ...); got {phy_ids} with lone dies {lone}.  The A3 is a "
+            "dual-die card — the device plugin must allocate whole pairs."
+        )
+
+
 def _assign_devices(rounds: list[list[str]],
-                    phy_ids: list[int] | None = None) -> list[list[tuple[str, str]]]:
+                    phy_ids: list[int] | None = None,
+                    pair_aligned: bool = False) -> list[list[tuple[str, str]]]:
     if phy_ids is None:
         max_round = max(sum(_test_cards(t) for t in rnd) for rnd in rounds) if rounds else 0
         phy_ids = list(range(max_round))
+    if pair_aligned:
+        _validate_pair_aligned(phy_ids)
     result: list[list[tuple[str, str]]] = []
     for rnd in rounds:
         assigned: list[tuple[str, str]] = []
         offset = 0
         for test in rnd:
+            if pair_aligned and offset % 2:
+                # Never start a test on the odd die of a pair — the lone die
+                # stays unused rather than being split across two tasks.
+                offset += 1
             need = _test_cards(test)
             devices = ",".join(str(phy_ids[offset + i]) for i in range(need))
             offset += need
@@ -804,6 +833,7 @@ def run_tests(
     mock_scale: float = 0.1,
     skip_setup: bool = False,
     card_overrides: dict[str, int] | None = None,
+    pair_aligned_devices: bool = False,
 ) -> dict:
     """Run end-to-end tests for a main2main step.
 
@@ -925,7 +955,11 @@ def run_tests(
                  f"{sorted(overriders)}", flush=True)
     rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
         test_files, total_cards, est_times, device_overriders=overriders)
-    device_rounds = _assign_devices(rounds, all_phy_ids)
+    if pair_aligned_devices:
+        ts_print(f"  Dual-die pairing: enforcing pair-aligned device assignment "
+                 f"(devices {phy_ids})", flush=True)
+    device_rounds = _assign_devices(rounds, all_phy_ids,
+                                    pair_aligned=pair_aligned_devices)
 
     parallel_count = sum(1 for r in rounds if len(r) > 1)
     ts_print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {total_cards}):")
@@ -1164,6 +1198,11 @@ def main() -> None:
     p.add_argument("--remote-vllm-path", type=Path)
     p.add_argument("--remote-ascend-path", type=Path)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--pair-aligned-devices", action="store_true",
+                   help="Dual-die NPU (A3): only ever assign whole die pairs "
+                        "(0-1, 2-3, ...) to tests; never start a test on an "
+                        "odd die.  Validates the runner's visible devices are "
+                        "closed under pairing before scheduling.")
     p.add_argument("--mock", action="store_true")
     p.add_argument("--mock-scale", type=float, default=0.1)
     args = p.parse_args()
@@ -1192,6 +1231,7 @@ def main() -> None:
         round_number=args.round, dry_run=args.dry_run,
         sequential=args.sequential, mock=args.mock, mock_scale=args.mock_scale,
         skip_setup=args.skip_setup,
+        pair_aligned_devices=args.pair_aligned_devices,
     )
     sys.exit(0 if result.get("can_commit", False) else 1)
 
