@@ -70,7 +70,7 @@ def _is_npu_convention_ut_path(rel_path: str) -> bool:
     return bool(_CPU_UT_A2_RE.search(p) or _CPU_UT_A3_2_RE.search(p))
 
 
-def _collect_cpu_ut_files(repo: Path) -> list[str]:
+def _collect_cpu_ut_files(repo: Path, log_label: str = "pre_ci") -> list[str]:
     """Return CPU-routed tests/ut paths (rel to repo).
 
     Routes from vllm-ascend's OWN ``test_config.yaml`` — the same
@@ -97,11 +97,11 @@ def _collect_cpu_ut_files(repo: Path) -> list[str]:
                 if pattern_str.startswith("tests/ut"):
                     npu_patterns.append(re.compile(pattern_str))
             if npu_patterns:
-                ts_print(f"[pre_ci] ut: routing from test_config.yaml "
+                ts_print(f"[{log_label}] ut: routing from test_config.yaml "
                          f"({len(npu_patterns)} NPU pattern(s), "
                          f"{len(skip_tests)} skip entry(s))")
         except Exception as e:
-            ts_print(f"[pre_ci] ut: failed to parse test_config.yaml ({e}), "
+            ts_print(f"[{log_label}] ut: failed to parse test_config.yaml ({e}), "
                      "falling back to convention regexes")
             npu_patterns = []
 
@@ -165,7 +165,8 @@ def _failure_excerpt(clean: str, failure_line: str, max_chars: int = 900) -> str
 def check_ut(repo: Path, vllm_path: str | Path | None = None,
              vllm_release_path: str | Path | None = None,
              release_tag: str = "",
-             timeout_s: int = 1800) -> dict:
+             timeout_s: int = 1800,
+             log_label: str = "pre_ci") -> dict:
     """Run the CPU-UT batch, aligned with CI's single-process execution.
 
     Runs the same CPU-routed tests/ut/* files as CI's CPU runner
@@ -202,17 +203,17 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     import tempfile
     import importlib.metadata as _md
 
-    cpu_files = _collect_cpu_ut_files(repo)
+    cpu_files = _collect_cpu_ut_files(repo, log_label=log_label)
     if not cpu_files:
-        ts_print("\n[pre_ci] ut: SKIPPED — tests/ut not found or no CPU tests")
+        ts_print(f"\n[{log_label}] ut: SKIPPED — tests/ut not found or no CPU tests")
         return {"violations": [], "detail": "tests/ut not found", "skipped": True}
 
     pytest_bin = shutil.which("pytest")
     if not pytest_bin:
-        ts_print("\n[pre_ci] ut: SKIPPED — pytest not installed")
+        ts_print(f"\n[{log_label}] ut: SKIPPED — pytest not installed")
         return {"violations": [], "detail": "pytest not installed", "skipped": True}
 
-    ts_print(f"\n[pre_ci] ut: collected {len(cpu_files)} CPU test files "
+    ts_print(f"\n[{log_label}] ut: collected {len(cpu_files)} CPU test files "
              f"(per-file isolation, NPU-convention a2/ and a3_2/ excluded)")
 
     # Read numpy constraint from triton-ascend metadata (mirror _check_mypy).
@@ -232,21 +233,21 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                     f"{s.operator}{s.version}" for s in r.specifier)
                 break
     except Exception as e:
-        ts_print(f"[pre_ci] ut: failed to read triton-ascend numpy constraint ({e})")
+        ts_print(f"[{log_label}] ut: failed to read triton-ascend numpy constraint ({e})")
 
     # Create venv with --system-site-packages, install numpy constraint.
     venv_dir: Path | None = None
     pytest_cmd = [pytest_bin]
     try:
         venv_dir = Path(tempfile.mkdtemp(prefix="ut_venv_"))
-        ts_print(f"[pre_ci] ut: creating venv at {venv_dir} "
+        ts_print(f"[{log_label}] ut: creating venv at {venv_dir} "
                  f"(numpy{target_numpy_spec} from triton-ascend)")
         r = subprocess.run(
             [sys.executable, "-m", "venv", str(venv_dir), "--system-site-packages"],
             capture_output=True, text=True, timeout=180,
         )
         if r.returncode != 0:
-            ts_print("[pre_ci] ut: WARNING venv creation FAILED — "
+            ts_print(f"[{log_label}] ut: WARNING venv creation FAILED — "
                      "falling back to system pytest")
             venv_dir = None
         else:
@@ -259,20 +260,20 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                         capture_output=True, text=True, timeout=180,
                     )
                 except subprocess.TimeoutExpired:
-                    ts_print("[pre_ci] ut: WARNING numpy install TIMED OUT — "
+                    ts_print(f"[{log_label}] ut: WARNING numpy install TIMED OUT — "
                              "falling back to system pytest")
                     r2 = None
                 if r2 is not None and r2.returncode != 0:
-                    ts_print("[pre_ci] ut: WARNING numpy install FAILED "
+                    ts_print(f"[{log_label}] ut: WARNING numpy install FAILED "
                              f"({r2.stderr.strip()[:200]}) — falling back "
                              "to system pytest")
                     venv_dir = None
             if venv_dir is not None:
                 pytest_cmd = [str(venv_python), "-m", "pytest"]
-                ts_print(f"[pre_ci] ut: using venv pytest via "
+                ts_print(f"[{log_label}] ut: using venv pytest via "
                          f"{venv_python} -m pytest")
     except subprocess.TimeoutExpired:
-        ts_print("[pre_ci] ut: WARNING venv creation TIMED OUT (180s) — "
+        ts_print(f"[{log_label}] ut: WARNING venv creation TIMED OUT (180s) — "
                  "falling back to system pytest")
         venv_dir = None
 
@@ -301,7 +302,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         if rpath and release_tag:
             versions.append((release_tag, rpath, release_tag, True))
         if not versions:
-            ts_print("[pre_ci] ut: no vllm paths configured, skipping")
+            ts_print(f"[{log_label}] ut: no vllm paths configured, skipping")
             return {"violations": [], "detail": "no vllm paths", "skipped": True}
 
         for label, vpath_abs, vllm_version, pure_cpu in versions:
@@ -328,10 +329,10 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 # torch_npu's runtime sees no visible devices.
                 env["ASCEND_RT_VISIBLE_DEVICES"] = ""
                 env.pop("CUDA_VISIBLE_DEVICES", None)
-                ts_print(f"[pre_ci] ut: [{label}] pure-CPU env "
+                ts_print(f"[{log_label}] ut: [{label}] pure-CPU env "
                          f"(ASCEND_RT_VISIBLE_DEVICES='')")
 
-            ts_print(f"\n[pre_ci] ut: === batch [{label}] "
+            ts_print(f"\n[{log_label}] ut: === batch [{label}] "
                      f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
 
             # Files known to pollute the shared process get their own
@@ -366,7 +367,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             # at collection (cp_local_slot, PR #14580), and no UT file
             # imports this chain — only this explicit check covers it.
             if not _has_npu_device(pytest_cmd, repo, env):
-                ts_print(f"[pre_ci] ut: [{label}] import-smoke SKIPPED "
+                ts_print(f"[{log_label}] ut: [{label}] import-smoke SKIPPED "
                          f"(no NPU device)")
                 details.append(f"{label}/import-smoke: SKIPPED (no NPU device)")
             else:
@@ -379,7 +380,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                         env=env, timeout=300,
                     )
                 except subprocess.TimeoutExpired:
-                    ts_print(f"[pre_ci] ut: [{label}] import-smoke TIMEOUT(300s)")
+                    ts_print(f"[{log_label}] ut: [{label}] import-smoke TIMEOUT(300s)")
                     all_files_clean = False
                     details.append(f"{label}/import-smoke: TIMEOUT")
                 else:
@@ -389,12 +390,12 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                             f"[{label}] import-smoke: patch chain not importable "
                             f"on {label} — {smoke.stderr.strip()[-800:]}")
                         details.append(f"{label}/import-smoke: FAILED")
-                        ts_print(f"[pre_ci] ut: [{label}] import-smoke FAILED "
+                        ts_print(f"[{log_label}] ut: [{label}] import-smoke FAILED "
                                  f"(patch chain not importable):\n"
                                  f"{smoke.stderr.strip()[-800:]}")
                     else:
                         details.append(f"{label}/import-smoke: OK")
-                        ts_print(f"[pre_ci] ut: [{label}] import-smoke OK")
+                        ts_print(f"[{log_label}] ut: [{label}] import-smoke OK")
 
             runs: list[tuple[str, subprocess.CompletedProcess]] = []
             try:
@@ -419,7 +420,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 )
                 runs.append(("batch", rr))
             except subprocess.TimeoutExpired:
-                ts_print(f"[pre_ci] ut: [{label}] batch TIMEOUT(1200s)")
+                ts_print(f"[{log_label}] ut: [{label}] batch TIMEOUT(1200s)")
                 all_files_clean = False
                 details.append(f"{label}/batch: TIMEOUT(1200s)")
             for f in isolated:
@@ -431,7 +432,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                     )
                     runs.append((f, rr))
                 except subprocess.TimeoutExpired:
-                    ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
+                    ts_print(f"[{log_label}] ut: [{label}] {f} TIMEOUT(300s)")
                     all_files_clean = False
 
             for name, rr in runs:
@@ -457,16 +458,16 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 summary = (summary_m.group(1) if summary_m
                            else f"exit={rr.returncode}")
                 details.append(f"{label}/{name}: {summary}")
-                ts_print(f"[pre_ci] ut: [{label}/{name}] {summary}")
+                ts_print(f"[{log_label}] ut: [{label}/{name}] {summary}")
 
         if all_files_clean:
-            ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean "
+            ts_print(f"\n[{log_label}] ut: OK — all {len(cpu_files)} files clean "
                      f"on all versions")
             return {"violations": [],
                     "detail": f"UT clean ({len(cpu_files)} files × "
                               f"{len(versions)} versions, single-process "
                               f"batch)"}
-        ts_print(f"\n[pre_ci] ut: {len(all_violations)} failure(s):")
+        ts_print(f"\n[{log_label}] ut: {len(all_violations)} failure(s):")
         for v in all_violations[:20]:
             ts_print(f"  {v}")
         if len(all_violations) > 20:
