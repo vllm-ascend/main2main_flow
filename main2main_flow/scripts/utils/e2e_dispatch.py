@@ -510,6 +510,73 @@ def dispatch_prep(cfg: E2EDispatchConfig) -> int:
     return run_id
 
 
+def _job_done_uploading(job: dict) -> bool:
+    """True when a job's round artifacts are all in the artifact store.
+
+    An e2e job either completed (upload step done or died) or is still
+    running its ``Hold runner (exec guard)`` step — which runs after the
+    upload step, so its artifacts are already listed/downloadable.
+    """
+    if job.get("status") == "completed":
+        return True
+    for step in job.get("steps", []):
+        if step.get("name") == "Hold runner (exec guard)" \
+                and step.get("status") == "in_progress":
+            return True
+    return False
+
+
+def wait_for_round_results(repo: str, run_id: int, timeout_min: int,
+                           poll_s: int = 30) -> dict:
+    """Wait for the round's results instead of the run's completion.
+
+    Exec rounds end with a hold step that keeps the run in_progress until
+    the next round is dispatched (the process is multi-step: rounds 1, 2,
+    ... are chained by the main run), so waiting for run completion would
+    deadlock the round chain.  Instead wait until every e2e-<chip> job has
+    passed its upload step — its artifacts are then listed and downloadable
+    while the guard still holds the machines.  On timeout the run is
+    cancelled to free the machines.
+    """
+    deadline = time.time() + timeout_min * 60
+    while time.time() < deadline:
+        # a) run finished on its own (guards died early / run cancelled):
+        #    artifacts are finalized, download whatever exists.
+        r = subprocess.run(
+            ["gh", "api", f"repos/{repo}/actions/runs/{run_id}"],
+            capture_output=True, text=True)
+        if r.returncode == 0:
+            try:
+                run = json.loads(r.stdout)
+            except json.JSONDecodeError:
+                run = {}
+            if run.get("status") == "completed":
+                return run
+        # b) every e2e job past its upload step → the round's results are
+        #    all in (a chip whose job died early just contributes nothing).
+        j = subprocess.run(
+            ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs"],
+            capture_output=True, text=True)
+        if j.returncode == 0:
+            try:
+                jobs = json.loads(j.stdout).get("jobs", [])
+            except (json.JSONDecodeError, KeyError):
+                jobs = []
+            e2e_jobs = [jb for jb in jobs
+                        if jb.get("name", "").startswith("e2e-")]
+            if e2e_jobs and all(_job_done_uploading(jb) for jb in e2e_jobs):
+                return {"status": "results_ready"}
+        time.sleep(poll_s)
+    subprocess.run(
+        ["gh", "api", "-X", "POST",
+         f"repos/{repo}/actions/runs/{run_id}/cancel"],
+        capture_output=True, text=True)
+    ts_print(f"[e2e-dispatch] run {run_id} timed out after "
+             f"{timeout_min}min, cancelled")
+    return {"status": "timed_out", "conclusion": "timed_out",
+            "run_id": run_id}
+
+
 def wait_prep(cfg: E2EDispatchConfig, run_id: int,
               timeout_min: int | None = None) -> dict:
     """Wait for the prep workflow; the first E2E round needs it ready."""
@@ -711,7 +778,8 @@ def run_external_e2e(cfg: E2EDispatchConfig, ascend_path: Path,
                                inputs)
     ts_print(f"[e2e-dispatch] exec run {run_id} started (round "
              f"{round_number})")
-    run = wait_for_run(cfg.repo, run_id, timeout_min or cfg.timeout_min)
+    run = wait_for_round_results(cfg.repo, run_id,
+                                 timeout_min or cfg.timeout_min)
     if run.get("status") == "timed_out":
         return {"step_id": step_id, "round": round_number,
                 "ci_result": "failed", "can_commit": False,
@@ -722,9 +790,9 @@ def run_external_e2e(cfg: E2EDispatchConfig, ascend_path: Path,
                 "log_path": str(ci_dir), "summary_path": str(ci_dir),
                 "elapsed_s": (timeout_min or cfg.timeout_min) * 60,
                 "rounds": []}
-    if run.get("conclusion") != "success":
-        ts_print(f"[e2e-dispatch] run {run_id} conclusion="
-                 f"{run.get('conclusion')}")
+    if run.get("conclusion") not in (None, "success"):
+        ts_print(f"[e2e-dispatch] run {run_id} completed early "
+                 f"(conclusion={run.get('conclusion')})")
     _download_artifacts(cfg.repo, run_id,
                         f"main2main-e2e-round-{round_number}-*", ci_dir)
     result = parse_exec_artifacts(ci_dir, round_number, step_id)

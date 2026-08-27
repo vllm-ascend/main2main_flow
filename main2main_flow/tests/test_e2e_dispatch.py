@@ -395,3 +395,146 @@ def test_incremental_groups_mapping_failure(monkeypatch,
         tmp_path, "abc123", ["tests/e2e/a2/test_b.py"], _full_groups())
     assert result is not None
     assert result[0]["tests"] == "tests/e2e/a2/test_b.py"
+
+
+# ---- wait_for_round_results -------------------------------------------------
+# The exec rounds end with a "Hold runner (exec guard)" step that keeps the
+# run in_progress until the next round is dispatched; the flow must wait
+# for the round's RESULTS (all e2e jobs past the upload step), not the run
+# completing — otherwise the multi-step round chain deadlocks.
+
+def _e2e_job(chip: str, status: str = "in_progress",
+             guard: str | None = "in_progress") -> dict:
+    steps = []
+    if guard:
+        steps.append({"name": "Hold runner (exec guard)", "status": guard})
+    return {"name": f"e2e-{chip}", "status": status, "steps": steps}
+
+
+def _wait_fake_run(responses, calls: list | None = None):
+    """Mimic gh api: per-poll (run-status, jobs) payloads, last repeats.
+
+    A "cancel" POST is answered 204-style.  Every command is appended to
+    *calls* so tests can assert the cancel happened.
+    """
+    state = {"i": 0}
+
+    def fake_run(cmd, **kwargs):
+        url = " ".join(cmd)
+        if "cancel" in url:
+            if calls is not None:
+                calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="{}",
+                                               stderr="")
+        # One poll = one run-status call followed by one jobs call; they
+        # must read the SAME response pair (index advances per poll).
+        is_jobs = "/jobs" in url
+        i = state["i"] - 1 if is_jobs else state["i"]
+        if not is_jobs:
+            state["i"] += 1
+        i = min(max(i, 0), len(responses) - 1)
+        # The jobs API returns {"jobs": [...]}; per-poll payloads store the
+        # job list unwrapped for readability.
+        payload = {"jobs": responses[i][1]} if is_jobs else responses[i][0]
+        if calls is not None:
+            calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps(payload), stderr="")
+
+    return fake_run
+
+
+def test_wait_for_round_results_guards_holding(tmp_path: Path,
+                                               monkeypatch) -> None:
+    # All three chips past the upload step (guard in_progress) → results
+    # ready while the run is still in_progress.
+    responses = [
+        ({"status": "in_progress", "conclusion": None},
+         [_e2e_job("a2"), _e2e_job("a3"), _e2e_job("310p")]),
+    ]
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
+                        _wait_fake_run(responses))
+    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
+    assert res == {"status": "results_ready"}
+
+
+def test_wait_for_round_results_completed_jobs_count(tmp_path: Path,
+                                                     monkeypatch) -> None:
+    # A chip whose job completed early (died before the guard) still counts
+    # as done-uploading; the parser backfills its missing artifact.
+    responses = [
+        ({"status": "in_progress", "conclusion": None},
+         [_e2e_job("a2", status="completed"), _e2e_job("a3"),
+          _e2e_job("310p", status="completed")]),
+    ]
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
+                        _wait_fake_run(responses))
+    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
+    assert res == {"status": "results_ready"}
+
+
+def test_wait_for_round_results_waits_for_slow_chip(tmp_path: Path,
+                                                    monkeypatch) -> None:
+    # First poll: a3 still running its tests (no guard step yet) → keep
+    # polling; second poll: a3 reached its guard → results ready.
+    responses = [
+        ({"status": "in_progress", "conclusion": None},
+         [_e2e_job("a2"), _e2e_job("a3", guard=None),
+          _e2e_job("310p")]),
+        ({"status": "in_progress", "conclusion": None},
+         [_e2e_job("a2"), _e2e_job("a3"), _e2e_job("310p")]),
+    ]
+    calls: list = []
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
+                        _wait_fake_run(responses, calls))
+    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
+    assert res == {"status": "results_ready"}
+    assert len(calls) >= 3  # waited past the first poll
+
+
+def test_wait_for_round_results_run_completed_early(tmp_path: Path,
+                                                    monkeypatch) -> None:
+    # All guards died (infra failure / cancellation): the run completes on
+    # its own → return its dict, download what exists.
+    responses = [
+        ({"status": "completed", "conclusion": "failure"}, []),
+    ]
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
+                        _wait_fake_run(responses))
+    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
+    assert res == {"status": "completed", "conclusion": "failure"}
+
+
+def test_wait_for_round_results_no_e2e_jobs_waits_for_completion(
+        tmp_path: Path, monkeypatch) -> None:
+    # e2e jobs never started (prepare failed → skipped): the run completes
+    # on its own; the empty-jobs state must not short-circuit as ready.
+    responses = [
+        ({"status": "in_progress", "conclusion": None},
+         [{"name": "prepare-a2-9", "status": "completed"}]),
+        ({"status": "completed", "conclusion": "failure"}, []),
+    ]
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
+                        _wait_fake_run(responses))
+    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
+    assert res == {"status": "completed", "conclusion": "failure"}
+
+
+def test_wait_for_round_results_wrong_guard_name_times_out_cancels(
+        tmp_path: Path, monkeypatch) -> None:
+    # A job whose last step is a DIFFERENT hold step (e.g. the prep guard)
+    # never counts as done-uploading → budget exhausts → cancel the run.
+    responses = [
+        ({"status": "in_progress", "conclusion": None},
+         [{"name": "e2e-a2", "status": "in_progress",
+           "steps": [{"name": "Hold runner (prep guard)",
+                      "status": "in_progress"}]}]),
+    ]
+    calls: list = []
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
+                        _wait_fake_run(responses, calls))
+    res = e2e_dispatch.wait_for_round_results("repo", 42, 0.001,
+                                              poll_s=0.01)
+    assert res == {"status": "timed_out", "conclusion": "timed_out",
+                   "run_id": 42}
+    assert any("cancel" in " ".join(c) for c in calls)
