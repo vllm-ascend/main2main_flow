@@ -37,6 +37,33 @@ _CPU_UT_A2_RE = re.compile(r"tests/ut/.+/a2(/|$)")
 _CPU_UT_A3_2_RE = re.compile(r"tests/ut/.+/a3_2(/|$)")
 
 
+def _has_npu_device(python_cmd: list[str], repo: Path, env: dict) -> bool:
+    """True if the batch venv sees a real NPU (torch.npu.device_count() > 0).
+
+    On CPU runners import-smoke can never pass: with vllm_ascend installed,
+    NPUPlatform.is_cuda_alike() is False, so vllm's flash_linear_attention
+    falls into get_available_device() -> triton-ascend get_arch() ->
+    SystemError (no NPU).  Detection must not crash: no torch_npu, no CANN
+    runtime, or empty ASCEND_RT_VISIBLE_DEVICES all count as "no NPU".
+    """
+    try:
+        probe = subprocess.run(
+            python_cmd + ["-c",
+                          "import torch\n"
+                          "try:\n"
+                          "    have = bool(getattr(torch, 'npu', None)"
+                          " and torch.npu.device_count() > 0)\n"
+                          "except Exception:\n"
+                          "    have = False\n"
+                          "print('HAVE_NPU=' + str(have))"],
+            cwd=str(repo), capture_output=True, text=True, env=env,
+            timeout=120,
+        )
+        return probe.stdout.strip().endswith("HAVE_NPU=True")
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def _is_npu_convention_ut_path(rel_path: str) -> bool:
     """Mirror select_tests._route_ut_dir — True if path routes to NPU runner."""
     p = rel_path.replace("\\", "/")
@@ -338,31 +365,36 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             # imported unguarded there crashes the whole fixed-branch lane
             # at collection (cp_local_slot, PR #14580), and no UT file
             # imports this chain — only this explicit check covers it.
-            try:
-                smoke = subprocess.run(
-                    [pytest_cmd[0], "-c",
-                     "import vllm_ascend.patch.worker\n"
-                     "import vllm_ascend.worker.v2.spec_decode.dflash.speculator\n"],
-                    cwd=str(repo), capture_output=True, text=True,
-                    env=env, timeout=300,
-                )
-            except subprocess.TimeoutExpired:
-                ts_print(f"[pre_ci] ut: [{label}] import-smoke TIMEOUT(300s)")
-                all_files_clean = False
-                details.append(f"{label}/import-smoke: TIMEOUT")
+            if not _has_npu_device(pytest_cmd, repo, env):
+                ts_print(f"[pre_ci] ut: [{label}] import-smoke SKIPPED "
+                         f"(no NPU device)")
+                details.append(f"{label}/import-smoke: SKIPPED (no NPU device)")
             else:
-                if smoke.returncode != 0:
+                try:
+                    smoke = subprocess.run(
+                        [pytest_cmd[0], "-c",
+                         "import vllm_ascend.patch.worker\n"
+                         "import vllm_ascend.worker.v2.spec_decode.dflash.speculator\n"],
+                        cwd=str(repo), capture_output=True, text=True,
+                        env=env, timeout=300,
+                    )
+                except subprocess.TimeoutExpired:
+                    ts_print(f"[pre_ci] ut: [{label}] import-smoke TIMEOUT(300s)")
                     all_files_clean = False
-                    all_violations.append(
-                        f"[{label}] import-smoke: patch chain not importable "
-                        f"on {label} — {smoke.stderr.strip()[-800:]}")
-                    details.append(f"{label}/import-smoke: FAILED")
-                    ts_print(f"[pre_ci] ut: [{label}] import-smoke FAILED "
-                             f"(patch chain not importable):\n"
-                             f"{smoke.stderr.strip()[-800:]}")
+                    details.append(f"{label}/import-smoke: TIMEOUT")
                 else:
-                    details.append(f"{label}/import-smoke: OK")
-                    ts_print(f"[pre_ci] ut: [{label}] import-smoke OK")
+                    if smoke.returncode != 0:
+                        all_files_clean = False
+                        all_violations.append(
+                            f"[{label}] import-smoke: patch chain not importable "
+                            f"on {label} — {smoke.stderr.strip()[-800:]}")
+                        details.append(f"{label}/import-smoke: FAILED")
+                        ts_print(f"[pre_ci] ut: [{label}] import-smoke FAILED "
+                                 f"(patch chain not importable):\n"
+                                 f"{smoke.stderr.strip()[-800:]}")
+                    else:
+                        details.append(f"{label}/import-smoke: OK")
+                        ts_print(f"[pre_ci] ut: [{label}] import-smoke OK")
 
             runs: list[tuple[str, subprocess.CompletedProcess]] = []
             try:

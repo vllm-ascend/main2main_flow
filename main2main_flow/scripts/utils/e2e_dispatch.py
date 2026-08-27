@@ -84,24 +84,28 @@ def _rewrite_runner(label: str) -> tuple[str, str]:
 # test group computation (CPU side, deterministic)
 # =============================================================================
 
-def compute_test_groups(ascend_path: Path, base_sha: str,
+def compute_test_groups(ascend_path: Path,
                         changed_files: list[str]) -> list[dict]:
     """Compute the ready-all test groups via vllm-ascend's select_tests.py.
 
-    Runs the same command as PR CI's ready-all flow (``--diff-base`` +
-    ``--pr-labels ready-all``) on the local checkout — HEAD carries the
-    accumulated adaptation patch, so ``git diff base...HEAD`` covers every
-    gate fix.  CPU groups are dropped (UT runs on the CPU runner via the
+    Same command shape as PR CI's ready-all flow, but the changed files
+    are passed explicitly via ``--changed-files``: the adaptation changes
+    are UNCOMMITTED in the working tree (steps are committed only after
+    their e2e round passes), so select_tests.py's ``--diff-base`` mode —
+    which computes ``git diff base...HEAD`` — sees an empty diff and
+    matches no modules (observed 2026-08-26: "no test groups for changed
+    files").  CPU groups are dropped (UT runs on the CPU runner via the
     final quality gate) and runner labels are rewritten onto the three
     main2main runners.
     """
+    if not changed_files:
+        return []
     select_script = ascend_path / ".github/workflows/scripts/select_tests.py"
     if not select_script.exists():
         raise RuntimeError(f"select_tests.py not found at {select_script}")
     r = subprocess.run(
-        [sys.executable, str(select_script), "--diff-base", base_sha,
-         "--filtered-changed-files-json", json.dumps(changed_files or []),
-         "--pr-labels", "ready-all"],
+        [sys.executable, str(select_script), "--changed-files",
+         *changed_files, "--pr-labels", "ready-all"],
         cwd=str(ascend_path), capture_output=True, text=True,
         env={**os.environ, "GITHUB_OUTPUT": ""},  # force stdout output
     )
@@ -396,17 +400,27 @@ def dispatch_workflow(repo: str, workflow_name: str, ref: str,
     the workflow's newest run on *ref* created after the POST.  The list
     API lags the POST by up to a minute (indexing delay), so allow a
     generous window; transient query failures just extend the wait.
+
+    ``gh workflow run`` is used instead of ``gh api -F inputs=<json>``:
+    on the self-hosted runners' old gh (2.4.0, Ubuntu 22.04 apt) ``-F``
+    does not JSON-parse object values, so the API rejects them with
+    HTTP 422 "is not an object" (observed on the 2026-08-26 main2main
+    run — prep dispatch failed after 4 attempts, and no exec round was
+    ever dispatched).
     """
     if not os.environ.get("GH_TOKEN"):
         raise RuntimeError("GH_TOKEN required for workflow dispatch")
-    args = ["gh", "api", "-X", "POST",
-            f"repos/{repo}/actions/workflows/{workflow_name}/dispatches",
-            "-f", f"ref={ref}"]
-    if inputs:
-        # -F (typed field) parses the JSON into an object; -f would send
-        # the JSON as a string, and the API rejects inputs with HTTP 422
-        # "is not an object".
-        args += ["-F", f"inputs={json.dumps(inputs)}"]
+    # The list API's created_at has second granularity, so the cutoff is
+    # truncated to seconds and captured BEFORE the POST: the new run is
+    # created during or after the POST, hence its created_at (truncated)
+    # is always >= cutoff, while stale runs from earlier dispatches are
+    # rejected.  The list endpoint lags the POST by up to a minute
+    # (indexing delay), so poll generously.
+    cutoff = int(time.time())
+    args = ["gh", "workflow", "run", workflow_name, "--repo", repo,
+            "--ref", ref]
+    for key, value in (inputs or {}).items():
+        args += ["-f", f"{key}={value}"]
     _gh_retry(args)
     deadline = time.time() + 180
     while time.time() < deadline:
@@ -423,10 +437,21 @@ def dispatch_workflow(repo: str, workflow_name: str, ref: str,
         except (json.JSONDecodeError, KeyError):
             continue
         for run in runs:
-            if run.get("path") and run["path"].endswith(workflow_name):
-                return int(run["id"])
+            if not (run.get("path") and
+                    run["path"].endswith(workflow_name)):
+                continue
+            created = run.get("created_at", "")
+            if created and int(_parse_gh_time(created)) < cutoff:
+                continue
+            return int(run["id"])
     raise RuntimeError(f"no run found for {workflow_name} on {ref} "
                        f"(repo {repo})")
+
+
+def _parse_gh_time(value: str) -> float:
+    """Parse a GitHub ISO-8601 timestamp (e.g. 2026-08-26T16:42:59Z)."""
+    from datetime import datetime
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 def wait_for_run(repo: str, run_id: int, timeout_min: int,

@@ -217,7 +217,7 @@ def test_compute_test_groups(monkeypatch, tmp_path: Path) -> None:
             stderr="")
 
     monkeypatch.setattr(e2e_dispatch.subprocess, "run", fake_run)
-    result = e2e_dispatch.compute_test_groups(tmp_path, "abc123", ["vllm/x.py"])
+    result = e2e_dispatch.compute_test_groups(tmp_path, ["vllm/x.py"])
     assert len(result) == 2  # cpu group dropped
     assert result[0]["runner"] == "linux-aarch64-a2b1-8"
     assert result[0]["image_tag"] == "9.1.0-910b-ubuntu22.04-py3.12"
@@ -225,12 +225,9 @@ def test_compute_test_groups(monkeypatch, tmp_path: Path) -> None:
     assert result[1]["image_tag"] == "9.1.0-a3-ubuntu22.04-py3.12"
 
 
-def test_compute_test_groups_select_tests_missing(tmp_path: Path) -> None:
-    try:
-        e2e_dispatch.compute_test_groups(tmp_path, "abc", [])
-        raise AssertionError("expected RuntimeError")
-    except RuntimeError:
-        pass
+def test_compute_test_groups_empty_changed_files(tmp_path: Path) -> None:
+    # No changed files -> nothing to match, return [] without touching select_tests.py.
+    assert e2e_dispatch.compute_test_groups(tmp_path, []) == []
 
 
 def test_apply_minimal_filter_no_env() -> None:

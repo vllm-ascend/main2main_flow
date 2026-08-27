@@ -1107,11 +1107,9 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                      "treated as failed")
             return False
         if not self.state.e2e_groups:
-            base_sha = self.state.original_ascend_ref or \
-                resolve_squash_baseline(ascend_path)
             try:
                 self.state.e2e_groups = compute_test_groups(
-                    Path(ascend_path), base_sha, accumulated_files)
+                    Path(ascend_path), accumulated_files)
             except Exception as exc:
                 ts_print(f"[final_quality_gate] compute_test_groups failed: "
                          f"{exc}")
@@ -1454,10 +1452,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                  f"(external)")
         cfg = self._e2e_cfg()
         ascend_path = Path(self.state.vllm_ascend_path)
-        base_sha = self.state.original_ascend_ref or \
-            resolve_squash_baseline(ascend_path)
         try:
-            groups = compute_test_groups(ascend_path, base_sha, changed)
+            groups = compute_test_groups(ascend_path, changed)
         except Exception as exc:
             ts_print(f"[run_e2e_test] {step_id}: compute_test_groups "
                      f"failed: {exc}")
