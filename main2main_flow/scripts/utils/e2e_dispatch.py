@@ -39,7 +39,7 @@ from main2main_flow.scripts.utils.utils import run_git, ts_print
 # Every group select_tests.py routes to a2/a3/310p runners is rewritten
 # onto the three dedicated main2main runners.
 _RUNNER_REWRITE: tuple[tuple[str, str, str], ...] = (
-    ("linux-aarch64-a2b3-", "linux-aarch64-a2-4",
+    ("linux-aarch64-a2b3-", "linux-aarch64-a2-1",
      "9.1.0-910b-ubuntu22.04-py3.12"),
     ("linux-aarch64-a3-", "linux-aarch64-a3-4",
      "9.1.0-a3-ubuntu22.04-py3.12"),
