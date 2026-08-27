@@ -338,14 +338,19 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
             capture_output=True, text=True,
         ).stdout
         if wt_patch.strip():
+            # Explicit `-` reads the patch from stdin; --allow-empty is
+            # avoided (only added in git 2.33, and the caller guarantees
+            # the patch is non-empty).  On failure the patch head is
+            # included so a mismatch is diagnosable from the run log.
             applied = subprocess.run(
-                ["git", "apply", "--allow-empty"], cwd=str(wt),
+                ["git", "apply", "-"], cwd=str(wt),
                 input=wt_patch, capture_output=True, text=True,
             )
             if applied.returncode != 0:
                 raise RuntimeError(
                     f"failed to apply working-tree changes to signal "
-                    f"snapshot: {applied.stderr.strip()[-500:]}")
+                    f"snapshot: {applied.stderr.strip()[-400:]}\n"
+                    f"patch head:\n{wt_patch[:300]}")
         groups_path = wt / "test_groups.json"
         groups_path.write_text(
             json.dumps(groups_json, indent=2) + "\n", encoding="utf-8")
