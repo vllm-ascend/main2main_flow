@@ -8,6 +8,7 @@ what run_selected_tests.sh --timing writes to each test's log file.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -449,6 +450,83 @@ def test_incremental_groups_mapping_failure(monkeypatch,
 # command.json = {"round", "main_run_id"}; the resident jobs serve it in
 # place and push results to <signal_branch>_results_<chip>.  The flow
 # materializes each chip's round-N/ from the results branch.
+
+# ---- per-test progress relay (resident job log -> main workflow log) -------
+
+def test_relay_test_progress_streams_new_lines(capsys, monkeypatch) -> None:
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x",
+                                         prep_run_id="123")
+    jobs = {"jobs": [{"id": 7, "name": "prepare-a2-42"}]}
+    logs = {7: "env build noise...\n"
+               "  [tests/e2e/a2/test_x.py] started (1 card(s))\n"}
+
+    def fake_api(url: str) -> str:
+        if url.endswith("/jobs?per_page=100"):
+            return json.dumps(jobs)
+        jid = int(re.search(r"/actions/jobs/(\d+)/logs", url).group(1))
+        return logs[jid]
+
+    monkeypatch.setattr(e2e_dispatch, "_gh_api_text", fake_api)
+    state: dict = {}
+    e2e_dispatch._relay_test_progress(cfg, ["a2"], state)
+    out = capsys.readouterr().out
+    assert "test_x.py started" in out
+    assert "done" not in out
+    # New log content is picked up incrementally, each line relayed once.
+    logs[7] += ("  [tests/e2e/a2/test_x.py] done: exit=0, result=passed, "
+                "bugs=0, flakes=0\n")
+    e2e_dispatch._relay_test_progress(cfg, ["a2"], state)
+    out = capsys.readouterr().out
+    assert ("[e2e-dispatch][a2] tests/e2e/a2/test_x.py done: exit=0, "
+            "result=passed, bugs=0, flakes=0") in out
+    e2e_dispatch._relay_test_progress(cfg, ["a2"], state)
+    assert capsys.readouterr().out == ""
+
+
+def test_relay_test_progress_holds_partial_line(capsys, monkeypatch) -> None:
+    # A line split across two polls must be relayed once, complete.
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x",
+                                         prep_run_id="123")
+    jobs = {"jobs": [{"id": 7, "name": "prepare-a2-42"}]}
+    logs = {7: "  [tests/e2e/a2/test_x.py] started (1 card"}
+
+    def fake_api(url: str) -> str:
+        if url.endswith("/jobs?per_page=100"):
+            return json.dumps(jobs)
+        return logs[7]
+
+    monkeypatch.setattr(e2e_dispatch, "_gh_api_text", fake_api)
+    state: dict = {}
+    e2e_dispatch._relay_test_progress(cfg, ["a2"], state)
+    assert capsys.readouterr().out == ""  # partial line held back
+    logs[7] += "s))\n"
+    e2e_dispatch._relay_test_progress(cfg, ["a2"], state)
+    assert "test_x.py started" in capsys.readouterr().out
+
+
+def test_relay_test_progress_tolerant_and_gated(capsys, monkeypatch) -> None:
+    # No prep run id -> never touches the API; job-list/log fetch failures
+    # are silently retried next poll (progress relay is best-effort).
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x")
+    calls: list[str] = []
+
+    def fake_api(url: str) -> str:
+        calls.append(url)
+        raise RuntimeError("404")
+
+    monkeypatch.setattr(e2e_dispatch, "_gh_api_text", fake_api)
+    e2e_dispatch._relay_test_progress(cfg, ["a2"], {})
+    assert calls == []
+    assert capsys.readouterr().out == ""
+    cfg.prep_run_id = "123"
+    e2e_dispatch._relay_test_progress(cfg, ["a2"], {})
+    e2e_dispatch._relay_test_progress(cfg, ["a2"], {})
+    assert len(calls) == 2  # job list retried, no crash
+    assert capsys.readouterr().out == ""
+
 
 def _init_repo(repo: Path) -> None:
     repo.mkdir(parents=True)
