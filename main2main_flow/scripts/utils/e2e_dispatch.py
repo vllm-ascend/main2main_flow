@@ -47,7 +47,7 @@ from main2main_flow.scripts.utils.utils import run_git, ts_print
 _RUNNER_REWRITE: tuple[tuple[str, str, str], ...] = (
     ("linux-aarch64-a2b3-", "linux-aarch64-a2-1",
      "9.1.0-910b-ubuntu22.04-py3.12"),
-    ("linux-aarch64-a3-", "linux-aarch64-a3-4",
+    ("linux-aarch64-a3-", "linux-aarch64-a3-800i-2-cn12-001",
      "9.1.0-a3-ubuntu22.04-py3.12"),
     ("linux-aarch64-310p-", "linux-aarch64-310p-1",
      "9.1.0-310p-ubuntu22.04-py3.12"),
@@ -166,11 +166,10 @@ def chip_allowlist() -> list[str]:
 
     Groups for chips outside the allowlist are dropped before dispatch: a
     chip with no resident job never pushes results, so every round would
-    block on the full timeout (a3 is temporarily out of the matrix).
-    Re-enable by setting MAIN2MAIN_E2E_CHIPS (comma-separated) in the main
-    workflow's env once the a3 matrix entry is restored.
+    block on the full timeout.  Override via MAIN2MAIN_E2E_CHIPS
+    (comma-separated) when the matrix changes.
     """
-    raw = os.getenv("MAIN2MAIN_E2E_CHIPS", "a2,310p")
+    raw = os.getenv("MAIN2MAIN_E2E_CHIPS", "a2,a3,310p")
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
@@ -180,8 +179,14 @@ def apply_minimal_filter(groups: list[dict]) -> list[dict]:
     Format: one line per chip — ``<chip>: <test> <test> ...``, where each
     test is a substring match on the test path.  Used for cheap validation
     runs on the fork: chips not named are dropped entirely, and named chips
-    keep only the groups that contain a match (with the matching tests).
-    No env → the full ready-all groups pass through unchanged.
+    keep only the matching tests.  A line's chip decides the routing: the
+    match scans ALL groups (not just that chip's) and each matched test is
+    regrouped under the named chip with its original ``num_npus`` — this is
+    how one_card tests (routed a2/310p by the ready-all suite) get served
+    by the a3 resident (observed need 2026-08-28: 2 single-card + 1
+    dual-card case on linux-aarch64-a3-800i-2).  The same test may thus
+    appear under several chips.  No env → the full ready-all groups pass
+    through unchanged.
     """
     spec = os.getenv("MAIN2MAIN_E2E_MINIMAL", "").strip()
     if not spec:
@@ -194,17 +199,27 @@ def apply_minimal_filter(groups: list[dict]) -> list[dict]:
         chip, _, tests = line.partition(":")
         wanted[chip.strip()] = [t.strip() for t in tests.split() if t.strip()]
     out: list[dict] = []
-    for g in groups:
-        names = wanted.get(g.get("npu_type", ""))
-        if not names:
+    for chip, names in wanted.items():
+        matched: dict[str, dict] = {}
+        for g in groups:
+            for t in g.get("tests", "").split():
+                if t in matched:
+                    continue
+                if any(n in t for n in names):
+                    matched[t] = g
+        if not matched:
             continue
-        kept = [t for t in g.get("tests", "").split()
-                if any(n in t for n in names)]
-        if not kept:
-            continue
-        g = dict(g)
-        g["tests"] = " ".join(kept)
-        out.append(g)
+        by_cards: dict[int, list[str]] = {}
+        for t in sorted(matched):
+            by_cards.setdefault(
+                int(matched[t].get("num_npus", 1)), []).append(t)
+        for cards in sorted(by_cards):
+            src = matched[by_cards[cards][0]]
+            g = {k: src.get(k) for k in ("runner", "image_tag")}
+            g["npu_type"] = chip
+            g["num_npus"] = cards
+            g["tests"] = " ".join(by_cards[cards])
+            out.append(g)
     return out
 
 

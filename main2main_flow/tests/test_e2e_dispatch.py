@@ -200,9 +200,9 @@ def test_rewrite_runner() -> None:
         ("linux-aarch64-a2b3-1", "linux-aarch64-a2-1"),
         ("linux-aarch64-a2b3-2", "linux-aarch64-a2-1"),
         ("linux-aarch64-a2b3-4", "linux-aarch64-a2-1"),
-        ("linux-aarch64-a3-2", "linux-aarch64-a3-4"),
-        ("linux-aarch64-a3-4", "linux-aarch64-a3-4"),
-        ("linux-aarch64-a3-8", "linux-aarch64-a3-4"),
+        ("linux-aarch64-a3-2", "linux-aarch64-a3-800i-2-cn12-001"),
+        ("linux-aarch64-a3-4", "linux-aarch64-a3-800i-2-cn12-001"),
+        ("linux-aarch64-a3-8", "linux-aarch64-a3-800i-2-cn12-001"),
         ("linux-aarch64-310p-1", "linux-aarch64-310p-1"),
         ("linux-aarch64-310p-2", "linux-aarch64-310p-1"),
         ("linux-aarch64-310p-4", "linux-aarch64-310p-1"),
@@ -245,14 +245,14 @@ def test_compute_test_groups(monkeypatch, tmp_path: Path) -> None:
     assert len(result) == 2  # cpu group dropped
     assert result[0]["runner"] == "linux-aarch64-a2-1"
     assert result[0]["image_tag"] == "9.1.0-910b-ubuntu22.04-py3.12"
-    assert result[1]["runner"] == "linux-aarch64-a3-4"
+    assert result[1]["runner"] == "linux-aarch64-a3-800i-2-cn12-001"
     assert result[1]["image_tag"] == "9.1.0-a3-ubuntu22.04-py3.12"
 
 
 def test_compute_test_groups_drops_non_resident_chips(
         monkeypatch, tmp_path: Path) -> None:
-    # Default allowlist (a2,310p): a3 groups are dropped flow-side — no
-    # resident job would ever report them.
+    # Default allowlist (a2,a3,310p) mirrors the resident matrix — all
+    # NPU groups pass through.
     monkeypatch.delenv("MAIN2MAIN_E2E_CHIPS", raising=False)
     groups = [
         {"num_npus": 1, "npu_type": "a2", "runner": "linux-aarch64-a2b3-1",
@@ -271,7 +271,8 @@ def test_compute_test_groups_drops_non_resident_chips(
 
     monkeypatch.setattr(e2e_dispatch.subprocess, "run", fake_run)
     result = e2e_dispatch.compute_test_groups(tmp_path, ["vllm/x.py"])
-    assert [g["npu_type"] for g in result] == ["a2"]
+    assert [g["npu_type"] for g in result] == ["a2", "a3"]
+    assert result[1]["runner"] == "linux-aarch64-a3-800i-2-cn12-001"
 
 
 def test_compute_test_groups_empty_changed_files(tmp_path: Path) -> None:
@@ -319,7 +320,7 @@ def test_apply_minimal_filter_selects(monkeypatch) -> None:
     chips = [g["npu_type"] for g in out]
     assert chips == ["a2", "a3", "a3"]
     assert out[0]["tests"].split() == [
-        "tests/e2e/a2/test_eagle.py", "tests/e2e/a2/test_dflash.py"]
+        "tests/e2e/a2/test_dflash.py", "tests/e2e/a2/test_eagle.py"]
     # 2-card group keeps only the matching test; 4-card group drops the rest
     assert out[1]["tests"] == "tests/e2e/a3_2/test_prefix_caching.py"
     assert out[2]["tests"] == "tests/e2e/a3_4/test_pipeline_parallel.py"
@@ -333,6 +334,38 @@ def test_apply_minimal_filter_unknown_chip_dropped(monkeypatch) -> None:
     monkeypatch.setenv("MAIN2MAIN_E2E_MINIMAL", "a2: test_x.py")
     out = e2e_dispatch.apply_minimal_filter(groups)
     assert [g["npu_type"] for g in out] == ["a2"]
+
+
+def test_apply_minimal_filter_cross_chip_override(monkeypatch) -> None:
+    # one_card tests route to a2 in the ready-all groups; a chip line may
+    # claim them anyway (regrouped under the named chip, original num_npus
+    # kept) — how single-card cases land on the a3 resident.  The same
+    # test may appear under several chips.
+    groups = [
+        {"npu_type": "a2", "num_npus": 1, "runner": "linux-aarch64-a2-1",
+         "image_tag": "9.1.0-910b-ubuntu22.04-py3.12",
+         "tests": "tests/e2e/pull_request/one_card/test_qwen3_0_6b.py "
+                  "tests/e2e/pull_request/one_card/test_sampler.py"},
+        {"npu_type": "a3", "num_npus": 2, "runner": "linux-aarch64-a3-800i-2-cn12-001",
+         "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
+         "tests": "tests/e2e/pull_request/two_card/test_gemma4.py"},
+    ]
+    monkeypatch.setenv(
+        "MAIN2MAIN_E2E_MINIMAL",
+        "a2: test_qwen3_0_6b.py test_sampler.py\n"
+        "a3: test_qwen3_0_6b.py test_sampler.py test_gemma4.py")
+    out = e2e_dispatch.apply_minimal_filter(groups)
+    assert [(g["npu_type"], g["num_npus"]) for g in out] == [
+        ("a2", 1), ("a3", 1), ("a3", 2)]
+    a3_singles = out[1]
+    assert a3_singles["runner"] == "linux-aarch64-a2-1"  # metadata from source group
+    assert a3_singles["tests"].split() == [
+        "tests/e2e/pull_request/one_card/test_qwen3_0_6b.py",
+        "tests/e2e/pull_request/one_card/test_sampler.py"]
+    assert out[2]["tests"] == "tests/e2e/pull_request/two_card/test_gemma4.py"
+    # The a2 line is untouched: same tests, original a2 group.
+    assert out[0]["npu_type"] == "a2"
+    assert out[0]["runner"] == "linux-aarch64-a2-1"
 
 
 def test_build_test_errors_detail_contract(tmp_path: Path) -> None:
@@ -526,7 +559,11 @@ def test_relay_test_progress_tolerant_when_missing(capsys, monkeypatch,
                                                    tmp_path: Path) -> None:
     # Missing branch / progress file (nothing pushed yet) is the normal
     # pending state: silent, no crash, retried on the next poll.
+    # _signal_git_url must be isolated: the real repo's results branches
+    # are live while a main run is in flight.
     cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e")
+    monkeypatch.setattr(e2e_dispatch, "_signal_git_url",
+                        lambda cfg: str(tmp_path / "nowhere"))
     e2e_dispatch._relay_test_progress(
         cfg, 1, ["a2"], {})  # no branch anywhere
     assert capsys.readouterr().out == ""
