@@ -72,10 +72,6 @@ class E2EDispatchConfig:
     # repo of the dispatching main run (stamped into command.json for the
     # runner-side completion probe); defaults to this workflow's repo.
     main_run_repo: str = ""
-    # run id of the pre-started resident-runner run (the main workflow's
-    # pre-start step writes MAIN2MAIN_E2E_PREP_RUN_ID); enables per-test
-    # progress relay from the resident jobs' live logs while waiting.
-    prep_run_id: str = ""
 
     @classmethod
     def from_env(cls, target_commit: str = "") -> "E2EDispatchConfig":
@@ -91,7 +87,6 @@ class E2EDispatchConfig:
             timeout_min=int(os.getenv("MAIN2MAIN_E2E_TIMEOUT_MIN", "480")),
             main_run_id=os.getenv("MAIN2MAIN_E2E_MAIN_RUN_ID", ""),
             main_run_repo=os.getenv("GITHUB_REPOSITORY", ""),
-            prep_run_id=os.getenv("MAIN2MAIN_E2E_PREP_RUN_ID", "").strip(),
         )
 
 
@@ -605,8 +600,9 @@ def _fetch_round_results(git_url: str, branch: str, round_number: int,
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# Per-test progress lines run_tests.py writes to stdout (visible in the
-# resident job's log): "  [<test>] started (N card(s))" and
+# Per-test progress lines run_tests.py writes to stdout — the resident
+# mirrors them into round-<N>-progress.json on its results branch after
+# every event: "  [<test>] started (N card(s))" and
 # "  [<test>] done: exit=<rc>, result=<ci_result>, bugs=<n>, flakes=<n>".
 _RE_TEST_STARTED = re.compile(r"\[([^\[\]]+)\] started \(\d+ card")
 _RE_TEST_DONE = re.compile(
@@ -614,79 +610,68 @@ _RE_TEST_DONE = re.compile(
     r"bugs=(\d+), flakes=(\d+)")
 
 
-def _gh_api_text(url: str) -> str:
-    r = subprocess.run(["gh", "api", url], capture_output=True, text=True,
-                       timeout=60)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip()[-200:])
-    return r.stdout
+def _fetch_round_progress(git_url: str, branch: str,
+                          round_number: int) -> list[dict] | None:
+    """Read one chip's round-<N>-progress.json from its results branch.
+
+    Returns the event list, or None while the branch / file is not there
+    yet (nothing pushed so far, or final results already replaced the
+    progress commit).  Any error degrades to None — progress relay is
+    best-effort; the round results remain the authoritative verdict.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="m2m-progress-fetch-"))
+    try:
+        def _git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(["git", *args], cwd=str(tmp),
+                                  capture_output=True, text=True)
+
+        if (_git("init", "-q").returncode != 0
+                or _git("remote", "add", "origin", git_url).returncode != 0
+                or _git("fetch", "--force", "--no-tags", "--depth", "1",
+                        "origin", branch).returncode != 0):
+            return None
+        r = _git("show", f"FETCH_HEAD:round-{round_number}-progress.json")
+        if r.returncode != 0:
+            return None
+        return list(json.loads(r.stdout).get("events", []))
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _resident_job_ids(cfg: E2EDispatchConfig,
-                      chips: list[str]) -> dict[str, int]:
-    data = json.loads(_gh_api_text(
-        f"repos/{cfg.repo}/actions/runs/{cfg.prep_run_id}/jobs?per_page=100"))
-    out: dict[str, int] = {}
-    for job in data.get("jobs", []):
-        name = job.get("name") or ""
-        for chip in chips:
-            if chip not in out and name.startswith(f"prepare-{chip}-"):
-                out[chip] = int(job["id"])
-    return out
-
-
-def _relay_test_progress(cfg: E2EDispatchConfig, chips: list[str],
-                         state: dict) -> None:
-    """Best-effort relay of per-test status from the resident jobs' logs.
+def _relay_test_progress(cfg: E2EDispatchConfig, round_number: int,
+                         chips: list[str], state: dict) -> None:
+    """Best-effort relay of per-test status into this workflow's log.
 
     The main workflow's log cannot natively show what happens inside the
-    resident jobs, so while the round results are pending this polls each
-    pending chip's live job log (works for in-progress jobs) and forwards
-    every new started/done line.  Purely cosmetic — results on the
-    branches stay the authoritative verdict — so any fetch failure is
-    silently skipped and retried on the next poll.
+    resident jobs, and the jobs' log API is not readable while a job is
+    in progress — so the residents push every started/done event to
+    round-<N>-progress.json on their results branch as the round runs,
+    and this polls those files while the round results are pending,
+    printing each event once.  Purely cosmetic.
     """
-    if not (cfg.prep_run_id.isdigit() and chips):
+    if not chips:
         return
-    try:
-        ids: dict[str, int] = state.setdefault("job_ids", {})
-        missing = [c for c in chips if c not in ids]
-        if missing:
-            ids.update(_resident_job_ids(cfg, missing))
-    except Exception:
-        return  # run's jobs not queryable yet — retry next poll
+    git_url = _signal_git_url(cfg)
     for chip in chips:
-        job_id = ids.get(chip)
-        if not job_id:
+        branch = f"{cfg.signal_branch}_results_{chip}"
+        events = _fetch_round_progress(git_url, branch, round_number)
+        if not events:
             continue
-        try:
-            text = _gh_api_text(
-                f"repos/{cfg.repo}/actions/jobs/{job_id}/logs")
-        except Exception:
-            continue  # job not started / log not flushed yet
-        offsets: dict = state.setdefault("offset", {})
-        start = offsets.get(chip, 0)
-        if len(text) <= start:
-            continue
-        new = text[start:]
-        # Only consume whole lines: roll the offset back past a trailing
-        # partial line so a line split across polls is not lost.
-        nl = new.rfind("\n")
-        if nl < 0:
-            continue
-        offsets[chip] = start + nl + 1
-        seen: set = state.setdefault("seen", set())
-        for m in _RE_TEST_STARTED.finditer(new[:nl + 1]):
-            test = m.group(1)
-            if (chip, test, "started") not in seen:
-                seen.add((chip, test, "started"))
+        seen: set = state.setdefault(chip, set())
+        for e in events:
+            test = e.get("test", "")
+            event = e.get("event", "")
+            if (test, event) in seen:
+                continue
+            seen.add((test, event))
+            if event == "started":
                 ts_print(f"[e2e-dispatch][{chip}] {test} started")
-        for m in _RE_TEST_DONE.finditer(new[:nl + 1]):
-            test, rc, result, bugs, flakes = m.groups()
-            if (chip, test, "done") not in seen:
-                seen.add((chip, test, "done"))
-                ts_print(f"[e2e-dispatch][{chip}] {test} done: exit={rc}, "
-                         f"result={result}, bugs={bugs}, flakes={flakes}")
+            elif event == "done":
+                ts_print(f"[e2e-dispatch][{chip}] {test} done: "
+                         f"exit={e.get('exit')}, result={e.get('result')}, "
+                         f"bugs={e.get('bugs')}, flakes={e.get('flakes')}")
 
 
 def wait_chip_results(cfg: E2EDispatchConfig, chips: list[str],
@@ -703,8 +688,8 @@ def wait_chip_results(cfg: E2EDispatchConfig, chips: list[str],
     round dirs from earlier steps/runs are rejected until the resident
     re-serves the command.
 
-    While waiting, per-test status lines are relayed from the resident
-    jobs' logs into this log (see _relay_test_progress).
+    While waiting, per-test status lines are relayed from the residents'
+    round-<N>-progress.json files into this log (see _relay_test_progress).
     """
     git_url = _signal_git_url(cfg)
     expect = ({"main_run_id": cfg.main_run_id, "command_sha": command_sha}
@@ -714,17 +699,19 @@ def wait_chip_results(cfg: E2EDispatchConfig, chips: list[str],
     deadline = time.time() + timeout_min * 60
     last_beat = time.time()
     while time.time() < deadline:
+        done: list[str] = []
         for chip in sorted(pending):
             branch = f"{cfg.signal_branch}_results_{chip}"
             dest = ci_dir / f"main2main-e2e-round-{round_number}-{chip}"
             if _fetch_round_results(git_url, branch, round_number, dest,
                                     expect):
-                pending.discard(chip)
+                done.append(chip)
                 ts_print(f"[e2e-dispatch] round {round_number}: results "
                          f"received from {chip} ({branch})")
+        pending -= set(done)
         if not pending:
             return []
-        _relay_test_progress(cfg, sorted(pending), relay_state)
+        _relay_test_progress(cfg, round_number, sorted(pending), relay_state)
         if time.time() - last_beat > 300:
             last_beat = time.time()
             ts_print(f"[e2e-dispatch] round {round_number}: still waiting "
