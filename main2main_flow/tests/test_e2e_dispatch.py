@@ -2,14 +2,15 @@
 
 The parser (parse_exec_artifacts) must produce run_tests()-shaped results —
 the same shapes the fix-mode contract and final gate consume — from the
-exec workflow's per-chip artifacts.  Synthetic pytest logs mirror what
-run_selected_tests.sh --timing writes to each test's log file.
+resident runners' per-chip results branches.  Synthetic pytest logs mirror
+what run_selected_tests.sh --timing writes to each test's log file.
 """
 from __future__ import annotations
 
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -140,6 +141,26 @@ def test_parse_artifacts_missing_chip_drops(tmp_path: Path) -> None:
     assert result["summary_error"] == "no exec artifacts"
 
 
+def test_parse_artifacts_truncated_result_json_backfills(
+        tmp_path: Path) -> None:
+    # A run_tests.py killed mid-write publishes a partial result json; the
+    # chip must fall into the NOT_RUN backfill (via expected_tests.json)
+    # instead of being dropped — dropping it would let the other chip's
+    # pass become an overall pass.
+    adir = tmp_path / "main2main-e2e-round-1-a2"
+    adir.mkdir()
+    (adir / "round-1-result.json").write_text(
+        '{"suite_results": {"tests/e2e/a2', encoding="utf-8")
+    (adir / "expected_tests.json").write_text(json.dumps(
+        [{"test": "tests/e2e/a2/test_x.py", "cards_required": 1}]),
+        encoding="utf-8")
+    result = e2e_dispatch.parse_exec_artifacts(tmp_path, 1, 0)
+    tr = result["suite_results"]["tests/e2e/a2/test_x.py"]
+    assert tr["ci_result"] == "failed"
+    assert tr["not_run"] is True
+    assert result["can_commit"] is False
+
+
 def test_aggregate_suite_results_byte_shape() -> None:
     # The aggregate must keep the exact field set run_tests() step-9 used
     # (fix mode + final gate read these keys).
@@ -176,15 +197,15 @@ def test_aggregate_suite_results_byte_shape() -> None:
 
 def test_rewrite_runner() -> None:
     cases = [
-        ("linux-aarch64-a2b3-1", "linux-aarch64-a2b1-8"),
-        ("linux-aarch64-a2b3-2", "linux-aarch64-a2b1-8"),
-        ("linux-aarch64-a2b3-4", "linux-aarch64-a2b1-8"),
-        ("linux-aarch64-a3-2", "linux-aarch64-a3-800i-16-cn12-001"),
-        ("linux-aarch64-a3-4", "linux-aarch64-a3-800i-16-cn12-001"),
-        ("linux-aarch64-a3-8", "linux-aarch64-a3-800i-16-cn12-001"),
-        ("linux-aarch64-310p-1", "linux-aarch64-310p-4"),
-        ("linux-aarch64-310p-2", "linux-aarch64-310p-4"),
-        ("linux-aarch64-310p-4", "linux-aarch64-310p-4"),
+        ("linux-aarch64-a2b3-1", "linux-aarch64-a2-1"),
+        ("linux-aarch64-a2b3-2", "linux-aarch64-a2-1"),
+        ("linux-aarch64-a2b3-4", "linux-aarch64-a2-1"),
+        ("linux-aarch64-a3-2", "linux-aarch64-a3-4"),
+        ("linux-aarch64-a3-4", "linux-aarch64-a3-4"),
+        ("linux-aarch64-a3-8", "linux-aarch64-a3-4"),
+        ("linux-aarch64-310p-1", "linux-aarch64-310p-1"),
+        ("linux-aarch64-310p-2", "linux-aarch64-310p-1"),
+        ("linux-aarch64-310p-4", "linux-aarch64-310p-1"),
     ]
     for src, want in cases:
         label, image_tag = e2e_dispatch._rewrite_runner(src)
@@ -219,12 +240,38 @@ def test_compute_test_groups(monkeypatch, tmp_path: Path) -> None:
             stderr="")
 
     monkeypatch.setattr(e2e_dispatch.subprocess, "run", fake_run)
+    monkeypatch.setenv("MAIN2MAIN_E2E_CHIPS", "a2,a3,310p")  # keep a3 for rewrite coverage
     result = e2e_dispatch.compute_test_groups(tmp_path, ["vllm/x.py"])
     assert len(result) == 2  # cpu group dropped
-    assert result[0]["runner"] == "linux-aarch64-a2b1-8"
+    assert result[0]["runner"] == "linux-aarch64-a2-1"
     assert result[0]["image_tag"] == "9.1.0-910b-ubuntu22.04-py3.12"
-    assert result[1]["runner"] == "linux-aarch64-a3-800i-16-cn12-001"
+    assert result[1]["runner"] == "linux-aarch64-a3-4"
     assert result[1]["image_tag"] == "9.1.0-a3-ubuntu22.04-py3.12"
+
+
+def test_compute_test_groups_drops_non_resident_chips(
+        monkeypatch, tmp_path: Path) -> None:
+    # Default allowlist (a2,310p): a3 groups are dropped flow-side — no
+    # resident job would ever report them.
+    monkeypatch.delenv("MAIN2MAIN_E2E_CHIPS", raising=False)
+    groups = [
+        {"num_npus": 1, "npu_type": "a2", "runner": "linux-aarch64-a2b3-1",
+         "tests": "tests/e2e/a2/test_x.py", "partition": "1-1"},
+        {"num_npus": 4, "npu_type": "a3", "runner": "linux-aarch64-a3-4",
+         "tests": "tests/e2e/a3_4/test_y.py", "partition": "1-1"},
+    ]
+    select_script = tmp_path / ".github/workflows/scripts/select_tests.py"
+    select_script.parent.mkdir(parents=True)
+    select_script.write_text("#!/bin/false\n", encoding="utf-8")
+    payload = json.dumps(groups, separators=(",", ":"))
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=f"test_groups={payload}\n", stderr="")
+
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run", fake_run)
+    result = e2e_dispatch.compute_test_groups(tmp_path, ["vllm/x.py"])
+    assert [g["npu_type"] for g in result] == ["a2"]
 
 
 def test_compute_test_groups_empty_changed_files(tmp_path: Path) -> None:
@@ -397,144 +444,200 @@ def test_incremental_groups_mapping_failure(monkeypatch,
     assert result[0]["tests"] == "tests/e2e/a2/test_b.py"
 
 
-# ---- wait_for_round_results -------------------------------------------------
-# The exec rounds end with a "Hold runner (exec guard)" step that keeps the
-# run in_progress until the next round is dispatched; the flow must wait
-# for the round's RESULTS (all e2e jobs past the upload step), not the run
-# completing — otherwise the multi-step round chain deadlocks.
+# ---- command protocol: push_signal_branch / wait_chip_results --------------
+# Every E2E round is a force-push of the signal branch whose commit carries
+# command.json = {"round", "main_run_id"}; the resident jobs serve it in
+# place and push results to <signal_branch>_results_<chip>.  The flow
+# materializes each chip's round-N/ from the results branch.
 
-def _e2e_job(chip: str, status: str = "in_progress",
-             guard: str | None = "in_progress") -> dict:
-    steps = []
-    if guard:
-        steps.append({"name": "Hold runner (exec guard)", "status": guard})
-    return {"name": f"e2e-{chip}", "status": status, "steps": steps}
-
-
-def _wait_fake_run(responses, calls: list | None = None):
-    """Mimic gh api: per-poll (run-status, jobs) payloads, last repeats.
-
-    A "cancel" POST is answered 204-style.  Every command is appended to
-    *calls* so tests can assert the cancel happened.
-    """
-    state = {"i": 0}
-
-    def fake_run(cmd, **kwargs):
-        url = " ".join(cmd)
-        if "cancel" in url:
-            if calls is not None:
-                calls.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0, stdout="{}",
-                                               stderr="")
-        # One poll = one run-status call followed by one jobs call; they
-        # must read the SAME response pair (index advances per poll).
-        is_jobs = "/jobs" in url
-        i = state["i"] - 1 if is_jobs else state["i"]
-        if not is_jobs:
-            state["i"] += 1
-        i = min(max(i, 0), len(responses) - 1)
-        # The jobs API returns {"jobs": [...]}; per-poll payloads store the
-        # job list unwrapped for readability.
-        payload = {"jobs": responses[i][1]} if is_jobs else responses[i][0]
-        if calls is not None:
-            calls.append(cmd)
-        return subprocess.CompletedProcess(
-            cmd, 0, stdout=json.dumps(payload), stderr="")
-
-    return fake_run
+def _init_repo(repo: Path) -> None:
+    repo.mkdir(parents=True)
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=str(repo), check=True,
+                       capture_output=True, text=True)
+    git("init", "-q")
+    git("checkout", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (repo / "code.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
 
 
-def test_wait_for_round_results_guards_holding(tmp_path: Path,
-                                               monkeypatch) -> None:
-    # All three chips past the upload step (guard in_progress) → results
-    # ready while the run is still in_progress.
-    responses = [
-        ({"status": "in_progress", "conclusion": None},
-         [_e2e_job("a2"), _e2e_job("a3"), _e2e_job("310p")]),
-    ]
-    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
-                        _wait_fake_run(responses))
-    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
-    assert res == {"status": "results_ready"}
+def _git_show(repo: Path, spec: str) -> str:
+    return subprocess.run(["git", "show", spec], cwd=str(repo), check=True,
+                          capture_output=True, text=True).stdout
 
 
-def test_wait_for_round_results_completed_jobs_count(tmp_path: Path,
-                                                     monkeypatch) -> None:
-    # A chip whose job completed early (died before the guard) still counts
-    # as done-uploading; the parser backfills its missing artifact.
-    responses = [
-        ({"status": "in_progress", "conclusion": None},
-         [_e2e_job("a2", status="completed"), _e2e_job("a3"),
-          _e2e_job("310p", status="completed")]),
-    ]
-    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
-                        _wait_fake_run(responses))
-    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
-    assert res == {"status": "results_ready"}
+def test_push_signal_branch_carries_command(tmp_path: Path,
+                                            monkeypatch) -> None:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    # Uncommitted tracked change must be carried into the snapshot.
+    (repo / "code.py").write_text("x = 2\n", encoding="utf-8")
+    pushed: dict = {}
+    monkeypatch.setattr(
+        e2e_dispatch, "_push_via_proxy",
+        lambda wt, fork, refspec, *a: pushed.update(fork=fork,
+                                                    refspec=refspec))
+    sha = e2e_dispatch.push_signal_branch(
+        repo, "main2main_e2e", "fork/x", [{"npu_type": "a2"}], 3, "42")
+    assert pushed == {"fork": "fork/x",
+                      "refspec": "HEAD:refs/heads/main2main_e2e"}
+    cmd = json.loads(_git_show(repo, f"{sha}:command.json"))
+    assert cmd == {"round": 3, "main_run_id": "42"}
+    groups = json.loads(_git_show(repo, f"{sha}:test_groups.json"))
+    assert groups == [{"npu_type": "a2"}]
+    assert _git_show(repo, f"{sha}:code.py") == "x = 2\n"
 
 
-def test_wait_for_round_results_waits_for_slow_chip(tmp_path: Path,
-                                                    monkeypatch) -> None:
-    # First poll: a3 still running its tests (no guard step yet) → keep
-    # polling; second poll: a3 reached its guard → results ready.
-    responses = [
-        ({"status": "in_progress", "conclusion": None},
-         [_e2e_job("a2"), _e2e_job("a3", guard=None),
-          _e2e_job("310p")]),
-        ({"status": "in_progress", "conclusion": None},
-         [_e2e_job("a2"), _e2e_job("a3"), _e2e_job("310p")]),
-    ]
-    calls: list = []
-    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
-                        _wait_fake_run(responses, calls))
-    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
-    assert res == {"status": "results_ready"}
-    assert len(calls) >= 3  # waited past the first poll
+def _fake_clock():
+    clock = SimpleNamespace(t=1000.0)
+    clock.time = lambda: clock.t
+    clock.sleep = lambda s: setattr(clock, "t", clock.t + s)
+    return clock
 
 
-def test_wait_for_round_results_run_completed_early(tmp_path: Path,
-                                                    monkeypatch) -> None:
-    # All guards died (infra failure / cancellation): the run completes on
-    # its own → return its dict, download what exists.
-    responses = [
-        ({"status": "completed", "conclusion": "failure"}, []),
-    ]
-    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
-                        _wait_fake_run(responses))
-    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
-    assert res == {"status": "completed", "conclusion": "failure"}
+def test_wait_chip_results_all_report(tmp_path: Path, monkeypatch) -> None:
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x")
+    fetched: list[tuple[str, int]] = []
+
+    def fake_fetch(git_url, branch, round_number, dest, expect=None):
+        fetched.append((branch, round_number))
+        dest.mkdir(parents=True, exist_ok=True)
+        return True
+
+    monkeypatch.setattr(e2e_dispatch, "_fetch_round_results", fake_fetch)
+    clock = _fake_clock()
+    monkeypatch.setattr(e2e_dispatch, "time", clock)
+    missing = e2e_dispatch.wait_chip_results(
+        cfg, ["a2", "310p"], 2, 10, tmp_path, command_sha="abc123")
+    assert missing == []
+    assert set(fetched) == {("main2main_e2e_results_a2", 2),
+                            ("main2main_e2e_results_310p", 2)}
+    for chip in ("a2", "310p"):
+        assert (tmp_path / f"main2main-e2e-round-2-{chip}").is_dir()
 
 
-def test_wait_for_round_results_no_e2e_jobs_waits_for_completion(
+def test_wait_chip_results_slow_chip_then_timeout(tmp_path: Path,
+                                                  monkeypatch) -> None:
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x")
+    polls = {"a2": 0, "310p": 0}
+
+    def fake_fetch(git_url, branch, round_number, dest, expect=None):
+        chip = branch.rsplit("_", 1)[-1]
+        polls[chip] += 1
+        if chip == "a2" and polls[chip] >= 2:
+            dest.mkdir(parents=True, exist_ok=True)
+            return True
+        return False
+
+    monkeypatch.setattr(e2e_dispatch, "_fetch_round_results", fake_fetch)
+    clock = _fake_clock()
+    monkeypatch.setattr(e2e_dispatch, "time", clock)
+    # Budget: 2 polls worth (2 x 30s sleep) exhausts it before 310p reports.
+    missing = e2e_dispatch.wait_chip_results(
+        cfg, ["a2", "310p"], 1, 1, tmp_path)
+    assert missing == ["310p"]
+    assert (tmp_path / "main2main-e2e-round-1-a2").is_dir()
+    assert not (tmp_path / "main2main-e2e-round-1-310p").exists()
+
+
+def test_run_external_e2e_timeout_returns_failed_result(
         tmp_path: Path, monkeypatch) -> None:
-    # e2e jobs never started (prepare failed → skipped): the run completes
-    # on its own; the empty-jobs state must not short-circuit as ready.
-    responses = [
-        ({"status": "in_progress", "conclusion": None},
-         [{"name": "prepare-a2-9", "status": "completed"}]),
-        ({"status": "completed", "conclusion": "failure"}, []),
-    ]
-    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
-                        _wait_fake_run(responses))
-    res = e2e_dispatch.wait_for_round_results("repo", 42, 1, poll_s=0.01)
-    assert res == {"status": "completed", "conclusion": "failure"}
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x",
+                                         main_run_id="42")
+    monkeypatch.setattr(e2e_dispatch, "push_signal_branch",
+                        lambda *a, **k: "deadbeef")
+    seen_expect: list = []
+
+    def fake_fetch(git_url, branch, round_number, dest, expect=None):
+        seen_expect.append(expect)
+        return False
+
+    monkeypatch.setattr(e2e_dispatch, "_fetch_round_results", fake_fetch)
+    clock = _fake_clock()
+    monkeypatch.setattr(e2e_dispatch, "time", clock)
+    result = e2e_dispatch.run_external_e2e(
+        cfg, tmp_path / "ascend",
+        [{"npu_type": "a2", "tests": "tests/e2e/a2/test_x.py"}],
+        tmp_path / "log", 1, step_id=0, timeout_min=1)
+    assert result["ci_result"] == "failed"
+    assert result["can_commit"] is False
+    assert "no results from chips ['a2']" in result["summary_error"]
+    # The pushed command sha must be bound into the results identity check.
+    assert seen_expect[-1] == {"main_run_id": "42", "command_sha": "deadbeef"}
 
 
-def test_wait_for_round_results_wrong_guard_name_times_out_cancels(
+def test_run_external_e2e_no_resident_chips_passes(
         tmp_path: Path, monkeypatch) -> None:
-    # A job whose last step is a DIFFERENT hold step (e.g. the prep guard)
-    # never counts as done-uploading → budget exhausts → cancel the run.
-    responses = [
-        ({"status": "in_progress", "conclusion": None},
-         [{"name": "e2e-a2", "status": "in_progress",
-           "steps": [{"name": "Hold runner (prep guard)",
-                      "status": "in_progress"}]}]),
-    ]
-    calls: list = []
-    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
-                        _wait_fake_run(responses, calls))
-    res = e2e_dispatch.wait_for_round_results("repo", 42, 0.001,
-                                              poll_s=0.01)
-    assert res == {"status": "timed_out", "conclusion": "timed_out",
-                   "run_id": 42}
-    assert any("cancel" in " ".join(c) for c in calls)
+    # Groups only for chips without resident jobs (e.g. a3 while it is out
+    # of the matrix) must not block on the timeout — nothing to run.
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x",
+                                         main_run_id="42")
+    monkeypatch.setenv("MAIN2MAIN_E2E_CHIPS", "a2,310p")
+    monkeypatch.setattr(e2e_dispatch, "push_signal_branch",
+                        lambda *a, **k: "deadbeef")
+    result = e2e_dispatch.run_external_e2e(
+        cfg, tmp_path / "ascend",
+        [{"npu_type": "a3", "tests": "tests/e2e/a3_4/test_y.py"}],
+        tmp_path / "log", 1, step_id=0)
+    assert result["ci_result"] == "passed"
+    assert result["can_commit"] is True
+
+
+def _init_origin_with_round(tmp_path: Path, main_run_id: str,
+                            command_sha: str) -> Path:
+    """Bare-ish local origin holding one chip results branch (round-1/)."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=str(origin), check=True,
+                       capture_output=True, text=True)
+    git("init", "-q")
+    git("checkout", "-q", "-b", "main2main_e2e_results_a2")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (origin / "round-1").mkdir()
+    (origin / "round-1" / "round-meta.json").write_text(json.dumps(
+        {"round": 1, "main_run_id": main_run_id,
+         "command_sha": command_sha}), encoding="utf-8")
+    (origin / "round-1" / "round-1-result.json").write_text(
+        "{}", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "results")
+    return origin
+
+
+def test_fetch_round_results_identity_enforced(tmp_path: Path) -> None:
+    origin = _init_origin_with_round(tmp_path, "42", "cafe123")
+    dest = tmp_path / "out"
+    ok = e2e_dispatch._fetch_round_results(
+        str(origin), "main2main_e2e_results_a2", 1, dest,
+        expect={"main_run_id": "42", "command_sha": "cafe123"})
+    assert ok is True
+    assert (dest / "round-1-result.json").exists()
+    assert (dest / "round-meta.json").exists()
+    # Stale results from a different command sha / main run are rejected.
+    dest2 = tmp_path / "out2"
+    assert e2e_dispatch._fetch_round_results(
+        str(origin), "main2main_e2e_results_a2", 1, dest2,
+        expect={"main_run_id": "42", "command_sha": "other"}) is False
+    dest3 = tmp_path / "out3"
+    assert e2e_dispatch._fetch_round_results(
+        str(origin), "main2main_e2e_results_a2", 1, dest3,
+        expect={"main_run_id": "99", "command_sha": "cafe123"}) is False
+    # No expect: legacy behavior, accept whatever is there.
+    dest4 = tmp_path / "out4"
+    assert e2e_dispatch._fetch_round_results(
+        str(origin), "main2main_e2e_results_a2", 1, dest4) is True
+    # Re-materializing the same dest must not overlay stale content.
+    (dest / "round-1-stale.log").write_text("stale", encoding="utf-8")
+    e2e_dispatch._fetch_round_results(
+        str(origin), "main2main_e2e_results_a2", 1, dest,
+        expect={"main_run_id": "42", "command_sha": "cafe123"})
+    assert not (dest / "round-1-stale.log").exists()

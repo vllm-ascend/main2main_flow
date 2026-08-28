@@ -1,32 +1,37 @@
-"""External E2E dispatcher: CPU-side control of the three-runner (A2/A3/310P) E2E.
+"""External E2E dispatcher: CPU-side control of the resident-runner (A2/A3/310P) E2E.
 
-The main2main flow runs on a pure-CPU runner; E2E tests run on three NPU
-runners via the single ``main2main-e2e.yaml`` workflow:
+The main2main flow runs on a pure-CPU runner; E2E tests run on the NPU
+runners via the single resident ``main2main-e2e.yaml`` workflow:
 
-- round ``prep`` only runs the ``prepare-<chip>`` jobs (csrc cache, deps,
-  editable install on the persistent runner filesystem) — dispatched at
-  flow start so the first E2E round does not wait for setup.
-- exec rounds (``round=N``) chain ``e2e-<chip>`` after ``prepare-<chip>``:
-  the signal branch (accumulated patch + test_groups.json) is checked out
-  and ``run_tests.py`` runs the chip's tests with card-packed parallel
-  scheduling (same execution engine as the legacy main flow), uploading
-  per-chip artifacts ``main2main-e2e-round-<N>-<chip>``.
+- at flow start the main workflow dispatches it once; each
+  ``prepare-<chip>`` job builds the environment once (csrc cache, deps,
+  editable install) and then enters a resident command loop for the whole
+  main run.
+- every E2E round, this module force-pushes the signal branch (accumulated
+  patch + test_groups.json + command.json = round number + main run id) —
+  that commit IS the round's command.  The resident jobs pick it up in
+  place (no cache re-fetch, no reinstall, no new job), run the chip's
+  tests with run_tests.py, and push the results to per-chip results
+  branches (``<signal_branch>_results_<chip>``, layout
+  ``round-<N>/<run_tests.py tests-dir files>``).
 
-This module computes the full ready-all test groups (select_tests.py,
-runner labels rewritten to the three main2main runners), pushes them with
-the accumulated adaptation patch to a signal branch on the fork, dispatches
-and polls the workflow, downloads the artifacts, and merges the per-chip
-``round-<N>-result.json`` files (already classified by run_tests.py's
-ci_log_summary pipeline) into one run_tests()-shaped result dict — the
-result and test-errors.txt are byte-identical for fix mode.
+This module computes the test groups (select_tests.py, runner labels
+rewritten to the main2main runners), pushes the commands, materializes the
+per-chip ``round-<N>-result.json`` files (already classified by
+run_tests.py's ci_log_summary pipeline) from the results branches, and
+merges them into one run_tests()-shaped result dict — the result and
+test-errors.txt are byte-identical for fix mode.
 """
 from __future__ import annotations
 
-import fnmatch
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,9 +65,12 @@ class E2EDispatchConfig:
     vllm: str = ""
     base_ref: str = "main"
     timeout_min: int = 480
-    # run id of the dispatching main run; the e2e workflow's hold guard
-    # uses it to recognize exec runs from this main run.
+    # run id of the dispatching main run; the resident loop only serves
+    # commands whose command.json carries this id.
     main_run_id: str = ""
+    # repo of the dispatching main run (stamped into command.json for the
+    # runner-side completion probe); defaults to this workflow's repo.
+    main_run_repo: str = ""
 
     @classmethod
     def from_env(cls, target_commit: str = "") -> "E2EDispatchConfig":
@@ -77,6 +85,7 @@ class E2EDispatchConfig:
             base_ref=os.getenv("MAIN2MAIN_E2E_BASE_REF", "main"),
             timeout_min=int(os.getenv("MAIN2MAIN_E2E_TIMEOUT_MIN", "480")),
             main_run_id=os.getenv("MAIN2MAIN_E2E_MAIN_RUN_ID", ""),
+            main_run_repo=os.getenv("GITHUB_REPOSITORY", ""),
         )
 
 
@@ -146,7 +155,22 @@ def compute_test_groups(ascend_path: Path,
         if image_tag:
             g["image_tag"] = image_tag
         rewritten.append(g)
+    allowed = set(chip_allowlist())
+    rewritten = [g for g in rewritten if g.get("npu_type") in allowed]
     return apply_minimal_filter(rewritten)
+
+
+def chip_allowlist() -> list[str]:
+    """Chips that have resident jobs in main2main-e2e.yaml's matrix.
+
+    Groups for chips outside the allowlist are dropped before dispatch: a
+    chip with no resident job never pushes results, so every round would
+    block on the full timeout (a3 is temporarily out of the matrix).
+    Re-enable by setting MAIN2MAIN_E2E_CHIPS (comma-separated) in the main
+    workflow's env once the a3 matrix entry is restored.
+    """
+    raw = os.getenv("MAIN2MAIN_E2E_CHIPS", "a2,310p")
+    return [c.strip() for c in raw.split(",") if c.strip()]
 
 
 def apply_minimal_filter(groups: list[dict]) -> list[dict]:
@@ -319,8 +343,14 @@ def _group_of(full_groups: list[dict], test: str) -> dict:
 # =============================================================================
 
 def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
-                       groups_json: list[dict]) -> str:
-    """Force-push accumulated patch + test_groups.json to the fork branch.
+                       groups_json: list[dict], round_number: int,
+                       main_run_id: str) -> str:
+    """Force-push the round command to the fork's signal branch.
+
+    The commit carries the accumulated patch (the working tree snapshot),
+    test_groups.json, and command.json = {"round", "main_run_id"} — the
+    resident runner jobs treat every new signal-branch commit for their
+    main run as the command to serve that round.
 
     Uses a detached git worktree so the main working branch (the PR branch)
     is never touched — a commit here would leak into the PR squash.  Any
@@ -331,7 +361,6 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
     (concurrency group main2main guarantees a single writer), so a plain
     ``--force`` is safe.  Returns the pushed commit sha.
     """
-    import tempfile
     ascend_path = Path(ascend_path)
     wt = Path(tempfile.mkdtemp(prefix="m2m-signal-"))
     sha = ""
@@ -341,7 +370,7 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
             cwd=str(ascend_path), check=True, capture_output=True, text=True,
         )
         wt_patch = subprocess.run(
-            ["git", "diff", "HEAD"], cwd=str(ascend_path),
+            ["git", "diff", "HEAD", "--binary"], cwd=str(ascend_path),
             capture_output=True, text=True,
         ).stdout
         if wt_patch.strip():
@@ -361,6 +390,9 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
         groups_path = wt / "test_groups.json"
         groups_path.write_text(
             json.dumps(groups_json, indent=2) + "\n", encoding="utf-8")
+        (wt / "command.json").write_text(
+            json.dumps({"round": round_number, "main_run_id": main_run_id})
+            + "\n", encoding="utf-8")
         run_git(wt, "add", "-A")
         run_git(wt, "commit", "-m",
                 "main2main: e2e signal (accumulated patch + test_groups)")
@@ -370,7 +402,7 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
         # ref under refs/{heads,tags}/); qualify it explicitly.
         _push_via_proxy(wt, head_fork, f"HEAD:refs/heads/{branch}", "--force")
         ts_print(f"[e2e-dispatch] signal branch {head_fork}:{branch} "
-                 f"pushed at {sha[:12]}")
+                 f"pushed at {sha[:12]} (round {round_number} command)")
     finally:
         subprocess.run(
             ["git", "worktree", "remove", "--force", str(wt)],
@@ -471,177 +503,144 @@ def _parse_gh_time(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
-def wait_for_run(repo: str, run_id: int, timeout_min: int,
-                 poll_s: int = 60) -> dict:
-    """Poll the run until completed; on timeout cancel it to free runners."""
-    deadline = time.time() + timeout_min * 60
-    while time.time() < deadline:
-        r = subprocess.run(
-            ["gh", "api", f"repos/{repo}/actions/runs/{run_id}"],
-            capture_output=True, text=True)
-        if r.returncode == 0:
-            try:
-                run = json.loads(r.stdout)
-            except json.JSONDecodeError:
-                run = {}
-            if run.get("status") == "completed":
-                return run
-        time.sleep(poll_s)
-    subprocess.run(
-        ["gh", "api", "-X", "POST",
-         f"repos/{repo}/actions/runs/{run_id}/cancel"],
-        capture_output=True, text=True)
-    ts_print(f"[e2e-dispatch] run {run_id} timed out after "
-             f"{timeout_min}min, cancelled")
-    return {"status": "timed_out", "conclusion": "timed_out",
-            "run_id": run_id}
-
-
 def dispatch_prep(cfg: E2EDispatchConfig) -> int:
-    """Pre-start the three runners' environment prep alongside the main flow.
+    """Fallback pre-start of the resident runners (the main workflow's
+    pre-start step normally does this and passes the run id via env).
 
-    ``round=prep`` on main2main-e2e.yaml runs only the ``prepare-<chip>``
-    jobs (the ``e2e-<chip>`` jobs are guarded by ``round != prep``), so the
-    first E2E round reuses the prepared env instead of building it.
+    The dispatched prepare-<chip> jobs build the env once and then serve
+    every E2E round of this main run from their resident command loop.
     """
     run_id = dispatch_workflow(
         cfg.repo, cfg.workflow, cfg.dispatch_ref,
-        {"vllm": cfg.vllm, "base_ref": cfg.base_ref, "round": "prep",
-         "flow_ref": cfg.flow_ref})
-    ts_print(f"[e2e-dispatch] prep workflow run {run_id} started "
+        {"vllm": cfg.vllm, "base_ref": cfg.base_ref,
+         "flow_ref": cfg.flow_ref, "main_run_id": cfg.main_run_id,
+         "main_run_repo": cfg.main_run_repo,
+         "signal_branch": cfg.signal_branch,
+         "signal_repo": cfg.signal_repo or cfg.repo})
+    ts_print(f"[e2e-dispatch] resident runner run {run_id} started "
              f"(A2/A3/310P environments)")
     return run_id
 
 
-def _job_done_uploading(job: dict) -> bool:
-    """True when a job's round artifacts are all in the artifact store.
+# =============================================================================
+# results fetch from the resident runners' results branches
+# =============================================================================
 
-    An e2e job either completed (upload step done or died) or is still
-    running its ``Hold runner (exec guard)`` step — which runs after the
-    upload step, so its artifacts are already listed/downloadable.
+def _signal_git_url(cfg: E2EDispatchConfig) -> str:
+    """Token URL for the fork carrying the signal + results branches."""
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    return (f"https://x-access-token:{token}@github.com/"
+            f"{cfg.signal_repo or cfg.repo}")
+
+
+def _fetch_round_results(git_url: str, branch: str, round_number: int,
+                         dest: Path,
+                         expect: dict | None = None) -> bool:
+    """Materialize one chip's round results from its results branch.
+
+    Branch layout: ``round-<N>/`` holding the run_tests.py tests-dir files
+    (round-<N>-result.json, per-test logs/summaries, expected_tests.json)
+    plus the resident's round-meta.json ({"round", "main_run_id",
+    "command_sha"}).  When *expect* is given, the meta file must match —
+    results left over from an earlier same-numbered round (a previous step,
+    a chained run) must never be accepted as this round's verdict.  Returns
+    False while the branch, the round path, or the identity check is not
+    satisfied yet.
     """
-    if job.get("status") == "completed":
-        return True
-    for step in job.get("steps", []):
-        if step.get("name") == "Hold runner (exec guard)" \
-                and step.get("status") == "in_progress":
-            return True
-    return False
+    tmp = Path(tempfile.mkdtemp(prefix="m2m-results-fetch-"))
+    try:
+        def _git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(["git", *args], cwd=str(tmp),
+                                  capture_output=True, text=True)
 
-
-def wait_for_round_results(repo: str, run_id: int, timeout_min: int,
-                           poll_s: int = 30) -> dict:
-    """Wait for the round's results instead of the run's completion.
-
-    Exec rounds end with a hold step that keeps the run in_progress until
-    the next round is dispatched (the process is multi-step: rounds 1, 2,
-    ... are chained by the main run), so waiting for run completion would
-    deadlock the round chain.  Instead wait until every e2e-<chip> job has
-    passed its upload step — its artifacts are then listed and downloadable
-    while the guard still holds the machines.  On timeout the run is
-    cancelled to free the machines.
-    """
-    deadline = time.time() + timeout_min * 60
-    while time.time() < deadline:
-        # a) run finished on its own (guards died early / run cancelled):
-        #    artifacts are finalized, download whatever exists.
-        r = subprocess.run(
-            ["gh", "api", f"repos/{repo}/actions/runs/{run_id}"],
-            capture_output=True, text=True)
-        if r.returncode == 0:
+        if _git("init", "-q").returncode != 0:
+            return False
+        if _git("remote", "add", "origin", git_url).returncode != 0:
+            return False
+        if _git("fetch", "--force", "--no-tags", "--depth", "1", "origin",
+                branch).returncode != 0:
+            return False  # branch not pushed yet
+        path = f"round-{round_number}"
+        if _git("cat-file", "-e", f"FETCH_HEAD:{path}").returncode != 0:
+            return False  # command not served yet
+        if expect:
+            meta = _git("show", f"FETCH_HEAD:{path}/round-meta.json")
+            if meta.returncode != 0:
+                return False  # results not self-identifying yet
             try:
-                run = json.loads(r.stdout)
+                got = json.loads(meta.stdout)
             except json.JSONDecodeError:
-                run = {}
-            if run.get("status") == "completed":
-                return run
-        # b) every e2e job past its upload step → the round's results are
-        #    all in (a chip whose job died early just contributes nothing).
-        j = subprocess.run(
-            ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs"],
-            capture_output=True, text=True)
-        if j.returncode == 0:
-            try:
-                jobs = json.loads(j.stdout).get("jobs", [])
-            except (json.JSONDecodeError, KeyError):
-                jobs = []
-            e2e_jobs = [jb for jb in jobs
-                        if jb.get("name", "").startswith("e2e-")]
-            if e2e_jobs and all(_job_done_uploading(jb) for jb in e2e_jobs):
-                return {"status": "results_ready"}
-        time.sleep(poll_s)
-    subprocess.run(
-        ["gh", "api", "-X", "POST",
-         f"repos/{repo}/actions/runs/{run_id}/cancel"],
-        capture_output=True, text=True)
-    ts_print(f"[e2e-dispatch] run {run_id} timed out after "
-             f"{timeout_min}min, cancelled")
-    return {"status": "timed_out", "conclusion": "timed_out",
-            "run_id": run_id}
+                return False
+            if (got.get("main_run_id") != expect.get("main_run_id")
+                    or got.get("command_sha") != expect.get("command_sha")):
+                return False  # stale results from an earlier round
+        arch = subprocess.run(
+            ["git", "archive", "--format=tar", "FETCH_HEAD", path],
+            cwd=str(tmp), capture_output=True)
+        if arch.returncode != 0:
+            return False
+        # Never overlay fresh results onto a previous fetch of the same
+        # round dir: stale logs / expected_tests.json would survive into
+        # the parse.
+        shutil.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(arch.stdout)) as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                name = Path(member.name).relative_to(path)
+                data = tf.extractfile(member)
+                if data is not None:
+                    (dest / name).write_bytes(data.read())
+        return True
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
-def wait_prep(cfg: E2EDispatchConfig, run_id: int,
-              timeout_min: int | None = None) -> dict:
-    """Wait for the prep workflow; the first E2E round needs it ready."""
-    return wait_for_run(cfg.repo, run_id, timeout_min or cfg.timeout_min)
+def wait_chip_results(cfg: E2EDispatchConfig, chips: list[str],
+                      round_number: int, timeout_min: int,
+                      ci_dir: Path,
+                      command_sha: str = "") -> list[str]:
+    """Wait for every chip's round results on the results branches.
 
-
-# =============================================================================
-# artifact download + parsing (run_tests()-shaped result)
-# =============================================================================
-
-def _download_artifacts(repo: str, run_id: int, pattern: str,
-                        dest_dir: Path) -> None:
-    """Download the round artifacts with retries and a wait budget.
-
-    Artifacts of a just-completed run can take seconds to minutes to be
-    finalized (and listed) on GitHub, and the download itself crosses the
-    network — both need retries with backoff.  Fails hard only after the
-    wait budget is exhausted.
+    The resident jobs push each served round to
+    ``<signal_branch>_results_<chip>``; poll until every chip's round path
+    is materialized under *ci_dir* (or the budget expires — returns the
+    chips that never reported).  *command_sha* (the sha push_signal_branch
+    returned) binds the accepted results to THIS round's command — stale
+    round dirs from earlier steps/runs are rejected until the resident
+    re-serves the command.
     """
-    names: list[str] = []
-    matches: list[str] = []
-    deadline = time.time() + 600
+    git_url = _signal_git_url(cfg)
+    expect = ({"main_run_id": cfg.main_run_id, "command_sha": command_sha}
+              if command_sha else None)
+    pending = set(chips)
+    deadline = time.time() + timeout_min * 60
+    last_beat = time.time()
     while time.time() < deadline:
-        try:
-            r = _gh_retry(
-                ["gh", "api", "--paginate",
-                 f"repos/{repo}/actions/runs/{run_id}/artifacts"],
-                retries=3, base_delay=5)
-            data = json.loads(r.stdout)
-            names = [a["name"] for a in data.get("artifacts", [])
-                     if not a.get("expired", False)]
-        except Exception as exc:
-            ts_print(f"[e2e-dispatch] run {run_id}: artifact list query "
-                     f"failed ({exc}) — retrying")
-            time.sleep(15)
-            continue
-        matches = [n for n in names if fnmatch.fnmatch(n, pattern)]
-        if matches:
-            break
-        ts_print(f"[e2e-dispatch] run {run_id}: artifacts matching "
-                 f"{pattern!r} not finalized yet (listed: "
-                 f"{names or 'none'}) — waiting 15s")
-        time.sleep(15)
-    if not matches:
-        raise RuntimeError(f"no artifacts matching {pattern!r} for run "
-                           f"{run_id} after 600s (listed: {names})")
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    got: list[str] = []
-    for attempt in range(1, 6):
-        _gh_retry(["gh", "run", "download", "--repo", repo, str(run_id),
-                   "--pattern", pattern, "-D", str(dest_dir)],
-                  retries=2, base_delay=8)
-        got = [p.name for p in dest_dir.glob(f"{pattern}*") if p.is_dir()]
-        if len(got) >= len(matches):
-            return
-        ts_print(f"[e2e-dispatch] run {run_id}: download returned but only "
-                 f"{len(got)}/{len(matches)} artifact dir(s) present "
-                 f"(attempt {attempt}/5) — retrying")
-        time.sleep(15 * attempt)
-    raise RuntimeError(f"artifact download incomplete for run {run_id}: "
-                       f"got {len(got)}/{len(matches)} dirs")
+        for chip in sorted(pending):
+            branch = f"{cfg.signal_branch}_results_{chip}"
+            dest = ci_dir / f"main2main-e2e-round-{round_number}-{chip}"
+            if _fetch_round_results(git_url, branch, round_number, dest,
+                                    expect):
+                pending.discard(chip)
+                ts_print(f"[e2e-dispatch] round {round_number}: results "
+                         f"received from {chip} ({branch})")
+        if not pending:
+            return []
+        if time.time() - last_beat > 300:
+            last_beat = time.time()
+            ts_print(f"[e2e-dispatch] round {round_number}: still waiting "
+                     f"for chips {sorted(pending)}")
+        time.sleep(30)
+    return sorted(pending)
 
+
+# =============================================================================
+# parsing (run_tests()-shaped result)
+# =============================================================================
 
 def _slug(test: str) -> str:
     return (test.replace("/", "__").replace(".py", "")
@@ -679,14 +678,19 @@ def parse_exec_artifacts(ci_dir: Path, round_number: int,
             continue
         chip = adir.name.rsplit("-", 1)[-1]
         result_path = adir / f"round-{round_number}-result.json"
+        data = None
         if result_path.exists():
             try:
                 data = json.loads(result_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
+                # A killed run_tests.py can publish a partial json; the chip
+                # must fall into the NOT_RUN backfill below, not vanish from
+                # gating (dropping it would let the other chip's pass become
+                # an overall pass).
                 ts_print(f"[e2e-dispatch] {adir.name}: unparseable "
                          f"round-{round_number}-result.json ({exc}) — "
-                         f"chip results dropped")
-                continue
+                         f"backfilling chip as NOT_RUN")
+        if data is not None:
             for test, entry in data.get("suite_results", {}).items():
                 entry = dict(entry)
                 entry["test"] = test
@@ -763,42 +767,42 @@ def run_external_e2e(cfg: E2EDispatchConfig, ascend_path: Path,
                      round_number: int, step_id: int = 0,
                      push_before: bool = True,
                      timeout_min: int | None = None) -> dict:
-    """Push the signal branch, dispatch the exec workflow, parse the result.
+    """Push the round command (signal branch), wait for the resident
+    runners to serve it, parse the results.
 
     Returns the run_tests()-shaped result dict (see parse_exec_artifacts).
     """
     ci_dir = Path(log_dir) / str(step_id) / "tests"
     ci_dir.mkdir(parents=True, exist_ok=True)
+    command_sha = ""
     if push_before:
-        push_signal_branch(ascend_path, cfg.signal_branch,
-                           cfg.signal_repo or cfg.repo, groups_json)
-    inputs = {"vllm": cfg.vllm, "base_ref": cfg.base_ref,
-              "round": str(round_number),
-              "signal_branch": cfg.signal_branch,
-              "signal_repo": cfg.signal_repo,
-              "flow_ref": cfg.flow_ref,
-              "main_run_id": cfg.main_run_id}
-    run_id = dispatch_workflow(cfg.repo, cfg.workflow, cfg.dispatch_ref,
-                               inputs)
-    ts_print(f"[e2e-dispatch] exec run {run_id} started (round "
-             f"{round_number})")
-    run = wait_for_round_results(cfg.repo, run_id,
-                                 timeout_min or cfg.timeout_min)
-    if run.get("status") == "timed_out":
+        command_sha = push_signal_branch(
+            ascend_path, cfg.signal_branch, cfg.signal_repo or cfg.repo,
+            groups_json, round_number, cfg.main_run_id)
+    allowed = set(chip_allowlist())
+    chips = sorted({g.get("npu_type") for g in groups_json
+                    if g.get("npu_type")} & allowed)
+    if not chips:
+        ts_print(f"[e2e-dispatch] round {round_number}: no resident chips "
+                 f"in {len(groups_json)} group(s) — nothing to run")
+        return {"step_id": step_id, "round": round_number,
+                "ci_result": "passed", "can_commit": True,
+                "suite_results": {}, "rounds": [], "elapsed_s": 0.0,
+                "log_path": str(ci_dir), "summary_path": str(ci_dir)}
+    timeout_min = timeout_min or cfg.timeout_min
+    ts_print(f"[e2e-dispatch] round {round_number}: command pushed; "
+             f"waiting for chips {chips} on the resident runners "
+             f"(up to {timeout_min}min)")
+    missing = wait_chip_results(cfg, chips, round_number, timeout_min,
+                                ci_dir, command_sha=command_sha)
+    if missing:
         return {"step_id": step_id, "round": round_number,
                 "ci_result": "failed", "can_commit": False,
                 "requires_fix": True, "suite_results": {},
-                "summary_error": f"e2e run {run_id} timed out after "
-                                 f"{timeout_min or cfg.timeout_min}min "
-                                 f"(cancelled)",
+                "summary_error": f"round {round_number}: no results from "
+                                 f"chips {missing} after {timeout_min}min",
                 "log_path": str(ci_dir), "summary_path": str(ci_dir),
-                "elapsed_s": (timeout_min or cfg.timeout_min) * 60,
-                "rounds": []}
-    if run.get("conclusion") not in (None, "success"):
-        ts_print(f"[e2e-dispatch] run {run_id} completed early "
-                 f"(conclusion={run.get('conclusion')})")
-    _download_artifacts(cfg.repo, run_id,
-                        f"main2main-e2e-round-{round_number}-*", ci_dir)
+                "elapsed_s": timeout_min * 60, "rounds": []}
     result = parse_exec_artifacts(ci_dir, round_number, step_id)
     result_path = ci_dir / f"round-{round_number}-result.json"
     result_path.write_text(

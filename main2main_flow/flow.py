@@ -256,6 +256,10 @@ class Main2MainState(BaseModel):
 
     test_errors: list = []
     retry_count: int = 0
+    # Monotonic dispatch counter for external E2E rounds (unique per main
+    # run — the resident runners dedup commands by round number, so
+    # retry_count, which resets per step, would collide).
+    e2e_round: int = 0
 
     final_status: str = ""
 
@@ -1098,10 +1102,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
     def _run_external_gate_regression(self, step_id,
                                       accumulated_files: list[str]) -> bool:
-        """Gate regression on the external A2/A3 runners (round 0).
+        """Gate regression on the external A2/A3 runners (next e2e_round).
 
         The working tree — format/mypy fixes included, whether committed or
-        not — is pushed to the signal branch and the exec workflow re-runs
+        not — is pushed to the signal branch and the resident runners re-run
         the ready-all suite on the already-prepared runner environments.
         Reuses the computed test groups when available (gate fixes rarely
         change the test set); recomputes otherwise.
@@ -1123,9 +1127,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                          f"{exc}")
                 return False
         try:
+            self.state.e2e_round += 1
             result = run_external_e2e(
                 cfg, Path(ascend_path), self.state.e2e_groups,
-                WORKSPACE_DIR / STEPS_DIR, round_number=0, step_id=step_id)
+                WORKSPACE_DIR / STEPS_DIR, self.state.e2e_round,
+                step_id=step_id)
         except Exception as exc:
             ts_print(f"[final_quality_gate] regression e2e dispatch FAILED: "
                      f"{exc}")
@@ -1456,8 +1462,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             return False
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
-        ts_print(f"run_e2e_test: {step_id} round={self.state.retry_count} "
-                 f"(external)")
+        ts_print(f"run_e2e_test: {step_id} attempt={self.state.retry_count} "
+                 f"e2e_round={self.state.e2e_round + 1} (external)")
         cfg = self._e2e_cfg()
         ascend_path = Path(self.state.vllm_ascend_path)
         try:
@@ -1470,9 +1476,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print(f"[run_e2e_test] {step_id}: no test groups for "
                      f"{len(changed)} changed file(s) — nothing to run")
             return True
+        self.state.e2e_round += 1
+        round_no = self.state.e2e_round
         result = run_external_e2e(
             cfg, ascend_path, groups, WORKSPACE_DIR / STEPS_DIR,
-            self.state.retry_count, step_id=step_id)
+            round_no, step_id=step_id)
         test_passed = result.get("can_commit", False)
         self.state.last_step_e2e_passed = test_passed
         ts_print(f"test_passed={test_passed}, "
@@ -1482,10 +1490,9 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # [detail file, result json] so the adapter's fix round reads
             # the per-test error details directly.
             tests_dir = WORKSPACE_DIR / STEPS_DIR / str(step_id) / "tests"
-            summary_log = tests_dir / \
-                f"round-{self.state.retry_count}-result.json"
+            summary_log = tests_dir / f"round-{round_no}-result.json"
             detail_file = build_test_errors_detail(
-                result.get("suite_results", {}), self.state.retry_count,
+                result.get("suite_results", {}), round_no,
                 tests_dir, summary_log)
             self.state.test_errors = (
                 [str(detail_file), str(summary_log)] if detail_file
