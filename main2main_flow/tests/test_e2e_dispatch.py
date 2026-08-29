@@ -606,6 +606,11 @@ def test_push_signal_branch_carries_command(tmp_path: Path,
         e2e_dispatch, "_push_via_proxy",
         lambda wt, fork, refspec, *a: pushed.update(fork=fork,
                                                     refspec=refspec))
+    # Verification seam: answer with the worktree HEAD (the pushed sha).
+    monkeypatch.setattr(
+        e2e_dispatch, "_remote_branch_sha",
+        lambda wt, fork, branch: e2e_dispatch.run_git(
+            wt, "rev-parse", "HEAD").strip())
     sha = e2e_dispatch.push_signal_branch(
         repo, "main2main_e2e", "fork/x", [{"npu_type": "a2"}], 3, "42")
     assert pushed == {"fork": "fork/x",
@@ -615,6 +620,66 @@ def test_push_signal_branch_carries_command(tmp_path: Path,
     groups = json.loads(_git_show(repo, f"{sha}:test_groups.json"))
     assert groups == [{"npu_type": "a2"}]
     assert _git_show(repo, f"{sha}:code.py") == "x = 2\n"
+
+
+def test_push_signal_branch_retries_on_mismatch(tmp_path: Path,
+                                                monkeypatch) -> None:
+    # A push whose sha is not visible (or that raised) must be retried —
+    # the force-push is idempotent, so verify-then-retry is safe.
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    pushes = {"n": 0}
+    monkeypatch.setattr(
+        e2e_dispatch, "_push_via_proxy",
+        lambda wt, fork, refspec, *a: pushes.__setitem__("n", pushes["n"] + 1))
+    verifies = {"n": 0}
+    monkeypatch.setattr(
+        e2e_dispatch, "_remote_branch_sha",
+        lambda wt, fork, branch: (
+            e2e_dispatch.run_git(wt, "rev-parse", "HEAD").strip()
+            if (verifies.__setitem__("n", verifies["n"] + 1) or
+                verifies["n"] >= 3) else "stale"))
+    sleeps: list[float] = []
+    monkeypatch.setattr(e2e_dispatch.time, "sleep",
+                        lambda s: sleeps.append(s))
+    sha = e2e_dispatch.push_signal_branch(
+        repo, "main2main_e2e", "fork/x", [], 1, "7")
+    assert pushes["n"] == 3 and verifies["n"] == 3
+    assert sha
+
+
+def test_push_signal_branch_raises_after_exhaustion(tmp_path: Path,
+                                                    monkeypatch) -> None:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    monkeypatch.setattr(
+        e2e_dispatch, "_push_via_proxy",
+        lambda wt, fork, refspec, *a: None)
+    monkeypatch.setattr(e2e_dispatch, "_remote_branch_sha",
+                        lambda wt, fork, branch: "stale")
+    monkeypatch.setattr(e2e_dispatch.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="failed after 5 attempts"):
+        e2e_dispatch.push_signal_branch(
+            repo, "main2main_e2e", "fork/x", [], 1, "7")
+
+
+def test_run_external_e2e_push_failure_structured(tmp_path: Path,
+                                                  monkeypatch) -> None:
+    # A signal push that fails after internal retries must degrade to a
+    # structured failed result, not crash the flow process.
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x",
+                                         main_run_id="42")
+    def boom(*a, **k):
+        raise RuntimeError("channel down")
+    monkeypatch.setattr(e2e_dispatch, "push_signal_branch", boom)
+    result = e2e_dispatch.run_external_e2e(
+        cfg, tmp_path / "ascend",
+        [{"npu_type": "a2", "tests": "tests/e2e/a2/test_x.py"}],
+        tmp_path / "log", 1, step_id=0)
+    assert result["ci_result"] == "failed"
+    assert result["can_commit"] is False
+    assert "signal branch push failed" in result["summary_error"]
 
 
 def _fake_clock():

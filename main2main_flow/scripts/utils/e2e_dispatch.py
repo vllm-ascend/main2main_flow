@@ -358,6 +358,27 @@ def _group_of(full_groups: list[dict], test: str) -> dict:
 # signal branch + dispatch
 # =============================================================================
 
+def _remote_branch_sha(wt: Path, fork: str, branch: str) -> str:
+    """ls-remote the fork branch (token URL when available); '' on failure.
+
+    *wt* is unused by the implementation (cwd for the ls-remote) but gives
+    tests a seam: fakes can answer with the worktree's HEAD sha.
+    """
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    url = (f"https://x-access-token:{token}@github.com/{fork}" if token
+           else f"https://github.com/{fork}")
+    try:
+        r = subprocess.run(
+            ["git", "ls-remote", url, f"refs/heads/{branch}"],
+            cwd=str(wt), capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return ""
+    if r.returncode != 0:
+        return ""
+    out = r.stdout.split()
+    return out[0] if out else ""
+
+
 def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
                        groups_json: list[dict], round_number: int,
                        main_run_id: str) -> str:
@@ -416,7 +437,31 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
         # The worktree is detached, so git cannot guess the refs/heads/
         # prefix for a shorthand dst (it only infers it when the src is a
         # ref under refs/{heads,tags}/); qualify it explicitly.
-        _push_via_proxy(wt, head_fork, f"HEAD:refs/heads/{branch}", "--force")
+        refspec = f"HEAD:refs/heads/{branch}"
+        # The force-push is idempotent, so verify-then-retry is safe: a
+        # transient outage right after the push must not leave the round
+        # unpushed (the residents would then wait out the full round
+        # timeout for a command that never arrived).
+        last_err: Exception | None = None
+        for attempt in range(1, 6):
+            try:
+                _push_via_proxy(wt, head_fork, refspec, "--force")
+            except Exception as exc:
+                last_err = exc
+                ts_print(f"[e2e-dispatch] signal push attempt {attempt}/5 "
+                         f"failed: {exc}")
+            else:
+                verified = _remote_branch_sha(wt, head_fork, branch)
+                if verified == sha:
+                    break
+                last_err = RuntimeError(
+                    f"remote sha {verified or '<none>'} != pushed {sha}")
+                ts_print(f"[e2e-dispatch] signal push attempt {attempt}/5: "
+                         f"remote sha mismatch, retrying")
+            time.sleep(min(60 * attempt, 300))
+        else:
+            raise RuntimeError(
+                f"signal branch push failed after 5 attempts: {last_err}")
         ts_print(f"[e2e-dispatch] signal branch {head_fork}:{branch} "
                  f"pushed at {sha[:12]} (round {round_number} command)")
     finally:
@@ -549,6 +594,30 @@ def _signal_git_url(cfg: E2EDispatchConfig) -> str:
             f"{cfg.signal_repo or cfg.repo}")
 
 
+_last_auth_warn = 0.0
+
+
+def _warn_auth_failure(stderr: str) -> None:
+    """Loud, throttled log for auth-class fetch failures.
+
+    Unlike "branch not pushed yet", a 401/403 never recovers by polling —
+    surface it (at most once per 10 min) instead of waiting out the round
+    timeout in silence.
+    """
+    global _last_auth_warn
+    s = (stderr or "").lower()
+    if not any(k in s for k in ("authentication", "401", "403",
+                                "invalid username", "could not read",
+                                "permission")):
+        return
+    now = time.time()
+    if now - _last_auth_warn < 600:
+        return
+    _last_auth_warn = now
+    ts_print(f"[e2e-dispatch] results fetch AUTH FAILURE (check GH_TOKEN "
+             f"scopes/expiry): {stderr.strip()[-300:]}")
+
+
 def _fetch_round_results(git_url: str, branch: str, round_number: int,
                          dest: Path,
                          expect: dict | None = None) -> bool:
@@ -573,9 +642,14 @@ def _fetch_round_results(git_url: str, branch: str, round_number: int,
             return False
         if _git("remote", "add", "origin", git_url).returncode != 0:
             return False
-        if _git("fetch", "--force", "--no-tags", "--depth", "1", "origin",
-                branch).returncode != 0:
-            return False  # branch not pushed yet
+        fr = _git("fetch", "--force", "--no-tags", "--depth", "1", "origin",
+                  branch)
+        if fr.returncode != 0:
+            # "branch not pushed yet" is the normal pending state; an
+            # auth-class error never recovers on its own and must be
+            # visible instead of silently polling out the whole budget.
+            _warn_auth_failure(fr.stderr)
+            return False
         path = f"round-{round_number}"
         if _git("cat-file", "-e", f"FETCH_HEAD:{path}").returncode != 0:
             return False  # command not served yet
@@ -873,9 +947,23 @@ def run_external_e2e(cfg: E2EDispatchConfig, ascend_path: Path,
     ci_dir.mkdir(parents=True, exist_ok=True)
     command_sha = ""
     if push_before:
-        command_sha = push_signal_branch(
-            ascend_path, cfg.signal_branch, cfg.signal_repo or cfg.repo,
-            groups_json, round_number, cfg.main_run_id)
+        try:
+            command_sha = push_signal_branch(
+                ascend_path, cfg.signal_branch, cfg.signal_repo or cfg.repo,
+                groups_json, round_number, cfg.main_run_id)
+        except Exception as exc:
+            # The push retries internally; reaching here means the command
+            # channel is down.  Fail the round as a structured result (like
+            # a chip timeout) instead of crashing the flow process.
+            ts_print(f"[e2e-dispatch] round {round_number}: signal push "
+                     f"failed: {exc}")
+            return {"step_id": step_id, "round": round_number,
+                    "ci_result": "failed", "can_commit": False,
+                    "requires_fix": True, "suite_results": {},
+                    "summary_error": f"round {round_number}: signal branch "
+                                     f"push failed: {exc}",
+                    "log_path": str(ci_dir), "summary_path": str(ci_dir),
+                    "elapsed_s": 0.0, "rounds": []}
     allowed = set(chip_allowlist())
     chips = sorted({g.get("npu_type") for g in groups_json
                     if g.get("npu_type")} & allowed)
