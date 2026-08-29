@@ -342,19 +342,22 @@ def _close_old_main2main_prs(github_repo: str, current_pr_number: str) -> None:
 
 def _update_baseline_ref(ascend_path: Path, head_fork: str,
                          source_branch: str) -> None:
-    """Push the current vllm-ascend HEAD to refs/heads/main2main_baseline.
+    """Push the current vllm-ascend HEAD to the baseline ref.
 
-    The baseline ref marks "the vllm-ascend state corresponding to the last
-    vllm commit that passed e2e".  Next day's run starts from this ref to
-    do incremental adaptation instead of re-adapting from upstream/main.
+    The baseline ref (refs/heads/main2main_baseline, overridable via
+    MAIN2MAIN_BASELINE_REF for validation runs) marks "the vllm-ascend
+    state corresponding to the last vllm commit that passed e2e".  Next
+    day's run starts from this ref to do incremental adaptation instead of
+    re-adapting from upstream/main.
     """
     if not head_fork:
         ts_print("[push] No HEAD_FORK configured, skipping baseline ref update")
         return
+    baseline_ref = os.getenv("MAIN2MAIN_BASELINE_REF", "main2main_baseline")
     _push_via_proxy(ascend_path, head_fork,
-                    f"{source_branch}:refs/heads/main2main_baseline",
+                    f"{source_branch}:refs/heads/{baseline_ref}",
                     "--force")
-    ts_print(f"[push] Updated main2main_baseline -> {source_branch}")
+    ts_print(f"[push] Updated {baseline_ref} -> {source_branch}")
 
 
 def _delete_old_main2main_branches(ascend_path: Path, head_fork: str,

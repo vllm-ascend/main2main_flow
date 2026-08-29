@@ -2084,6 +2084,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         if not github_repo:
             ts_print("[push] GITHUB_REPO is empty, cannot create PR.")
             return "SKIP_PUSH"
+        # PR target, overridable separately from GITHUB_REPO (which also
+        # drives the manual-review issue and the chained next run).  The
+        # PR must target a repo sharing history with the head fork —
+        # vllm-project/vllm-ascend in production — while the validation
+        # fork points GITHUB_REPO elsewhere.
+        github_repo = os.getenv("PR_REPO", "") or github_repo
 
         head_fork = os.getenv("HEAD_FORK", "")
         draft = os.getenv("PR_DRAFT", "true").lower() == "true"

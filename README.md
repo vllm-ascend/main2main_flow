@@ -92,6 +92,8 @@ kickoff --vllm-path ... --vllm-ascend-path ...
 | `SKIP_E2E_TEST` | skip the NPU e2e tests, treat as passed | `false` |
 | `PUSH_TO_GITHUB` | open a PR after success | `false` |
 | `GITHUB_REPO` | PR target, `owner/name` | — |
+| `PR_REPO` | PR target override, `owner/name` (GITHUB_REPO stays the issue/chain target) | `GITHUB_REPO` |
+| `MAIN2MAIN_BASELINE_REF` | baseline ref on HEAD_FORK updated after a successful PR | `main2main_baseline` |
 | `PR_LABELS` | labels for the created PR | `ready-all` |
 | `MAIN2MAIN_MODEL` | opencode model (per-role: `_ADAPT`/`_FIX`/`_REVIEW`) | `deepseek/deepseek-chat` |
 | `MAIN2MAIN_TIMEOUT_MIN` / `MAIN2MAIN_STALE_SEC` | opencode total / idle timeouts | `30` / `300` |
