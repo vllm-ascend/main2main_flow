@@ -90,8 +90,18 @@ def test_parse_artifacts_all_passed(tmp_path: Path) -> None:
     assert result["tests"] == ["tests/e2e/a2/test_batch_invariant.py"]
     assert result["elapsed_s"] == 42.0
     assert result["total_cards"] == 8
-    assert result["suite_results"]["tests/e2e/a2/test_batch_invariant.py"][
-        "ci_result"] == "passed"
+    tr = result["suite_results"]["tests/e2e/a2/test_batch_invariant.py"]
+    assert tr["ci_result"] == "passed"
+    # Archived FLAT with the exact main-branch names; the chip dir is gone.
+    log_path = Path(tr["log_path"])
+    assert log_path == tmp_path / "round-1-tests__e2e__a2__test_batch_invariant.log"
+    assert log_path.exists() and log_path.read_text() == PASSED_LOG
+    # The fixture writes no summary.json for a passing test — assert the
+    # flat path shape only.
+    assert tr["summary_path"] == str(
+        tmp_path / "round-1-tests__e2e__a2__test_batch_invariant-summary.json")
+    assert (tmp_path / "round-1-a2-result.json").exists()
+    assert not (tmp_path / "main2main-e2e-round-1-a2").exists()
 
 
 def test_parse_artifacts_code_bug(tmp_path: Path) -> None:
@@ -110,6 +120,10 @@ def test_parse_artifacts_code_bug(tmp_path: Path) -> None:
     assert tr["run_suite_exit_code"] == 1
     assert tr["summary_error"] is None
     assert tr["not_run"] is False
+    # Flat main-branch layout: the failed log is readable at its
+    # rewritten log_path (what build_test_errors_detail excerpts).
+    assert Path(tr["log_path"]) == tmp_path / "round-1-tests__e2e__a2__test_foo.log"
+    assert "RuntimeError: boom" in Path(tr["log_path"]).read_text()
 
 
 def test_parse_artifacts_not_run(tmp_path: Path) -> None:
@@ -159,6 +173,33 @@ def test_parse_artifacts_truncated_result_json_backfills(
     assert tr["ci_result"] == "failed"
     assert tr["not_run"] is True
     assert result["can_commit"] is False
+
+
+def test_parse_artifacts_multi_chip_name_collision(tmp_path: Path) -> None:
+    # One test routed to two chips (MINIMAL validation set): the first
+    # chip in sorted order keeps the plain main-branch name, the second
+    # gets a chip-suffixed name.  The merged suite entry survives from the
+    # LAST chip (dict merge), so its log_path must resolve to that chip's
+    # copy.
+    _make_artifact_dir(
+        tmp_path, "a2", 1,
+        [{"name": "tests/e2e/a2/test_x.py", "passed": True,
+          "exit_code": 0, "elapsed": 1.0, "log": "1-test_x.log",
+          "status": "PASSED", "log_text": PASSED_LOG}])
+    _make_artifact_dir(
+        tmp_path, "a3", 2,
+        [{"name": "tests/e2e/a2/test_x.py", "passed": False,
+          "exit_code": 1, "elapsed": 2.0, "log": "1-test_x.log",
+          "status": "FAILED", "log_text": FAILED_LOG}])
+    result = e2e_dispatch.parse_exec_artifacts(tmp_path, 1, 0)
+    assert result["ci_result"] == "failed"
+    tr = result["suite_results"]["tests/e2e/a2/test_x.py"]
+    assert Path(tr["log_path"]) == tmp_path / "round-1-a3-tests__e2e__a2__test_x.log"
+    assert "RuntimeError: boom" in Path(tr["log_path"]).read_text()
+    # The first chip's copy keeps the plain main-branch name.
+    assert (tmp_path / "round-1-tests__e2e__a2__test_x.log").read_text() == PASSED_LOG
+    for chip in ("a2", "a3"):
+        assert not (tmp_path / f"main2main-e2e-round-1-{chip}").exists()
 
 
 def test_aggregate_suite_results_byte_shape() -> None:
@@ -375,9 +416,10 @@ def test_build_test_errors_detail_contract(tmp_path: Path) -> None:
           "exit_code": 1, "elapsed": 3.2, "log": "2-test_foo.log",
           "status": "FAILED", "log_text": FAILED_LOG}])
     result = e2e_dispatch.parse_exec_artifacts(tmp_path, 1, 0)
-    ci_dir = tmp_path / "main2main-e2e-round-1-a2"
-    detail = build_test_errors_detail(result["suite_results"], 1, ci_dir,
-                                      ci_dir / "round-1-result.json")
+    # Chip dirs are archived away after parse; the detail reads the flat
+    # logs via the rewritten log_path and lands in the flat tests dir.
+    detail = build_test_errors_detail(result["suite_results"], 1, tmp_path,
+                                      tmp_path / "round-1-result.json")
     assert detail is not None
     text = detail.read_text(encoding="utf-8")
     assert "=== tests/e2e/a2/test_foo.py ===" in text

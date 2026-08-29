@@ -818,11 +818,57 @@ def _slug(test: str) -> str:
             .replace("::", "--"))
 
 
+def _archive_round_artifacts(ci_dir: Path, round_number: int,
+                             chip_entries: dict[str, tuple[Path,
+                                                           list[dict]]]) -> None:
+    """Flatten the per-chip round dirs into the main-branch ci_dir layout.
+
+    Local run_tests() writes ``round-<N>-<slug>.log`` /
+    ``round-<N>-<slug>-summary.json`` FLAT in ci_dir; the external channel
+    materializes each chip under ``main2main-e2e-round-<N>-<chip>/``.  So
+    the archived workspace artifact (and every log_path/summary_path the
+    fix mode consumes) matches the main-branch layout, the per-test files
+    are copied out flat, each entry's paths are rewritten to the flattened
+    location, per-chip raw result jsons are kept as
+    ``round-<N>-<chip>-result.json`` (the plain name belongs to the merged
+    result, matching main's aggregate), and the chip dirs are removed.
+    Cross-chip name collisions (one test routed to two chips, e.g. the
+    MINIMAL validation set) keep the plain name for the first chip in
+    sorted order and get a ``round-<N>-<chip>-<slug>`` suffix otherwise.
+    """
+    taken: set[str] = set()
+    for chip in sorted(chip_entries):
+        adir, entries = chip_entries[chip]
+        for entry in entries:
+            slug = _slug(entry["test"])
+            base = f"round-{round_number}-{slug}"
+            dest_base = (base if base not in taken
+                         else f"round-{round_number}-{chip}-{slug}")
+            taken.add(dest_base)
+            if dest_base != base:
+                ts_print(f"[e2e-dispatch] {chip}: log name collision for "
+                         f"{slug} — archived as {dest_base}.log")
+            for suffix, key in ((".log", "log_path"),
+                                ("-summary.json", "summary_path")):
+                src = adir / f"{base}{suffix}"
+                dst = ci_dir / f"{dest_base}{suffix}"
+                if src.exists():
+                    shutil.copy2(src, dst)
+                entry[key] = str(dst)
+        raw = adir / f"round-{round_number}-result.json"
+        if raw.exists():
+            shutil.copy2(
+                raw, ci_dir / f"round-{round_number}-{chip}-result.json")
+    for adir, _ in chip_entries.values():
+        shutil.rmtree(adir, ignore_errors=True)
+
+
 def parse_exec_artifacts(ci_dir: Path, round_number: int,
                          step_id: int = 0) -> dict:
     """Merge per-chip run_tests() results into a run_tests()-shaped result.
 
-    Expected layout under *ci_dir* (artifacts uploaded from main2main-e2e.yaml):
+    Fetched layout under *ci_dir* (transient, from the per-chip results
+    branches via _fetch_round_results):
       main2main-e2e-round-<N>-<chip>/
         round-<N>-result.json          # run_tests() step-9 output (per chip)
         round-<N>-<slug>.log           # per-test logs
@@ -834,6 +880,9 @@ def parse_exec_artifacts(ci_dir: Path, round_number: int,
     re-classification happens here.  Suite entries are merged and
     re-aggregated identically to local run_tests() step 9, so the result
     dict and downstream test-errors.txt stay byte-identical for fix mode.
+    On success the per-test files are re-archived FLAT into *ci_dir* with
+    the exact main-branch names (see _archive_round_artifacts) and the
+    chip dirs are removed.
 
     A chip whose job died before uploading (no round-<N>-result.json) is
     backfilled as NOT_RUN from ``expected_tests.json``: every test
@@ -843,11 +892,13 @@ def parse_exec_artifacts(ci_dir: Path, round_number: int,
     all_results: list[dict] = []
     rounds_info: list[dict] = []
     total_elapsed = 0.0
+    chip_entries: dict[str, tuple[Path, list[dict]]] = {}
 
     for adir in sorted(ci_dir.glob(f"main2main-e2e-round-{round_number}-*")):
         if not adir.is_dir():
             continue
         chip = adir.name.rsplit("-", 1)[-1]
+        chip_results: list[dict] = []
         result_path = adir / f"round-{round_number}-result.json"
         data = None
         if result_path.exists():
@@ -866,17 +917,21 @@ def parse_exec_artifacts(ci_dir: Path, round_number: int,
                 entry = dict(entry)
                 entry["test"] = test
                 # The result JSON carries runner-side paths — point the
-                # merged result at the downloaded artifact instead.
+                # merged result at the downloaded artifact for now;
+                # _archive_round_artifacts rewrites it to the flat
+                # main-branch location.
                 slug = _slug(test)
                 entry["log_path"] = str(
                     adir / f"round-{round_number}-{slug}.log")
                 entry["summary_path"] = str(
                     adir / f"round-{round_number}-{slug}-summary.json")
                 all_results.append(entry)
+                chip_results.append(entry)
             for rnd in data.get("rounds", []):
                 rounds_info.append({**rnd, "chip": chip})
             total_elapsed = max(total_elapsed,
                                 float(data.get("elapsed_s", 0.0)))
+            chip_entries[chip] = (adir, chip_results)
             continue
         # No result json — the chip job failed before uploading.
         expected_path = adir / "expected_tests.json"
@@ -911,6 +966,7 @@ def parse_exec_artifacts(ci_dir: Path, round_number: int,
                                           f"{slug}-NOT_RUN-summary.json"),
                 "not_run": True,
             })
+            chip_results.append(all_results[-1])
             chip_tests.append(test)
         rounds_info.append({"round": round_number, "chip": chip,
                             "tests": chip_tests, "elapsed_s": 0.0,
@@ -918,12 +974,15 @@ def parse_exec_artifacts(ci_dir: Path, round_number: int,
         ts_print(f"[e2e-dispatch] {chip}: {len(chip_tests)} test(s) NOT_RUN "
                  f"(job failed before uploading round-{round_number} "
                  f"results)")
+        chip_entries[chip] = (adir, chip_results)
 
     if not all_results:
         return {"can_commit": False, "ci_result": "failed",
                 "suite_results": {}, "summary_error": "no exec artifacts",
                 "log_path": str(ci_dir), "summary_path": str(ci_dir),
                 "round": round_number}
+
+    _archive_round_artifacts(ci_dir, round_number, chip_entries)
 
     total_cards = max((r["cards_required"] for r in all_results), default=0)
     return aggregate_suite_results(
