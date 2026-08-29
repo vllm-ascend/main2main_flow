@@ -146,11 +146,20 @@ def resolve_squash_baseline(ascend_path: Path | str, fallback: str = "") -> str:
 
 
 def _has_divergent_commits(ascend_path: Path, branch: str, base_sha: str) -> bool:
-    """Check whether *branch* has commits that are not in *base_sha*."""
+    """Check whether *branch* has commits that are not in *base_sha*.
+
+    Fails open (True) when rev-list errors: treating an error as "no
+    divergent commits" would skip PR creation AND the baseline update for
+    the whole run.
+    """
     r = subprocess.run(
         ["git", "rev-list", "--count", f"{base_sha}..{branch}"],
         cwd=str(ascend_path), capture_output=True, text=True,
     )
+    if r.returncode != 0:
+        ts_print(f"[push] rev-list failed ({r.stderr.strip()[:200]}) — "
+                 f"assuming divergent commits and proceeding")
+        return True
     count = int(r.stdout.strip()) if r.stdout.strip().isdigit() else 0
     return count > 0
 
@@ -178,12 +187,19 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
     The CI runner has ``url.*.insteadOf`` rewrites that route
     ``https://github.com/`` through ``gh-proxy.test.osinfra.cn``.  The proxy
     allows anonymous fetch but needs a PAT token in the URL for push.
-    Retries up to 5 times with linear backoff.
+    Retries 6 times with capped linear backoff (~3.5 min window).
 
     If ``lease_branch`` is given, re-fetch that branch to
     ``refs/remotes/m2m-lease/<branch>`` before EACH attempt - the lease ref
     must be fresh, or a stale ref makes --force-with-lease fail with
-    "stale info" on every retry.
+    "stale info" on every retry.  If the lease re-fetch itself fails
+    (transient network), fall back to a plain --force for that attempt:
+    the pushed branch has a single writer (the flow's concurrency group),
+    so the lease is an extra guard, not a correctness requirement.
+
+    The retry window is outage-scale (github.com blackouts of several
+    minutes have been observed in CI): ~3.5 min of backoff per call, and
+    callers may add their own outer retry loop.
     """
     token = os.environ.get("GH_TOKEN") or ""
     if not token:
@@ -197,23 +213,31 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
         f"https://github.com/{head_fork}.git"
     )
     cwd = str(ascend_path) if ascend_path else None
+    attempts = 6
 
     last_error = ""
-    for attempt in range(1, 6):
+    for attempt in range(1, attempts + 1):
+        push_args = extra_args
         if lease_branch:
-            subprocess.run(
+            lf = subprocess.run(
                 ["git", "fetch", f"https://github.com/{head_fork}.git",
                  f"refs/heads/{lease_branch}:refs/remotes/m2m-lease/{lease_branch}"],
-                cwd=cwd, capture_output=True, text=True,
+                cwd=cwd, capture_output=True, text=True, timeout=120,
             )
+            if lf.returncode != 0:
+                ts_print(f"[push] lease re-fetch failed ({lf.stderr.strip()[:200]}) "
+                         f"— falling back to plain --force", flush=True)
+                push_args = tuple(
+                    ("--force" if a.startswith("--force-with-lease=") else a)
+                    for a in extra_args)
         subprocess.run(["git", "remote", "remove", push_remote],
                        cwd=cwd, capture_output=True, text=True)
         subprocess.run(["git", "remote", "add", push_remote, proxy_url],
                        cwd=cwd, capture_output=True, text=True)
         r = subprocess.run(
             ["git", "-c", "http.https://github.com/.extraheader=",
-             "push", *extra_args, push_remote, refspec],
-            cwd=cwd, capture_output=True, text=True,
+             "push", *push_args, push_remote, refspec],
+            cwd=cwd, capture_output=True, text=True, timeout=900,
         )
         subprocess.run(["git", "remote", "remove", push_remote],
                        cwd=cwd, capture_output=True, text=True)
@@ -223,12 +247,12 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
             return
         last_error = r.stderr.strip() or "(no stderr)"
         ts_print(
-            f"[push] git push attempt {attempt}/5 FAILED "
+            f"[push] git push attempt {attempt}/{attempts} FAILED "
             f"(exit {r.returncode}):\n{last_error}",
             flush=True,
         )
-        if attempt < 5:
-            time.sleep(10 * attempt)
+        if attempt < attempts:
+            time.sleep(min(15 * attempt, 60))
 
     raise subprocess.CalledProcessError(128, ["git", "push", "..."],
                                         output="", stderr=last_error)
@@ -403,18 +427,24 @@ def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
     # nil body → 422 "Invalid request" (PRs then miss the `ready-all` label and
     # vllm-ascend's ci-gate fails with "Selected tests are required" —
     # PR #14376).
-    result = subprocess.run(
-        ["gh", "api", "--method", "POST",
-         "-H", "Accept: application/vnd.github+json",
-         "--input", "-",
-         f"/repos/{github_repo}/issues/{pr_number}/labels"],
-        input=json.dumps(labels),  # ["ready-all"]
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        ts_print(f"[push] Warning: Failed to add labels {labels}: {result.stderr.strip()}")
-    else:
-        ts_print(f"[push] Labels added: {labels}")
+    last_err = ""
+    for attempt in range(1, 4):
+        result = subprocess.run(
+            ["gh", "api", "--method", "POST",
+             "-H", "Accept: application/vnd.github+json",
+             "--input", "-",
+             f"/repos/{github_repo}/issues/{pr_number}/labels"],
+            input=json.dumps(labels),  # ["ready-all"]
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            ts_print(f"[push] Labels added: {labels}")
+            return
+        last_err = result.stderr.strip()
+        ts_print(f"[push] Label add attempt {attempt}/3 FAILED: {last_err}")
+        if attempt < 3:
+            time.sleep(15 * attempt)
+    ts_print(f"[push] Warning: Failed to add labels {labels}: {last_err}")
 
 
 def push_and_create_pr(
@@ -628,9 +658,26 @@ def push_and_create_pr(
         # ---- update baseline ref for next day's incremental run ----
         # The branch we just pushed contains the accumulated adaptation
         # state; mark it as the baseline so tomorrow's run can rebase on
-        # top instead of starting from upstream/main.
+        # top instead of starting from upstream/main.  Must not be lost to
+        # a transient failure silently: without it the next run falls back
+        # to fresh mode and the incremental adaptation state is gone.
         if branch:
-            _update_baseline_ref(ascend_path, head_fork, branch)
+            baseline_ok = False
+            for attempt in range(1, 4):
+                try:
+                    _update_baseline_ref(ascend_path, head_fork, branch)
+                    baseline_ok = True
+                    break
+                except Exception as exc:
+                    ts_print(f"[push] baseline ref update attempt "
+                             f"{attempt}/3 FAILED: {exc}", flush=True)
+                    if attempt < 3:
+                        time.sleep(30 * attempt)
+            if not baseline_ok:
+                ts_print("::error::[push] baseline ref NOT updated — the "
+                         "next run will adapt from upstream/main (fresh "
+                         "mode) instead of the accumulated baseline",
+                         flush=True)
 
         # ---- delete old main2main_auto_* timestamped branches ----
         keep_n = int(os.getenv("MAIN2MAIN_KEEP_BRANCHES", "3"))
