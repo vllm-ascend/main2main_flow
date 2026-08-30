@@ -72,6 +72,11 @@ class E2EDispatchConfig:
     # repo of the dispatching main run (stamped into command.json for the
     # runner-side completion probe); defaults to this workflow's repo.
     main_run_repo: str = ""
+    # run id of the resident-runner prep run (the main workflow's pre-start
+    # step dispatches it and records the id).  Used to probe the residents'
+    # job status while waiting for round results — a dead prepare-<chip>-
+    # job must fail the flow fast instead of waiting out the round timeout.
+    prep_run_id: str = ""
 
     @classmethod
     def from_env(cls, target_commit: str = "") -> "E2EDispatchConfig":
@@ -87,6 +92,7 @@ class E2EDispatchConfig:
             timeout_min=int(os.getenv("MAIN2MAIN_E2E_TIMEOUT_MIN", "480")),
             main_run_id=os.getenv("MAIN2MAIN_E2E_MAIN_RUN_ID", ""),
             main_run_repo=os.getenv("GITHUB_REPOSITORY", ""),
+            prep_run_id=os.getenv("MAIN2MAIN_E2E_PREP_RUN_ID", ""),
         )
 
 
@@ -763,6 +769,58 @@ def _relay_test_progress(cfg: E2EDispatchConfig, round_number: int,
                          f"bugs={e.get('bugs')}, flakes={e.get('flakes')}")
 
 
+class ResidentRunnerError(RuntimeError):
+    """A resident runner's prepare-<chip> job died (GitHub Actions job
+    failure).  Not a test failure — there is no fix signal to extract; the
+    flow process must die so the main run fails fast and the workflow's
+    always() steps release the residents and upload the workspace."""
+
+
+# A resident job in these conclusions is dead for this run (the resident
+# loop keeps its job in_progress while serving; a completed+success job is
+# the normal self-release after the main run finished — not a death).
+_DEAD_CONCLUSIONS = frozenset(
+    {"failure", "cancelled", "timed_out", "startup_failure", "skipped"})
+
+
+def _probe_dead_residents(cfg: E2EDispatchConfig,
+                          chips: list[str]) -> list[tuple[str, str]]:
+    """Return (chip, conclusion) pairs whose prepare-<chip>- job died.
+
+    Tolerant by design: a probe that cannot run (no prep run id, gh
+    hiccup, parse error) returns [] — the next poll retries, and a
+    transient probe failure must never kill the main run.  Only a
+    definitive job death is reported.
+    """
+    if not cfg.prep_run_id or not chips:
+        return []
+    try:
+        r = subprocess.run(
+            ["gh", "api",
+             f"repos/{cfg.repo}/actions/runs/{cfg.prep_run_id}/jobs"
+             f"?per_page=100"],
+            capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip()[:300])
+        jobs = json.loads(r.stdout).get("jobs", [])
+    except Exception as exc:
+        ts_print(f"[e2e-dispatch] resident job probe failed (tolerated, "
+                 f"will retry next poll): {exc}")
+        return []
+    dead: list[tuple[str, str]] = []
+    for chip in chips:
+        prefix = f"prepare-{chip}-"
+        for job in jobs:
+            name = job.get("name") or ""
+            if not name.startswith(prefix):
+                continue
+            if (job.get("status") == "completed"
+                    and job.get("conclusion") in _DEAD_CONCLUSIONS):
+                dead.append((chip, job.get("conclusion") or "unknown"))
+            break
+    return dead
+
+
 def wait_chip_results(cfg: E2EDispatchConfig, chips: list[str],
                       round_number: int, timeout_min: int,
                       ci_dir: Path,
@@ -800,6 +858,21 @@ def wait_chip_results(cfg: E2EDispatchConfig, chips: list[str],
         pending -= set(done)
         if not pending:
             return []
+        # Real-time death detection: a resident whose prepare-<chip> job
+        # died (apt failure, OOM, infra kill) will never push results —
+        # fail the run now instead of waiting out the round timeout.
+        dead = _probe_dead_residents(cfg, sorted(pending))
+        if dead:
+            for chip, conclusion in dead:
+                ts_print(f"::error::[e2e-dispatch] round {round_number}: "
+                         f"resident runner for {chip} is DEAD "
+                         f"(prepare-{chip}- job completed with "
+                         f"conclusion={conclusion}) — it will never push "
+                         f"results; failing the run")
+            raise ResidentRunnerError(
+                f"round {round_number}: resident runner job(s) died for "
+                f"chips {dead} — no fix signal exists (this is not a test "
+                f"failure)")
         _relay_test_progress(cfg, round_number, sorted(pending), relay_state)
         if time.time() - last_beat > 300:
             last_beat = time.time()

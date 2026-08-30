@@ -142,7 +142,7 @@ SKIP_AI_ANALYSIS=true kickoff \
 
 整个 Flow 由 `Main2MainFlow` 类（`main2main_flow/flow.py`）驱动，节点顺序为：
 
-`initialize` → `_warmup_mega_moe` → `analyze_commit_and_plan_step` → `process_steps`（循环 `_ai_analysis` + `_run_e2e_test`，最多重试 3 次；全部成功后执行 `_final_quality_gate`）→ `generate_final_post` → `persist_lessons` → `push_to_github`
+`initialize` → `analyze_commit_and_plan_step` → `process_steps`（循环 `_ai_analysis` + `_run_e2e_test`，最多重试 3 次；全部成功后执行 `_final_quality_gate`）→ `generate_final_post` → `persist_lessons` → `push_to_github`
 
 per-step 的 `_run_e2e_test` 与 main 分支的判定规则一致——`SKIP_E2E_TEST` / adapter 判 no-op / 仅非源码改动时跳过；**有源码改动的 step 必跑 e2e**，只是执行位置从本地换到外部 A2/A3 runner：累积 patch 推送到 signal branch 后 dispatch exec round，主流程**等待该 run 完成并取回 artifact 结果**，再决定 commit / adapter-fix 重试 / revert（详见 [external E2E](#external-e2ea2a3310p)）。全部 step 通过后进入 final quality gate；gate 的 regression e2e 同样派发到外部 runner（round 0）复验 format/mypy 修复没有破坏功能。
 

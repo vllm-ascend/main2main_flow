@@ -778,6 +778,95 @@ def test_wait_chip_results_slow_chip_then_timeout(tmp_path: Path,
     assert not (tmp_path / "main2main-e2e-round-1-310p").exists()
 
 
+def test_wait_chip_results_dead_resident_raises(tmp_path: Path,
+                                                monkeypatch) -> None:
+    # A resident whose prepare-<chip> job died will never push results —
+    # the wait must raise (fail the run) instead of waiting out the
+    # timeout.  This is a runner death, NOT a test failure.
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",
+                                         signal_repo="fork/x",
+                                         prep_run_id="777")
+    monkeypatch.setattr(e2e_dispatch, "_fetch_round_results",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(e2e_dispatch, "_probe_dead_residents",
+                        lambda cfg, chips: [("a2", "failure")])
+    clock = _fake_clock()
+    monkeypatch.setattr(e2e_dispatch, "time", clock)
+    with pytest.raises(e2e_dispatch.ResidentRunnerError, match="a2"):
+        e2e_dispatch.wait_chip_results(cfg, ["a2", "310p"], 1, 10, tmp_path)
+
+
+# ---- resident job death probe ----------------------------------------------
+
+def _jobs_payload(jobs: list[dict]) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"jobs": jobs}), stderr="")
+
+
+def test_probe_dead_residents_parses_jobs(monkeypatch) -> None:
+    cfg = e2e_dispatch.E2EDispatchConfig(repo="fork/x", prep_run_id="777")
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        return _jobs_payload([
+            # dead: a2 completed with a terminal failure conclusion
+            {"name": "prepare-a2-33265683444", "status": "completed",
+             "conclusion": "failure"},
+            # alive: resident loop keeps the job in_progress
+            {"name": "prepare-a3-33265683444", "status": "in_progress",
+             "conclusion": None},
+            # 310p finished successfully — normal self-release, not a death
+            {"name": "prepare-310p-33265683444", "status": "completed",
+             "conclusion": "success"},
+        ])
+
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run", fake_run)
+    dead = e2e_dispatch._probe_dead_residents(cfg, ["a2", "a3", "310p"])
+    assert dead == [("a2", "failure")]
+    assert seen and "runs/777/jobs" in seen[0][2]
+
+
+def test_probe_dead_residents_tolerant_on_error(monkeypatch) -> None:
+    # gh hiccup / parse error / timeout: probe must degrade to [] — the
+    # next poll retries; a transient probe failure must never kill the run.
+    cfg = e2e_dispatch.E2EDispatchConfig(repo="fork/x", prep_run_id="777")
+
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 60)
+
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run", boom)
+    assert e2e_dispatch._probe_dead_residents(cfg, ["a2"]) == []
+
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(
+                            [], 1, stdout="", stderr="api down"))
+    assert e2e_dispatch._probe_dead_residents(cfg, ["a2"]) == []
+
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(
+                            [], 0, stdout="{broken", stderr=""))
+    assert e2e_dispatch._probe_dead_residents(cfg, ["a2"]) == []
+
+
+def test_probe_dead_residents_no_prep_run_id(monkeypatch) -> None:
+    # Fallback dispatch / local runs have no prep run id — probe is a no-op
+    # and must not touch gh.
+    cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e")
+    def fail(*a, **k):
+        raise AssertionError("gh must not be called without a prep run id")
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run", fail)
+    assert e2e_dispatch._probe_dead_residents(cfg, ["a2"]) == []
+
+
+def test_from_env_prep_run_id(monkeypatch) -> None:
+    monkeypatch.setenv("MAIN2MAIN_E2E_PREP_RUN_ID", "33267333442")
+    cfg = e2e_dispatch.E2EDispatchConfig.from_env()
+    assert cfg.prep_run_id == "33267333442"
+    monkeypatch.delenv("MAIN2MAIN_E2E_PREP_RUN_ID")
+    assert e2e_dispatch.E2EDispatchConfig.from_env().prep_run_id == ""
+
+
 def test_run_external_e2e_timeout_returns_failed_result(
         tmp_path: Path, monkeypatch) -> None:
     cfg = e2e_dispatch.E2EDispatchConfig(signal_branch="main2main_e2e",

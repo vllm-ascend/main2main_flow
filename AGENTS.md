@@ -17,7 +17,7 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
 
 ## Layout
 
-- `main2main_flow/flow.py` — the Flow; node order: `initialize → _warmup_mega_moe → analyze_commit_and_plan_step → process_steps (per-step _ai_analysis + _run_e2e_test, then _final_quality_gate) → generate_final_post → persist_lessons → push_to_github`. Routing uses string signals defined in `scripts/utils/utils.py` (`HasCommit`, `HasNoCommit`, `UpgradeCompleted`, `UpgradeFailed`). Two early exits: `HasNoCommit` (nothing to adapt) and `current_step == 0` after process_steps (no PR — nothing passed e2e).
+- `main2main_flow/flow.py` — the Flow; node order: `initialize → analyze_commit_and_plan_step → process_steps (per-step _ai_analysis + _run_e2e_test, then _final_quality_gate) → generate_final_post → persist_lessons → push_to_github`. Routing uses string signals defined in `scripts/utils/utils.py` (`HasCommit`, `HasNoCommit`, `UpgradeCompleted`, `UpgradeFailed`). Two early exits: `HasNoCommit` (nothing to adapt) and `current_step == 0` after process_steps (no PR — nothing passed e2e).
 - `main2main_flow/cli.py` — CLI entry point (`kickoff`).
 - `main2main_flow/agents/` — agent SKILL.md files and per-role reference docs consumed by opencode. Each role is a self-contained directory:
   - `adapter/SKILL.md` + `adapter/reference/` — adapt and fix modes (MCP is PRIMARY, grep is FALLBACK)
