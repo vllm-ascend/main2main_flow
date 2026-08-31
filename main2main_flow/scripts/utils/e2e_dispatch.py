@@ -47,7 +47,7 @@ from main2main_flow.scripts.utils.utils import run_git, ts_print
 _RUNNER_REWRITE: tuple[tuple[str, str, str], ...] = (
     ("linux-aarch64-a2b3-", "linux-aarch64-a2-1",
      "9.1.0-910b-ubuntu22.04-py3.12"),
-    ("linux-aarch64-a3-", "linux-aarch64-a3-8-sh-001",
+    ("linux-aarch64-a3-", "linux-aarch64-a3-800i-2-cn12-001",
      "9.1.0-a3-ubuntu22.04-py3.12"),
     ("linux-aarch64-310p-", "linux-aarch64-310p-1",
      "9.1.0-310p-ubuntu22.04-py3.12"),

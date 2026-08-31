@@ -241,9 +241,9 @@ def test_rewrite_runner() -> None:
         ("linux-aarch64-a2b3-1", "linux-aarch64-a2-1"),
         ("linux-aarch64-a2b3-2", "linux-aarch64-a2-1"),
         ("linux-aarch64-a2b3-4", "linux-aarch64-a2-1"),
-        ("linux-aarch64-a3-2", "linux-aarch64-a3-8-sh-001"),
-        ("linux-aarch64-a3-4", "linux-aarch64-a3-8-sh-001"),
-        ("linux-aarch64-a3-8", "linux-aarch64-a3-8-sh-001"),
+        ("linux-aarch64-a3-2", "linux-aarch64-a3-800i-2-cn12-001"),
+        ("linux-aarch64-a3-4", "linux-aarch64-a3-800i-2-cn12-001"),
+        ("linux-aarch64-a3-8", "linux-aarch64-a3-800i-2-cn12-001"),
         ("linux-aarch64-310p-1", "linux-aarch64-310p-1"),
         ("linux-aarch64-310p-2", "linux-aarch64-310p-1"),
         ("linux-aarch64-310p-4", "linux-aarch64-310p-1"),
@@ -286,7 +286,7 @@ def test_compute_test_groups(monkeypatch, tmp_path: Path) -> None:
     assert len(result) == 2  # cpu group dropped
     assert result[0]["runner"] == "linux-aarch64-a2-1"
     assert result[0]["image_tag"] == "9.1.0-910b-ubuntu22.04-py3.12"
-    assert result[1]["runner"] == "linux-aarch64-a3-8-sh-001"
+    assert result[1]["runner"] == "linux-aarch64-a3-800i-2-cn12-001"
     assert result[1]["image_tag"] == "9.1.0-a3-ubuntu22.04-py3.12"
 
 
@@ -313,7 +313,7 @@ def test_compute_test_groups_drops_non_resident_chips(
     monkeypatch.setattr(e2e_dispatch.subprocess, "run", fake_run)
     result = e2e_dispatch.compute_test_groups(tmp_path, ["vllm/x.py"])
     assert [g["npu_type"] for g in result] == ["a2", "a3"]
-    assert result[1]["runner"] == "linux-aarch64-a3-8-sh-001"
+    assert result[1]["runner"] == "linux-aarch64-a3-800i-2-cn12-001"
 
 
 def test_compute_test_groups_empty_changed_files(tmp_path: Path) -> None:
@@ -387,7 +387,7 @@ def test_apply_minimal_filter_cross_chip_override(monkeypatch) -> None:
          "image_tag": "9.1.0-910b-ubuntu22.04-py3.12",
          "tests": "tests/e2e/pull_request/one_card/test_qwen3_0_6b.py "
                   "tests/e2e/pull_request/one_card/test_sampler.py"},
-        {"npu_type": "a3", "num_npus": 2, "runner": "linux-aarch64-a3-8-sh-001",
+        {"npu_type": "a3", "num_npus": 2, "runner": "linux-aarch64-a3-800i-2-cn12-001",
          "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
          "tests": "tests/e2e/pull_request/two_card/test_gemma4.py"},
     ]
