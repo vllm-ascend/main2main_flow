@@ -232,10 +232,12 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 
 - **version_strings**：扫描本次 `git diff upstream/main` 中新增的行，找出 `vllm_version_is("...")` 调用，检查版本号是否与 `release_tag` 一致
 - **temp_files**：检查工作区是否有 `.patch`、`.log`、`.jsonl`、`vllm_changes.md` 等临时文件
-- **broken_imports**：验证新增的 `from vllm.X import Y` 引用的模块在 vllm 源码树中存在；若在 `vllm_version_is` guard 内，自动补 `# type: ignore[import-not-found]`。同时检查 import 的**符号**在 pinned release 树（vllm-ascend 当前固定版本）中也存在——只存在于 main 的 unguarded import 会崩掉 release 分支
+- **broken_imports**：验证新增的 `from vllm.X import Y` 引用的模块在 vllm 源码树中存在；若在 `vllm_version_is` guard 内，自动补 `# type: ignore[import-not-found]`
 - **format**：跑快速格式检查（`_check_fast_format`），只报非自动修复类错误（ruff E501/F821/F841、codespell 等），过滤 gitleaks/shellcheck 环境噪声
+- **mypy**：`_check_mypy`（仅传入 `vllm_path` 时），单 main vllm 版本，lint 等价隔离 venv，3 个 python 版本各跑一遍
+- **ut**：`_check_ut`（仅传入 `vllm_path` 时），单 main vllm 版本的 CPU-UT batch（见 Step 3c 的 UT 说明）
 
-（mypy 与完整 UT 检查不在每步的 pre-CI 里，而是在 push 前的 final quality gate 统一执行，见 Step 3c。）
+UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行（单 main 版本），让类型/单测回归提前到每一步暴露；push 前的 final quality gate 会在最终累积 diff 上再统一执行一遍（见 Step 3c）。
 
 校验结果写入 `workspace/steps/<step-id>/pre_ci_check.json`（每次尝试覆盖）。
 
@@ -321,8 +323,8 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 `process_steps` 全部步骤成功后、push 前执行的质量门禁，在**最终累计 diff** 上复刻 CI 的三个检查（format / mypy / UT），任何一项不过就进入 adapter fix 模式（最多 3 轮），每轮 fix 后重新确认。
 
 - **format**：跑完整 `bash format.sh`
-- **mypy**：`_check_mypy` 用 lint 等价的隔离 venv（`--system-site-packages` + 按 triton-ascend metadata 安装匹配的 numpy），对**固定版本树**和 **main 树**各跑一遍（`vllm_release_path` 存在时额外 +3 次调用，约 4 分钟），捕获只在 release 分支暴露的签名不匹配
-- **UT**：`_check_ut`（`ut_check.py`）跑 CPU-UT（全部 `tests/ut/*` 中 CPU 路由的用例），每文件独立进程 + 假 npu-smi 注入（PATH 前置一个 `exit 1` 的 npu-smi 脚本，骗过 `tests/ut/conftest.py` 的 mock 检测），venv + 与 CI 一致的依赖，16 进程并行、每文件 300s 超时。A2 NPU UT 是单独 batch（`MAIN2MAIN_UT_SKIP_A2=true` 可跳过）。UT batch 内设置 `HF_HUB_OFFLINE=1` + `VLLM_USE_MODELSCOPE=True`，与 PR CI 的 cpu-0 runner 环境对齐
+- **mypy**：`_check_mypy` 用 lint 等价的隔离 venv（`--system-site-packages` + 按 triton-ascend metadata 安装匹配的 numpy），单 **main 树**验证（3 个 python 版本各一遍）
+- **UT**：`_check_ut`（`ut_check.py`）跑 CPU-UT（全部 `tests/ut/*` 中 CPU 路由的用例），**单 main 版本**，每文件独立进程 + 假 npu-smi 注入（PATH 前置一个 `exit 1` 的 npu-smi 脚本，骗过 `tests/ut/conftest.py` 的 mock 检测），venv + 与 CI 一致的依赖，16 进程并行、每文件 300s 超时。A2 NPU UT 是单独 batch（`MAIN2MAIN_UT_SKIP_A2=true` 可跳过）。UT batch 内设置 `HF_HUB_OFFLINE=1` + `VLLM_USE_MODELSCOPE=True`，与 PR CI 的 cpu-0 runner 环境对齐
 
 门禁失败进入 fix 模式时，错误详情（含 UT 失败用例的 traceback 摘要）通过 `error_logs` 喂给 adapter，修复后重新跑 e2e 回归确认没有破坏功能。
 

@@ -14,7 +14,7 @@ NPU runner.  See pre_ci_check._check_ut docstring for details.
 
 Usage:
     passed, error_logs = run_final_quality_gate(
-        ascend_path, vllm_path, release_tag, log_dir,
+        ascend_path, vllm_path, log_dir,
     )
     if not passed:
         # error_logs contains quality_gate.json path for adapter-fix
@@ -35,15 +35,12 @@ from main2main_flow.scripts.utils.utils import exclude_generated_artifacts, ts_p
 def run_final_quality_gate(
     ascend_path: str | Path,
     vllm_path: str | Path,
-    release_tag: str,
     log_dir: Path,
-    vllm_release_path: str | Path | None = None,
 ) -> tuple[bool, list[str]]:
     """Run format + mypy on the final cumulative diff, before push.
 
-    UT gate runs the CPU-UT batch against BOTH the target main checkout
-    and the pinned release tag (vllm_release_path, e.g. v0.26.0) when
-    available.
+    UT gate runs the CPU-UT batch against the target main vllm checkout
+    only (single-version validation).
 
     Returns (passed, error_logs).  error_logs is empty when passed;
     otherwise contains a single path to quality_gate.json (which holds
@@ -73,11 +70,9 @@ def run_final_quality_gate(
              + (" + UT" if ut_enabled else " (UT DISABLED)") + " on final diff...")
 
     fmt = _check_format(repo)
-    mypy = _check_mypy(repo, vllm_path, vllm_release_path=vllm_release_path)
+    mypy = _check_mypy(repo, vllm_path)
     if ut_enabled:
-        ut = _check_ut(repo, vllm_path,
-                       vllm_release_path=vllm_release_path,
-                       release_tag=release_tag)
+        ut = _check_ut(repo, vllm_path)
     else:
         ut = {"violations": [], "detail": "UT gate disabled (MAIN2MAIN_UT_GATE=0)",
               "skipped": True}
