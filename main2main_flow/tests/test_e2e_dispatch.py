@@ -274,6 +274,10 @@ def test_compute_test_groups(monkeypatch, tmp_path: Path) -> None:
     env = {"GITHUB_OUTPUT": ""}
 
     def fake_run(cmd, **kwargs):
+        # Regression pin: upstream #14793 removed --pr-labels from
+        # select_tests.py (argparse exit 2 when passed); the invocation
+        # must never carry it again.
+        assert "--pr-labels" not in cmd
         return subprocess.CompletedProcess(
             cmd, 0,
             stdout=(f"test_groups={payload}\nhas_tests=true\n"

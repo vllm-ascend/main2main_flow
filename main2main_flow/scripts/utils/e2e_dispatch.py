@@ -111,13 +111,17 @@ def compute_test_groups(ascend_path: Path,
                         changed_files: list[str]) -> list[dict]:
     """Compute the ready-all test groups via vllm-ascend's select_tests.py.
 
-    Same command shape as PR CI's ready-all flow, but the changed files
-    are passed explicitly via ``--changed-files``: the adaptation changes
-    are UNCOMMITTED in the working tree (steps are committed only after
-    their e2e round passes), so select_tests.py's ``--diff-base`` mode —
-    which computes ``git diff base...HEAD`` — sees an empty diff and
-    matches no modules (observed 2026-08-26: "no test groups for changed
-    files").  CPU groups are dropped (UT runs on the CPU runner via the
+    The changed files are passed explicitly via ``--changed-files``: the
+    adaptation changes are UNCOMMITTED in the working tree (steps are
+    committed only after their e2e round passes), so select_tests.py's
+    ``--diff-base`` mode — which computes ``git diff base...HEAD`` — sees
+    an empty diff and matches no modules (observed 2026-08-26: "no test
+    groups for changed files").  No ``--pr-labels`` is passed: upstream
+    #14793 removed the flag entirely (exit 2 otherwise, observed
+    2026-08-31 run 33379683113), while the older generation treats labels
+    as opt-in gating — absent labels select the full matched module set,
+    which is exactly what the chip allowlist + MINIMAL filter then narrow
+    down.  CPU groups are dropped (UT runs on the CPU runner via the
     final quality gate) and runner labels are rewritten onto the three
     main2main runners.
     """
@@ -128,7 +132,7 @@ def compute_test_groups(ascend_path: Path,
         raise RuntimeError(f"select_tests.py not found at {select_script}")
     r = subprocess.run(
         [sys.executable, str(select_script), "--changed-files",
-         *changed_files, "--pr-labels", "ready-all"],
+         *changed_files],
         cwd=str(ascend_path), capture_output=True, text=True,
         env={**os.environ, "GITHUB_OUTPUT": ""},  # force stdout output
     )
