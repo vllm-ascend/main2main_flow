@@ -1,11 +1,145 @@
 """Baseline ref + PR target wiring of push_to_github / flow.push_to_github."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from main2main_flow.scripts.utils import push_to_github
+
+
+# ---- _push_via_proxy: pack-size guards (negotiation seed + 413 fallback) ----
+
+def _ok(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+
+def test_push_via_proxy_seeds_absent_remote_tip(monkeypatch,
+                                                tmp_path: Path) -> None:
+    # Fresh-mode histories lack the fork's destination tip; without it the
+    # push pack degenerates to a full tree (HTTP 413 at the proxy).  A
+    # shallow fetch of just that tip must happen before the push.
+    (tmp_path / "r").mkdir()
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        args = list(cmd)
+        if "ls-remote" in args:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="abc1234567890 refs/heads/b1\n", stderr="")
+        if "cat-file" in args:
+            seen["catfile_tip"] = args[-1]
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if "fetch" in args:
+            seen["seed"] = args
+            return _ok(cmd)
+        if "push" in args and "m2m-push" in args:
+            seen["push"] = args
+            return _ok(cmd)
+        return _ok(cmd)
+
+    monkeypatch.setattr(push_to_github.subprocess, "run", fake_run)
+    monkeypatch.setenv("GH_TOKEN", "t0k")
+    push_to_github._push_via_proxy(tmp_path / "r", "org/fork",
+                                   "HEAD:refs/heads/b1", "--force")
+    assert seen["catfile_tip"].endswith("abc1234567890^{commit}")
+    seed = seen["seed"]
+    assert "--depth" in seed and "1" in seed
+    assert "refs/heads/b1" in seed
+    assert any("gh-proxy.test.osinfra.cn" in str(a) for a in seed)
+    # The push itself still ran (after the seed).
+    assert seen["push"]
+
+
+def test_push_via_proxy_skips_seed_when_tip_present(monkeypatch,
+                                                    tmp_path: Path) -> None:
+    # Normal case: the client already has the remote tip — no seed fetch.
+    (tmp_path / "r").mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        args = list(cmd)
+        calls.append(args)
+        if "ls-remote" in args:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="abc1234567890 refs/heads/b1\n", stderr="")
+        if "cat-file" in args:
+            return _ok(cmd)  # tip exists locally
+        if "push" in args and "m2m-push" in args:
+            return _ok(cmd)
+        return _ok(cmd)
+
+    monkeypatch.setattr(push_to_github.subprocess, "run", fake_run)
+    monkeypatch.setenv("GH_TOKEN", "t0k")
+    push_to_github._push_via_proxy(tmp_path / "r", "org/fork",
+                                   "HEAD:refs/heads/b1", "--force")
+    assert not any("fetch" in c for c in calls)
+
+
+def test_push_via_proxy_413_falls_back_to_direct(monkeypatch,
+                                                 tmp_path: Path) -> None:
+    # HTTP 413 from the proxy is deterministic (body-size rejection) — the
+    # same refspec must be retried direct against github.com, whose
+    # token-in-URL form bypasses the runner's insteadOf rewrite.
+    (tmp_path / "r").mkdir()
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        args = list(cmd)
+        if "push" in args and "m2m-push" in args:
+            seen["proxy"] = args
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout="",
+                stderr="error: RPC failed; HTTP 413 curl 22 The requested "
+                       "URL returned error: 413\n"
+                       "fatal: the remote end hung up unexpectedly")
+        direct = [a for a in args
+                  if a.startswith("https://x-access-token:")
+                  and a.endswith("@github.com/org/fork.git")]
+        if "push" in args and direct:
+            seen["direct_url"] = direct[0]
+            return _ok(cmd)
+        return _ok(cmd)
+
+    monkeypatch.setattr(push_to_github.subprocess, "run", fake_run)
+    monkeypatch.setenv("GH_TOKEN", "t0k")
+    push_to_github._push_via_proxy(tmp_path / "r", "org/fork",
+                                   "HEAD:refs/heads/b1", "--force")
+    assert "proxy" in seen
+    assert seen["direct_url"] == "https://x-access-token:t0k@github.com/org/fork.git"
+
+
+def test_push_via_proxy_413_direct_failure_continues(monkeypatch,
+                                                     tmp_path: Path) -> None:
+    # Direct fallback failing (e.g. egress blocked) must not abort the
+    # retry loop — later proxy attempts still happen.
+    (tmp_path / "r").mkdir()
+    proxy_pushes: list[int] = []
+
+    def fake_run(cmd, **kwargs):
+        args = list(cmd)
+        if "push" in args and "m2m-push" in args:
+            proxy_pushes.append(len(proxy_pushes))
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout="",
+                stderr="error: RPC failed; HTTP 413 curl 22 "
+                       "The requested URL returned error: 413")
+        direct = [a for a in args
+                  if a.startswith("https://x-access-token:")
+                  and a.endswith("@github.com/org/fork.git")]
+        if "push" in args and direct:
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout="", stderr="Could not resolve host")
+        return _ok(cmd)
+
+    monkeypatch.setattr(push_to_github.subprocess, "run", fake_run)
+    monkeypatch.setattr(push_to_github.time, "sleep", lambda s: None)
+    monkeypatch.setenv("GH_TOKEN", "t0k")
+    with pytest.raises(subprocess.CalledProcessError):
+        push_to_github._push_via_proxy(tmp_path / "r", "org/fork",
+                                       "HEAD:refs/heads/b1", "--force")
+    assert len(proxy_pushes) == 6  # all proxy attempts were made
 
 
 def test_update_baseline_ref_default(monkeypatch, tmp_path: Path) -> None:

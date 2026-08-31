@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -189,6 +190,12 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
     allows anonymous fetch but needs a PAT token in the URL for push.
     Retries 6 times with capped linear backoff (~3.5 min window).
 
+    Two pack-size guards: before pushing, the remote destination tip is
+    shallow-fetched when absent locally (keeps the pack a delta even when
+    the local history diverges from the fork), and on an HTTP 413 rejection
+    the same refspec is retried DIRECT against github.com (the resident
+    jobs' results pushes prove that route works from the runners).
+
     If ``lease_branch`` is given, re-fetch that branch to
     ``refs/remotes/m2m-lease/<branch>`` before EACH attempt - the lease ref
     must be fresh, or a stale ref makes --force-with-lease fail with
@@ -214,6 +221,36 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
     )
     cwd = str(ascend_path) if ascend_path else None
     attempts = 6
+
+    # Negotiation seed: the push pack degenerates to a full tree when the
+    # client lacks the remote destination tip (fresh-mode histories diverge
+    # from the fork), which once blew past the proxy's HTTP 413 body limit.
+    # Shallow-fetch just that tip so pack-objects can exclude its tree as a
+    # "have".  Best effort — a failed seed leaves negotiation to the push.
+    dst = refspec.rsplit(":", 1)[-1] if ":" in refspec else ""
+    dst_branch = (dst[len("refs/heads/"):]
+                  if dst.startswith("refs/heads/") else "")
+    if dst_branch:
+        ls = subprocess.run(
+            ["git", "ls-remote", f"https://github.com/{head_fork}.git",
+             f"refs/heads/{dst_branch}"],
+            cwd=cwd, capture_output=True, text=True, timeout=120)
+        tip = ls.stdout.split()[0] if (ls.returncode == 0
+                                       and ls.stdout.split()) else ""
+        have_tip = subprocess.run(
+            ["git", "cat-file", "-e", tip + "^{commit}"],
+            cwd=cwd, capture_output=True).returncode == 0
+        if tip and not have_tip:
+            sf = subprocess.run(
+                ["git", "fetch", "--force", "--no-tags", "--depth", "1",
+                 proxy_url, f"refs/heads/{dst_branch}"],
+                cwd=cwd, capture_output=True, text=True, timeout=300)
+            if sf.returncode == 0:
+                ts_print(f"[push] negotiation seed: remote {dst_branch} tip "
+                         f"{tip[:12]} was absent locally — fetched shallow")
+            else:
+                ts_print(f"[push] negotiation seed fetch failed (push "
+                         f"continues): {sf.stderr.strip()[:200]}")
 
     last_error = ""
     for attempt in range(1, attempts + 1):
@@ -251,6 +288,25 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
             f"(exit {r.returncode}):\n{last_error}",
             flush=True,
         )
+        if re.search(r"\b413\b", last_error):
+            # HTTP 413 = the proxy rejected the request body outright —
+            # deterministic, so retrying through the same path cannot help.
+            # The resident jobs' results pushes already go DIRECT to
+            # github.com successfully (a token-in-URL is not matched by the
+            # runner's url.*.insteadOf rewrite, so it bypasses the proxy).
+            direct_url = (f"https://x-access-token:{token}"
+                          f"@github.com/{head_fork}.git")
+            dr = subprocess.run(
+                ["git", "-c", "http.https://github.com/.extraheader=",
+                 "push", *push_args, direct_url, refspec],
+                cwd=cwd, capture_output=True, text=True, timeout=900,
+            )
+            if dr.returncode == 0:
+                ts_print("[push] proxy rejected the pack (HTTP 413); "
+                         "direct github.com push succeeded", flush=True)
+                return
+            ts_print(f"[push] direct github.com push also failed: "
+                     f"{dr.stderr.strip()[-400:]}", flush=True)
         if attempt < attempts:
             time.sleep(min(15 * attempt, 60))
 
