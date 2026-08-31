@@ -196,6 +196,13 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
     the same refspec is retried DIRECT against github.com (the resident
     jobs' results pushes prove that route works from the runners).
 
+    Routes rotate across attempts: gh-proxy first, then the runner's own
+    git-cdn rewrite (``url.*.insteadOf``) when one is configured, with a
+    413'd route dropped from the rotation (its rejection is deterministic).
+    gh-proxy sits behind a public WAF whose body-size limit produced
+    30 consecutive 413s (run 33365868688); the git-cdn route is in-cluster
+    and does not traverse that WAF.
+
     If ``lease_branch`` is given, re-fetch that branch to
     ``refs/remotes/m2m-lease/<branch>`` before EACH attempt - the lease ref
     must be fresh, or a stale ref makes --force-with-lease fail with
@@ -221,6 +228,28 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
     )
     cwd = str(ascend_path) if ascend_path else None
     attempts = 6
+
+    # Second proxy route: the runner's own github rewrite
+    # (``url.*.insteadOf``, e.g. an in-cluster git-cdn service).  It is
+    # reachable wherever the runner's fetches work, and it does not sit
+    # behind the public WAF fronting gh-proxy.  Discovered at runtime with
+    # the token embedded — the pattern proven by _resolve_push_targets
+    # (lessons.py); hosts without the rewrite simply get no extra route.
+    gitcdn_url = ""
+    cfg = subprocess.run(
+        ["git", "config", "--get-regexp", r"^url\..*\.insteadof$"],
+        cwd=cwd, capture_output=True, text=True)
+    for line in cfg.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if "github.com" not in value:
+            continue
+        base = key[len("url."):-len(".insteadof")]
+        scheme, _, rest = base.partition("://")
+        if scheme and rest:
+            gitcdn_url = (f"{scheme}://x-access-token:{token}@{rest}"
+                          f"https://github.com/{head_fork}.git")
+        break
+    routes = [proxy_url] + ([gitcdn_url] if gitcdn_url else [])
 
     # Negotiation seed: the push pack degenerates to a full tree when the
     # client lacks the remote destination tip (fresh-mode histories diverge
@@ -254,6 +283,9 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
 
     last_error = ""
     for attempt in range(1, attempts + 1):
+        # Rotate routes across attempts: a proxy-specific failure (WAF 413,
+        # transient outage) must not burn every attempt on the same path.
+        route = routes[(attempt - 1) % len(routes)]
         push_args = extra_args
         if lease_branch:
             lf = subprocess.run(
@@ -269,7 +301,7 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
                     for a in extra_args)
         subprocess.run(["git", "remote", "remove", push_remote],
                        cwd=cwd, capture_output=True, text=True)
-        subprocess.run(["git", "remote", "add", push_remote, proxy_url],
+        subprocess.run(["git", "remote", "add", push_remote, route],
                        cwd=cwd, capture_output=True, text=True)
         r = subprocess.run(
             ["git", "-c", "http.https://github.com/.extraheader=",
@@ -291,6 +323,15 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
         if re.search(r"\b413\b", last_error):
             # HTTP 413 = the proxy rejected the request body outright —
             # deterministic, so retrying through the same path cannot help.
+            # Drop the offending route from the rotation (kept when it is
+            # the only route, preserving the retry-with-backoff behavior
+            # for single-route hosts) and try the remaining ones.
+            if len(routes) > 1:
+                routes = ([u for u in routes if u != route]
+                          or [f"https://x-access-token:{token}"
+                              f"@github.com/{head_fork}.git"])
+                ts_print(f"[push] 413: dropped a proxy route from rotation "
+                         f"({len(routes)} route(s) left)", flush=True)
             # The resident jobs' results pushes already go DIRECT to
             # github.com successfully (a token-in-URL is not matched by the
             # runner's url.*.insteadOf rewrite, so it bypasses the proxy).

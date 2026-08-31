@@ -142,6 +142,89 @@ def test_push_via_proxy_413_direct_failure_continues(monkeypatch,
     assert len(proxy_pushes) == 6  # all proxy attempts were made
 
 
+def test_push_via_proxy_rotates_to_gitcdn_on_transient_failure(
+        monkeypatch, tmp_path: Path) -> None:
+    # The runner's url.*.insteadOf rewrite (in-cluster git-cdn) is a second
+    # push route discovered at runtime: after the first route fails with a
+    # transient error, the next attempt must go through it.
+    (tmp_path / "r").mkdir()
+    remotes: list[str] = []
+    last_url = [""]
+
+    def fake_run(cmd, **kwargs):
+        args = list(cmd)
+        if "--get-regexp" in args:
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                stdout="url.http://git-cdn.internal:8000/.insteadof "
+                       "https://github.com/\n", stderr="")
+        if "remote" in args and "add" in args:
+            last_url[0] = args[-1]
+            return _ok(cmd)
+        if "push" in args and "m2m-push" in args:
+            remotes.append(last_url[0])
+            if len(remotes) == 1:
+                return subprocess.CompletedProcess(
+                    cmd, 128, stdout="", stderr="Could not resolve host")
+            return _ok(cmd)
+        return _ok(cmd)
+
+    monkeypatch.setattr(push_to_github.subprocess, "run", fake_run)
+    monkeypatch.setenv("GH_TOKEN", "t0k")
+    push_to_github._push_via_proxy(tmp_path / "r", "org/fork",
+                                   "HEAD:refs/heads/b1", "--force")
+    assert remotes[0].startswith(
+        "https://x-access-token:t0k@gh-proxy.test.osinfra.cn/")
+    assert remotes[1] == ("http://x-access-token:t0k@git-cdn.internal:8000/"
+                          "https://github.com/org/fork.git")
+
+
+def test_push_via_proxy_413_drops_proxy_route_for_gitcdn(
+        monkeypatch, tmp_path: Path) -> None:
+    # A 413 is deterministic (body-size rejection) — the offending route
+    # must leave the rotation so later attempts stop burning on it.
+    (tmp_path / "r").mkdir()
+    remotes: list[str] = []
+    last_url = [""]
+
+    def fake_run(cmd, **kwargs):
+        args = list(cmd)
+        if "--get-regexp" in args:
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                stdout="url.http://git-cdn.internal:8000/.insteadof "
+                       "https://github.com/\n", stderr="")
+        if "remote" in args and "add" in args:
+            last_url[0] = args[-1]
+            return _ok(cmd)
+        if "push" in args and "m2m-push" in args:
+            remotes.append(last_url[0])
+            if last_url[0].startswith("https://x-access-token:t0k@gh-proxy"):
+                return subprocess.CompletedProcess(
+                    cmd, 128, stdout="",
+                    stderr="error: RPC failed; HTTP 413 curl 22 The "
+                           "requested URL returned error: 413")
+            return _ok(cmd)
+        direct = [a for a in args
+                  if a.startswith("https://x-access-token:")
+                  and a.endswith("@github.com/org/fork.git")]
+        if "push" in args and direct:
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout="", stderr="timeout")
+        return _ok(cmd)
+
+    monkeypatch.setattr(push_to_github.subprocess, "run", fake_run)
+    monkeypatch.setattr(push_to_github.time, "sleep", lambda s: None)
+    monkeypatch.setenv("GH_TOKEN", "t0k")
+    push_to_github._push_via_proxy(tmp_path / "r", "org/fork",
+                                   "HEAD:refs/heads/b1", "--force")
+    gh = [r for r in remotes
+          if r.startswith("https://x-access-token:t0k@gh-proxy")]
+    cdn = [r for r in remotes if "git-cdn.internal" in r]
+    assert len(gh) == 1   # dropped from the rotation after its 413
+    assert len(cdn) >= 1  # rotation moved on and succeeded
+
+
 def test_update_baseline_ref_default(monkeypatch, tmp_path: Path) -> None:
     pushed: list[tuple] = []
     monkeypatch.setattr(push_to_github, "_push_via_proxy",
