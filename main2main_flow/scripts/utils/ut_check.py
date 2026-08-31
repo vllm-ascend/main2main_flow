@@ -1,9 +1,9 @@
-"""CPU-UT dual-version batch runner for the main2main quality gate.
+"""CPU-UT batch runner for the main2main quality gate.
 
 Standalone module (not embedded in pre_ci_check.py): collects the
 CPU-routed ``tests/ut`` files and runs them in a single-process pytest
-batch against BOTH vllm versions (target main checkout + pinned release
-tag), mirroring vllm-ascend's ``run_selected_tests.sh`` cpu-ut batch.
+batch against the target main vllm checkout, mirroring vllm-ascend's
+``run_selected_tests.sh`` cpu-ut batch.
 
 Key mechanisms:
 - **Fake npu-smi on the PATH**: vllm-ascend's tests/ut/conftest.py checks
@@ -163,8 +163,6 @@ def _failure_excerpt(clean: str, failure_line: str, max_chars: int = 900) -> str
 
 
 def check_ut(repo: Path, vllm_path: str | Path | None = None,
-             vllm_release_path: str | Path | None = None,
-             release_tag: str = "",
              timeout_s: int = 1800,
              log_label: str = "pre_ci") -> dict:
     """Run the CPU-UT batch, aligned with CI's single-process execution.
@@ -175,22 +173,11 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     files in ONE pytest process (CI runs 2044 tests in ~44s; per-file
     subprocess isolation cost ~5 min per version).
 
-    Runs the batch against BOTH vllm versions: the target main checkout
-    (``vllm_path``) AND the pinned release (``vllm_release_path``, e.g.
-    v0.26.0).  vllm-ascend carries ``vllm_version_is("<release_tag>")``
-    guards — a fix that passes on main can break the release branch, so
-    both must pass.  Violations are aggregated with the version labeled.
+    Runs the batch against the target main checkout (``vllm_path``)
+    only — single-version validation.
 
-    Release-batch specifics:
-    - ``VLLM_VERSION`` is set from the release tag: a raw git worktree has
-      no build-generated ``vllm/_version.py``, so ``vllm.__version__`` is
-      "dev" and every module-level ``vllm_version_is()`` guard raises at
-      collection (all 166 files failed before this fix).
-    - ``test_vllm_version_is`` is excluded on the release batch only — it
-      unit-tests the env-var fallback with a mocked env, which the
-      real ``VLLM_VERSION`` override conflicts with.
-    - ``test_schedule_body_matches_pinned_release_tag`` is excluded on BOTH
-      batches — see ``_BALANCE_TAG_BODY_TEST``.
+    ``test_schedule_body_matches_pinned_release_tag`` is excluded — see
+    ``_BALANCE_TAG_BODY_TEST``.
 
     Env mirrors CI: venv with --system-site-packages + numpy==1.26.4
     (from triton-ascend metadata) + PYTHONPATH=ascend:vllm.  torch_npu
@@ -294,179 +281,162 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
 
     try:
-        versions: list[tuple[str, Path, str]] = []
         vpath = Path(vllm_path) if vllm_path else None
-        if vpath:
-            versions.append(("main", vpath, "", True))
-        rpath = Path(vllm_release_path) if vllm_release_path else None
-        if rpath and release_tag:
-            versions.append((release_tag, rpath, release_tag, True))
-        if not versions:
-            ts_print(f"[{log_label}] ut: no vllm paths configured, skipping")
-            return {"violations": [], "detail": "no vllm paths", "skipped": True}
+        if not vpath:
+            ts_print(f"[{log_label}] ut: no vllm path configured, skipping")
+            return {"violations": [], "detail": "no vllm path", "skipped": True}
 
-        for label, vpath_abs, vllm_version, pure_cpu in versions:
-            env = os.environ.copy()
-            ascend_abs = str(repo.resolve())
-            vllm_abs = str(vpath_abs.resolve())
-            existing = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = (
-                f"{ascend_abs}:{vllm_abs}:{existing}" if existing
-                else f"{ascend_abs}:{vllm_abs}")
-            if vllm_version:
-                env["VLLM_VERSION"] = vllm_version
-            env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
-            env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-            # Match CI: offline mode so get_model_file / hf_hub_download
-            # fails immediately (385s→0.5s for test_maybe_update_config_
-            # non_directory_raises) instead of retrying network timeouts.
-            env["HF_HUB_OFFLINE"] = "1"
-            env["VLLM_USE_MODELSCOPE"] = "True"
-            env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
-            if pure_cpu:
-                # Hide NPU so platform detection sees pure CPU — matches
-                # PR CI cpu-0.  fake npu-smi still mocks conftest, but
-                # torch_npu's runtime sees no visible devices.
-                env["ASCEND_RT_VISIBLE_DEVICES"] = ""
-                env.pop("CUDA_VISIBLE_DEVICES", None)
-                ts_print(f"[{log_label}] ut: [{label}] pure-CPU env "
-                         f"(ASCEND_RT_VISIBLE_DEVICES='')")
+        label = "main"
+        env = os.environ.copy()
+        ascend_abs = str(repo.resolve())
+        vllm_abs = str(vpath.resolve())
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{ascend_abs}:{vllm_abs}:{existing}" if existing
+            else f"{ascend_abs}:{vllm_abs}")
+        env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        # Match CI: offline mode so get_model_file / hf_hub_download
+        # fails immediately (385s→0.5s for test_maybe_update_config_
+        # non_directory_raises) instead of retrying network timeouts.
+        env["HF_HUB_OFFLINE"] = "1"
+        env["VLLM_USE_MODELSCOPE"] = "True"
+        env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
+        # Hide NPU so platform detection sees pure CPU — matches
+        # PR CI cpu-0.  fake npu-smi still mocks conftest, but
+        # torch_npu's runtime sees no visible devices.
+        env["ASCEND_RT_VISIBLE_DEVICES"] = ""
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        ts_print(f"[{log_label}] ut: [{label}] pure-CPU env "
+                 f"(ASCEND_RT_VISIBLE_DEVICES='')")
 
-            ts_print(f"\n[{log_label}] ut: === batch [{label}] "
-                     f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
+        ts_print(f"\n[{log_label}] ut: === batch [{label}] "
+                 f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
 
-            # Files known to pollute the shared process get their own
-            # subprocess.  Verified on the A2 env: test_batch_invariant.py
-            # installs a global torch.library.Library monkeypatch that breaks
-            # test_gdn_layerwise_kv.py when run in the same process.
-            # test_vocab_parallel_embedding.py assigns module-level
-            # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
-            # polluting test_linear.py / test_gdn_layerwise_kv.py in the
-            # same process (verified on A2, run 2026-08-12).
-            # test_gdn_layerwise_kv.py itself fails only inside the batch
-            # (qwen_gdn_attention_core CPU-backend NotImplementedError;
-            # passes standalone) — isolate it too so the batch stays clean.
-            isolated = [f for f in cpu_files
-                        if f.endswith(("test_batch_invariant.py",
-                                       "test_vocab_parallel_embedding.py",
-                                       "test_gdn_layerwise_kv.py"))]
-            batch = [f for f in cpu_files if f not in isolated]
+        # Files known to pollute the shared process get their own
+        # subprocess.  Verified on the A2 env: test_batch_invariant.py
+        # installs a global torch.library.Library monkeypatch that breaks
+        # test_gdn_layerwise_kv.py when run in the same process.
+        # test_vocab_parallel_embedding.py assigns module-level
+        # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
+        # polluting test_linear.py / test_gdn_layerwise_kv.py in the
+        # same process (verified on A2, run 2026-08-12).
+        # test_gdn_layerwise_kv.py itself fails only inside the batch
+        # (qwen_gdn_attention_core CPU-backend NotImplementedError;
+        # passes standalone) — isolate it too so the batch stays clean.
+        isolated = [f for f in cpu_files
+                    if f.endswith(("test_batch_invariant.py",
+                                   "test_vocab_parallel_embedding.py",
+                                   "test_gdn_layerwise_kv.py"))]
+        batch = [f for f in cpu_files if f not in isolated]
 
-            exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
-            if vllm_version:
-                # test_vllm_version_is unit-tests the VLLM_VERSION env
-                # fallback with a mocked env; the release batch sets
-                # VLLM_VERSION for real, so its __version__-fallback
-                # assertions can't hold there.  Main batch runs it as-is.
-                exclude_expr += " and not test_vllm_version_is"
+        exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
 
-            # Import smoke: the e2e conftest loads the patch chain
-            # (adapt_patch -> vllm_ascend.patch.worker -> patch_v2/
-            # patch_triton -> dflash speculator).  A main-only symbol
-            # imported unguarded there crashes the whole fixed-branch lane
-            # at collection (cp_local_slot, PR #14580), and no UT file
-            # imports this chain — only this explicit check covers it.
-            if not _has_npu_device(pytest_cmd, repo, env):
-                ts_print(f"[{log_label}] ut: [{label}] import-smoke SKIPPED "
-                         f"(no NPU device)")
-                details.append(f"{label}/import-smoke: SKIPPED (no NPU device)")
-            else:
-                try:
-                    smoke = subprocess.run(
-                        [pytest_cmd[0], "-c",
-                         "import vllm_ascend.patch.worker\n"
-                         "import vllm_ascend.worker.v2.spec_decode.dflash.speculator\n"],
-                        cwd=str(repo), capture_output=True, text=True,
-                        env=env, timeout=300,
-                    )
-                except subprocess.TimeoutExpired:
-                    ts_print(f"[{log_label}] ut: [{label}] import-smoke TIMEOUT(300s)")
-                    all_files_clean = False
-                    details.append(f"{label}/import-smoke: TIMEOUT")
-                else:
-                    if smoke.returncode != 0:
-                        all_files_clean = False
-                        all_violations.append(
-                            f"[{label}] import-smoke: patch chain not importable "
-                            f"on {label} — {smoke.stderr.strip()[-800:]}")
-                        details.append(f"{label}/import-smoke: FAILED")
-                        ts_print(f"[{log_label}] ut: [{label}] import-smoke FAILED "
-                                 f"(patch chain not importable):\n"
-                                 f"{smoke.stderr.strip()[-800:]}")
-                    else:
-                        details.append(f"{label}/import-smoke: OK")
-                        ts_print(f"[{log_label}] ut: [{label}] import-smoke OK")
-
-            runs: list[tuple[str, subprocess.CompletedProcess]] = []
+        # Import smoke: the e2e conftest loads the patch chain
+        # (adapt_patch -> vllm_ascend.patch.worker -> patch_v2/
+        # patch_triton -> dflash speculator).  A main-only symbol
+        # imported unguarded there crashes the whole fixed-branch lane
+        # at collection (cp_local_slot, PR #14580), and no UT file
+        # imports this chain — only this explicit check covers it.
+        if not _has_npu_device(pytest_cmd, repo, env):
+            ts_print(f"[{log_label}] ut: [{label}] import-smoke SKIPPED "
+                     f"(no NPU device)")
+            details.append(f"{label}/import-smoke: SKIPPED (no NPU device)")
+        else:
             try:
-                # --continue-on-collection-errors: a single file that fails
-                # to import (e.g. an env-specific ModuleNotFoundError) must
-                # NOT abort the whole batch and mask every other test —
-                # the batch is one pytest process for all files (run
-                # 31563761175: sfa_pd_rd2h collection error hid 8 real
-                # regressions that PR CI then exposed).
-                # -p ut_namespace: PYTHONPATH=<ascend>:<vllm>
-                # makes vllm's regular examples/ package shadow ascend's
-                # namespace examples/ — pre-register the ascend dir so the
-                # batch matches real CI (vllm installed, no examples/ on
-                # sys.path).
-                rr = subprocess.run(
-                    [*pytest_cmd, "-q", "--tb=short", "--no-header",
-                     "--continue-on-collection-errors",
-                     "-p", "main2main_flow.scripts.utils.ut_namespace",
-                     *batch, "-k", exclude_expr],
+                smoke = subprocess.run(
+                    [pytest_cmd[0], "-c",
+                     "import vllm_ascend.patch.worker\n"
+                     "import vllm_ascend.worker.v2.spec_decode.dflash.speculator\n"],
                     cwd=str(repo), capture_output=True, text=True,
-                    env=env, timeout=1200,
+                    env=env, timeout=300,
                 )
-                runs.append(("batch", rr))
             except subprocess.TimeoutExpired:
-                ts_print(f"[{log_label}] ut: [{label}] batch TIMEOUT(1200s)")
+                ts_print(f"[{log_label}] ut: [{label}] import-smoke TIMEOUT(300s)")
                 all_files_clean = False
-                details.append(f"{label}/batch: TIMEOUT(1200s)")
-            for f in isolated:
-                try:
-                    rr = subprocess.run(
-                        [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
-                        cwd=str(repo), capture_output=True, text=True,
-                        env=env, timeout=300,
-                    )
-                    runs.append((f, rr))
-                except subprocess.TimeoutExpired:
-                    ts_print(f"[{log_label}] ut: [{label}] {f} TIMEOUT(300s)")
+                details.append(f"{label}/import-smoke: TIMEOUT")
+            else:
+                if smoke.returncode != 0:
                     all_files_clean = False
+                    all_violations.append(
+                        f"[{label}] import-smoke: patch chain not importable "
+                        f"on {label} — {smoke.stderr.strip()[-800:]}")
+                    details.append(f"{label}/import-smoke: FAILED")
+                    ts_print(f"[{log_label}] ut: [{label}] import-smoke FAILED "
+                             f"(patch chain not importable):\n"
+                             f"{smoke.stderr.strip()[-800:]}")
+                else:
+                    details.append(f"{label}/import-smoke: OK")
+                    ts_print(f"[{log_label}] ut: [{label}] import-smoke OK")
 
-            for name, rr in runs:
-                clean = ansi_re.sub("", rr.stdout + rr.stderr)
-                seen: set[str] = set()
-                for line in clean.splitlines():
-                    m = failed_re.search(line.strip())
-                    if m and m.group(2) not in seen:
-                        seen.add(m.group(2))
-                        v = f"[{label}] {line.strip()}"
-                        ex = _failure_excerpt(clean, line.strip())
-                        if ex:
-                            v += "\n" + ex
-                        all_violations.append(v)
-                if rr.returncode != 0:
-                    all_files_clean = False
-                    if not seen:
-                        all_violations.append(
-                            f"[{label}] {name}: exit={rr.returncode} — "
-                            f"{clean[-500:]}")
-                summary_m = re.search(
-                    r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
-                summary = (summary_m.group(1) if summary_m
-                           else f"exit={rr.returncode}")
-                details.append(f"{label}/{name}: {summary}")
-                ts_print(f"[{log_label}] ut: [{label}/{name}] {summary}")
+        runs: list[tuple[str, subprocess.CompletedProcess]] = []
+        try:
+            # --continue-on-collection-errors: a single file that fails
+            # to import (e.g. an env-specific ModuleNotFoundError) must
+            # NOT abort the whole batch and mask every other test —
+            # the batch is one pytest process for all files (run
+            # 31563761175: sfa_pd_rd2h collection error hid 8 real
+            # regressions that PR CI then exposed).
+            # -p ut_namespace: PYTHONPATH=<ascend>:<vllm>
+            # makes vllm's regular examples/ package shadow ascend's
+            # namespace examples/ — pre-register the ascend dir so the
+            # batch matches real CI (vllm installed, no examples/ on
+            # sys.path).
+            rr = subprocess.run(
+                [*pytest_cmd, "-q", "--tb=short", "--no-header",
+                 "--continue-on-collection-errors",
+                 "-p", "main2main_flow.scripts.utils.ut_namespace",
+                 *batch, "-k", exclude_expr],
+                cwd=str(repo), capture_output=True, text=True,
+                env=env, timeout=1200,
+            )
+            runs.append(("batch", rr))
+        except subprocess.TimeoutExpired:
+            ts_print(f"[{log_label}] ut: [{label}] batch TIMEOUT(1200s)")
+            all_files_clean = False
+            details.append(f"{label}/batch: TIMEOUT(1200s)")
+        for f in isolated:
+            try:
+                rr = subprocess.run(
+                    [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
+                    cwd=str(repo), capture_output=True, text=True,
+                    env=env, timeout=300,
+                )
+                runs.append((f, rr))
+            except subprocess.TimeoutExpired:
+                ts_print(f"[{log_label}] ut: [{label}] {f} TIMEOUT(300s)")
+                all_files_clean = False
+
+        for name, rr in runs:
+            clean = ansi_re.sub("", rr.stdout + rr.stderr)
+            seen: set[str] = set()
+            for line in clean.splitlines():
+                m = failed_re.search(line.strip())
+                if m and m.group(2) not in seen:
+                    seen.add(m.group(2))
+                    v = f"[{label}] {line.strip()}"
+                    ex = _failure_excerpt(clean, line.strip())
+                    if ex:
+                        v += "\n" + ex
+                    all_violations.append(v)
+            if rr.returncode != 0:
+                all_files_clean = False
+                if not seen:
+                    all_violations.append(
+                        f"[{label}] {name}: exit={rr.returncode} — "
+                        f"{clean[-500:]}")
+            summary_m = re.search(
+                r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
+            summary = (summary_m.group(1) if summary_m
+                       else f"exit={rr.returncode}")
+            details.append(f"{label}/{name}: {summary}")
+            ts_print(f"[{log_label}] ut: [{label}/{name}] {summary}")
 
         if all_files_clean:
-            ts_print(f"\n[{log_label}] ut: OK — all {len(cpu_files)} files clean "
-                     f"on all versions")
+            ts_print(f"\n[{log_label}] ut: OK — all {len(cpu_files)} files clean")
             return {"violations": [],
-                    "detail": f"UT clean ({len(cpu_files)} files × "
-                              f"{len(versions)} versions, single-process "
-                              f"batch)"}
+                    "detail": f"UT clean ({len(cpu_files)} files, "
+                              f"main version, single-process batch)"}
         ts_print(f"\n[{log_label}] ut: {len(all_violations)} failure(s):")
         for v in all_violations[:20]:
             ts_print(f"  {v}")

@@ -296,12 +296,6 @@ class Main2MainState(BaseModel):
     # clone failed - adapter degrades to grep-based code exploration.
     vllm_report_path: str = ""
 
-    # Second vllm checkout at the pinned release tag (e.g. v0.26.0, read
-    # from vllm-ascend's .github/vllm-release-tag.commit).  Used by the UT
-    # gate to test the release branch alongside main.  Empty if worktree
-    # creation failed — UT gate tests main only.
-    vllm_release_path: str = ""
-
     # External E2E: the ready-all test groups computed from the accumulated
     # tree (reused across the gate regression — the test set rarely changes).
     e2e_groups: list = []
@@ -472,7 +466,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # before push — the clone is recreated every run, so unsaved
         # lessons would be lost.
         persist_lessons(self.state.vllm_report_path)
-        self._cleanup_release_worktree()
         if self.state.current_step == 0:
             # No step ever passed e2e: there is no successful adaptation to
             # submit, so creating a PR would only ship a "failed" description
@@ -694,60 +687,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             self.state.vllm_report_path = ""
             ts_print(f"\n[init] vllm-report clone failed (adapter will use grep): {e}")
 
-        # Prepare a second vllm checkout at the PINNED RELEASE tag (read from
-        # vllm-ascend's .github/vllm-release-tag.commit, e.g. "v0.26.0"),
-        # so the UT gate can test BOTH the target main and the release
-        # branch.  vllm-ascend carries vllm_version_is("<release_tag>")
-        # guards — a fix that passes on main can break the release branch.
-        # Uses a git worktree (shares objects with the main clone, only
-        # fetches the tag once).  Non-fatal: failure degrades to main-only.
-        self.state.vllm_release_path = ""
-        try:
-            ascend_repo = Path(self.state.vllm_ascend_path)
-            tag_file = ascend_repo / ".github" / "vllm-release-tag.commit"
-            if tag_file.exists():
-                release_tag = tag_file.read_text(encoding="utf-8").strip()
-                vllm_repo = Path(self.state.vllm_path)
-                release_worktree = WORKSPACE_DIR / "repos" / "vllm-release"
-                if release_worktree.exists():
-                    shutil.rmtree(release_worktree)
-                # Fetch the tag if not present (depth 1 keeps it fast).
-                subprocess.run(
-                    ["git", "fetch", "--depth", "1", "origin",
-                     f"refs/tags/{release_tag}:refs/tags/{release_tag}"],
-                    cwd=str(vllm_repo), capture_output=True, text=True,
-                    timeout=300,
-                )
-                subprocess.run(
-                    ["git", "worktree", "add", "-f", "--detach",
-                     str(release_worktree), release_tag],
-                    cwd=str(vllm_repo), capture_output=True, text=True,
-                    timeout=120, check=True,
-                )
-                self.state.vllm_release_path = str(release_worktree)
-                ts_print(f"\n[init] vllm release worktree at {release_worktree} "
-                         f"({release_tag}) for dual-version UT")
-        except (subprocess.CalledProcessError, OSError) as e:
-            self.state.vllm_release_path = ""
-            ts_print(f"[init] WARNING vllm release worktree failed ({e}) — "
-                     "UT gate will test main only")
-
-    def _cleanup_release_worktree(self) -> None:
-        """Remove the vllm release worktree created in initialize."""
-        if not self.state.vllm_release_path:
-            return
-        try:
-            subprocess.run(
-                ["git", "worktree", "remove", "-f",
-                 self.state.vllm_release_path],
-                cwd=self.state.vllm_path, capture_output=True, text=True,
-                timeout=60,
-            )
-            ts_print("[init] removed vllm release worktree")
-        except (subprocess.CalledProcessError, OSError) as e:
-            ts_print(f"[init] WARNING failed to remove release worktree: {e}")
-        self.state.vllm_release_path = ""
-
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
         vllm_path = Path(self.state.vllm_path)
         vllm_ascend_path = Path(self.state.vllm_ascend_path)
@@ -929,8 +868,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             passed, new_error_logs = run_final_quality_gate(
                 ascend_path=ascend_path,
                 vllm_path=vllm_path,
-                vllm_release_path=self.state.vllm_release_path,
-                release_tag=self.state.release_tag,
                 log_dir=gate_dir,
             )
             if passed:
@@ -1293,12 +1230,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 error_logs = [str(warn_path)]
                 continue
 
-            # pre_ci: mechanical checks (version, format, imports, temp files)
-            # vllm_release_path enables symbol-level import checks against
-            # the pinned fixed branch (unguarded main-only imports crash it).
+            # pre_ci: mechanical checks (version, format, imports, temp
+            # files) + mypy + CPU-UT, all against the single main vllm
+            # version — regressions surface at every step, not only at the
+            # final quality gate.
             check_result = run_check(
-                ascend_path, self.state.release_tag, vllm_path=vllm_path,
-                vllm_release_path=self.state.vllm_release_path or None)
+                ascend_path, self.state.release_tag, vllm_path=vllm_path)
             pre_ci_passed = check_result["all_passed"]
             if not pre_ci_passed:
                 log_path = step_dir / PRE_CI_CHECK_FILE

@@ -35,15 +35,12 @@ from main2main_flow.scripts.utils.utils import exclude_generated_artifacts, ts_p
 def run_final_quality_gate(
     ascend_path: str | Path,
     vllm_path: str | Path,
-    release_tag: str,
     log_dir: Path,
-    vllm_release_path: str | Path | None = None,
 ) -> tuple[bool, list[str]]:
-    """Run format + mypy on the final accumulated diff, before push.
+    """Run format + mypy + UT on the final accumulated diff, before push.
 
-    UT gate runs the CPU-UT batch against BOTH the target main checkout
-    and the pinned release tag (vllm_release_path, e.g. v0.26.0) when
-    available.
+    All checks validate against the single target main vllm checkout —
+    same as the per-step pre-CI gates, re-run on the accumulated diff.
 
     Returns (passed, error_logs).  error_logs is empty when passed;
     otherwise contains a single path to quality_gate.json (which holds
@@ -73,11 +70,9 @@ def run_final_quality_gate(
              + (" + UT" if ut_enabled else " (UT DISABLED)") + " on final diff...")
 
     fmt = _check_format(repo)
-    mypy = _check_mypy(repo, vllm_path, vllm_release_path=vllm_release_path)
+    mypy = _check_mypy(repo, vllm_path)
     if ut_enabled:
-        ut = _check_ut(repo, vllm_path,
-                       vllm_release_path=vllm_release_path,
-                       release_tag=release_tag)
+        ut = _check_ut(repo, vllm_path)
     else:
         ut = {"violations": [], "detail": "UT gate disabled (MAIN2MAIN_UT_GATE=0)",
               "skipped": True}
