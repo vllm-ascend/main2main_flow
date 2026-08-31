@@ -439,7 +439,23 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
         run_git(wt, "add", "-A")
         run_git(wt, "commit", "-m",
                 "main2main: e2e signal (accumulated patch + test_groups)")
-        sha = run_git(wt, "rev-parse", "HEAD").strip()
+        # Re-commit as an orphan: the residents consume only the snapshot
+        # tree (fetch -> command.json -> checkout --detach), never the
+        # history.  A parentless commit keeps the push pack at tree-diff
+        # size no matter how far the local checkout's history diverges
+        # from the remote branch's — fresh mode once pushed a year of
+        # upstream history through the CI proxy and died on HTTP 413
+        # (run 33356185223).
+        tree = run_git(wt, "rev-parse", "HEAD^{tree}").strip()
+        committed = subprocess.run(
+            ["git", "commit-tree", tree, "-m",
+             "main2main: e2e signal (accumulated patch + test_groups)"],
+            cwd=str(wt), capture_output=True, text=True, check=True,
+        )
+        sha = committed.stdout.strip()
+        # Point the worktree's detached HEAD at the orphan commit so the
+        # HEAD-based refspec below pushes it (and it survives gc).
+        run_git(wt, "update-ref", "HEAD", sha)
         # The worktree is detached, so git cannot guess the refs/heads/
         # prefix for a shorthand dst (it only infers it when the src is a
         # ref under refs/{heads,tags}/); qualify it explicitly.

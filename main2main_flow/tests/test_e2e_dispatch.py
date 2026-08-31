@@ -657,6 +657,12 @@ def test_push_signal_branch_carries_command(tmp_path: Path,
         repo, "main2main_e2e", "fork/x", [{"npu_type": "a2"}], 3, "42")
     assert pushed == {"fork": "fork/x",
                       "refspec": "HEAD:refs/heads/main2main_e2e"}
+    # The pushed commit is an orphan (no parents): the pack stays at
+    # tree-diff size regardless of history divergence with the remote.
+    parents = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", sha],
+        cwd=str(repo), check=True, capture_output=True, text=True).stdout.split()
+    assert len(parents) == 1
     cmd = json.loads(_git_show(repo, f"{sha}:command.json"))
     assert cmd == {"round": 3, "main_run_id": "42"}
     groups = json.loads(_git_show(repo, f"{sha}:test_groups.json"))
