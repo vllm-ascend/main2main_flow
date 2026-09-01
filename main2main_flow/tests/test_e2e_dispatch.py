@@ -342,6 +342,37 @@ def test_compute_test_groups_missing_test_groups_line(monkeypatch,
         e2e_dispatch.compute_test_groups(tmp_path, ["vllm/x.py"])
 
 
+def test_compute_test_groups_invokes_vendored_script(
+        monkeypatch, tmp_path: Path) -> None:
+    # The ascend checkout's own select_tests.py must NOT be invoked:
+    # upstream's 2026-09 overhaul dropped --changed-files, so calling the
+    # checkout's copy exits 2 in <100ms (runs 33485959915 and
+    # 33501194953).  A copy inside the ascend tree is ignored in favor
+    # of the vendored generation.
+    stale = tmp_path / ".github/workflows/scripts/select_tests.py"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("#!/bin/false\n", encoding="utf-8")
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="test_groups=[]\n",
+                                           stderr="")
+
+    monkeypatch.setattr(e2e_dispatch.subprocess, "run", fake_run)
+    assert e2e_dispatch.compute_test_groups(tmp_path, ["vllm/x.py"]) == []
+    assert seen["cmd"][1] == str(e2e_dispatch._VENDOR_DIR / "select_tests.py")
+
+
+def test_vendored_select_tests_executes(tmp_path: Path) -> None:
+    # The vendored script must run cleanly under the flow's interpreter
+    # (imports regex/yaml, reads its own config and runner_label.json).
+    # An empty cwd matches no tests, so [] is the expected result — the
+    # assertion is that no exit-2/ImportError surfaces as RuntimeError.
+    assert e2e_dispatch.compute_test_groups(
+        tmp_path, ["vllm_ascend/models/qwen3_dflash2.py"]) == []
+
+
 def test_apply_minimal_filter_no_env() -> None:
     groups = [{"npu_type": "a2", "num_npus": 1, "tests": "a.py b.py"}]
     assert e2e_dispatch.apply_minimal_filter(groups) == groups

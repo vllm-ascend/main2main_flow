@@ -46,16 +46,21 @@ def _is_npu_convention_ut_path(rel_path: str) -> bool:
 def _collect_cpu_ut_files(repo: Path, log_label: str = "pre_ci") -> list[str]:
     """Return CPU-routed tests/ut paths (rel to repo).
 
-    Routes from vllm-ascend's OWN ``test_config.yaml`` — the same
-    ``runner_mapping`` + ``skip_tests`` CI's select_tests.py reads — so the
-    set tracks CI automatically when routing changes (new NPU directories,
-    new skip entries).  Reading the config is read-only; vllm-ascend is
-    never modified.  Falls back to the convention regexes when the config
-    is missing or unparseable (old checkouts).
+    Routes from the vendored ``test_config.yaml`` (see e2e_dispatch.
+    _VENDOR_DIR: upstream's 2026-09 overhaul rewrote the config into a
+    single-document format the two-document reader cannot parse, and the
+    source->test mapping data moved into the coverage pipeline) — the
+    same ``runner_mapping`` + ``skip_tests`` the vendored select_tests.py
+    reads, so UT routing and e2e grouping stay on one pinned generation.
+    Falls back to the ascend checkout's own config, then to the
+    convention regexes.
     """
     skip_tests: set[str] = set()
     npu_patterns: list[re.Pattern] = []
-    config_path = repo / ".github/workflows/scripts/test_config.yaml"
+    vendor_config = (Path(__file__).resolve().parent
+                     / "vendor_select_tests" / "test_config.yaml")
+    config_path = (vendor_config if vendor_config.exists()
+                   else repo / ".github/workflows/scripts/test_config.yaml")
     if config_path.exists():
         try:
             import yaml

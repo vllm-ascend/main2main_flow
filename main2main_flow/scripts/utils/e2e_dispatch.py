@@ -107,9 +107,24 @@ def _rewrite_runner(label: str) -> tuple[str, str]:
 # test group computation (CPU side, deterministic)
 # =============================================================================
 
+# Vendored select_tests trio (select_tests.py + test_config.yaml +
+# runner_label.json), pinned verbatim from vllm-project/vllm-ascend
+# @ 1e6e557bf — the last generation that accepted --changed-files and ran
+# green in main2main runs (33406387872 / 33432455202).  Upstream's CI
+# overhaul (#14793 series, 2026-09-01) replaced the contract with
+# --test-list-file/--explicit-e2e-tests/--all-tests/--curated, deleted
+# --changed-files, and moved the source->test mapping out of
+# test_config.yaml into a coverage/SQLite pipeline whose artifacts the
+# flow cannot access mid-run.  The flow passes UNCOMMITTED working-tree
+# diffs, so it must keep the changed-file-driven generation; the vendor
+# dir is self-contained (config + runner_label.json sit next to the
+# script) and no longer depends on the ascend checkout's CI scripts.
+_VENDOR_DIR = Path(__file__).resolve().parent / "vendor_select_tests"
+
+
 def compute_test_groups(ascend_path: Path,
                         changed_files: list[str]) -> list[dict]:
-    """Compute the ready-all test groups via vllm-ascend's select_tests.py.
+    """Compute the ready-all test groups via the vendored select_tests.py.
 
     The changed files are passed explicitly via ``--changed-files``: the
     adaptation changes are UNCOMMITTED in the working tree (steps are
@@ -127,9 +142,9 @@ def compute_test_groups(ascend_path: Path,
     """
     if not changed_files:
         return []
-    select_script = ascend_path / ".github/workflows/scripts/select_tests.py"
+    select_script = _VENDOR_DIR / "select_tests.py"
     if not select_script.exists():
-        raise RuntimeError(f"select_tests.py not found at {select_script}")
+        raise RuntimeError(f"vendored select_tests.py not found at {select_script}")
     r = subprocess.run(
         [sys.executable, str(select_script), "--changed-files",
          *changed_files],
