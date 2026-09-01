@@ -1,4 +1,5 @@
 
+import hashlib
 import json
 import os
 import re
@@ -234,6 +235,27 @@ def _revert_e2e_test_edits(ascend_path: str) -> list[str]:
                            cwd=ascend_path, capture_output=True, text=True)
         reverted.append(path)
     return reverted
+
+
+# Prepended to the fix-mode error logs when a fix attempt reproduced the
+# exact diff the previous e2e round already failed (run 33406387872 round 3:
+# the adapter burned a 45-min e2e round on a byte-identical diff).  The
+# adapter reads error_logs entries as files, so this lands as its first
+# input file.
+ZERO_PROGRESS_FIX_WARNING = """\
+[fatal-warning] Fix round {round}: the working-tree diff is byte-identical to
+the diff the previous e2e round already tested and failed (sha {sha}).
+
+Re-running identical code can only reproduce the identical result. If you
+believe the failures are environment flakes, you MUST provide per-failure
+evidence quoted from the round logs showing each failure is environmental.
+Otherwise you must change the adapter code so at least one failing test is
+actually fixed.
+
+A second fix attempt with an unchanged diff will fail the step immediately.
+
+--- e2e failure details follow ---
+"""
 
 
 class Main2MainState(BaseModel):
@@ -746,6 +768,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
     def process_steps(self):
         ascend_path = self.state.vllm_ascend_path
+        # No-op fix-loop detection: the diff sha the last e2e round actually
+        # tested, and whether we already warned about an unchanged fix.
+        last_tested_diff_sha = ""
+        noop_fix_retried = False
         while self.state.current_step < self.state.total_steps:
             step = self.state.steps[self.state.current_step]
             step_id = step["id"]
@@ -759,6 +785,41 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self._revert_working_tree(f"step {step_id} ai_analysis exhausted")
                 self.state.final_status = UpgradeFailed
                 return
+
+            # A fix round (retry_count > 0) whose diff is byte-identical to
+            # the one the previous e2e round already failed can only
+            # reproduce the same result.  First occurrence: warn the adapter
+            # (env-flake claims now need per-failure evidence) and re-analyze
+            # WITHOUT burning another e2e round.  Second occurrence: no
+            # progress is possible — fail the step.
+            if self.state.retry_count > 0:
+                diff_sha = self._working_tree_diff_sha(ascend_path)
+                if diff_sha and diff_sha == last_tested_diff_sha:
+                    if noop_fix_retried:
+                        ts_print(f"[process_steps] {step_id}: fix attempt made "
+                                 f"no diff change again ({diff_sha[:12]}) — "
+                                 f"same code cannot fix the same e2e failures, "
+                                 f"giving up")
+                        self._revert_working_tree(
+                            f"step {step_id} no-op fix loop")
+                        self.state.final_status = UpgradeFailed
+                        return
+                    step_dir = WORKSPACE_DIR / STEPS_DIR / step["id"]
+                    warn_path = step_dir / "zero-progress-fix-warning.txt"
+                    warn_path.parent.mkdir(parents=True, exist_ok=True)
+                    warn_path.write_text(
+                        ZERO_PROGRESS_FIX_WARNING.format(
+                            round=self.state.retry_count, sha=diff_sha[:12]),
+                        encoding="utf-8")
+                    self.state.test_errors = [str(warn_path)] + list(
+                        self.state.test_errors)
+                    noop_fix_retried = True
+                    ts_print(f"[process_steps] {step_id}: fix attempt changed "
+                             f"nothing (diff {diff_sha[:12]} already tested "
+                             f"and failed) — re-analyzing with a warning, "
+                             f"no e2e")
+                    continue
+                noop_fix_retried = False
 
             # Adapter analyzed the step and confirmed no vllm-ascend code
             # change needed → skip the per-step e2e round (only on the first
@@ -780,6 +841,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self.state.last_step_e2e_passed = False  # final gate must run regression
                 continue
 
+            last_tested_diff_sha = self._working_tree_diff_sha(ascend_path)
             test_pass = self._run_e2e_test()
             if test_pass:
                 # The step needed >=1 E2E fix round (retry_count >= 1): the
@@ -811,6 +873,21 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     return
                 continue
         self.state.final_status = UpgradeCompleted
+
+    def _working_tree_diff_sha(self, ascend_path: str) -> str:
+        """Stable sha256 of the working-tree diff vs HEAD ("" when git fails).
+
+        Same basis as _capture_step_patch (git add -N + git diff HEAD) and as
+        the reviewer's "Diff is unchanged since my last review" check, so an
+        unchanged sha means the adapter truly reproduced the same diff.
+        """
+        try:
+            subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                           capture_output=True, check=True)
+            diff = run_git(ascend_path, "diff", "HEAD")
+        except (subprocess.CalledProcessError, OSError):
+            return ""
+        return hashlib.sha256(diff.encode("utf-8", "replace")).hexdigest()
 
     def _capture_step_patch(self, ascend_path: str, step_dir: Path,
                             step_id: str) -> None:
