@@ -1466,7 +1466,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         round_no = self.state.e2e_round
         result = run_external_e2e(
             cfg, ascend_path, groups, WORKSPACE_DIR / STEPS_DIR,
-            round_no, step_id=step_id)
+            round_no, step_id=step_id,
+            # The resident must sync vllm to THIS step's commit before
+            # serving — prep freezes vllm at dispatch-time HEAD, which
+            # drifts from the step's target (33507540907: prep froze
+            # 40824284b, step-1 targeted 27ec8ac6).
+            vllm_commit=step["end_commit"])
         test_passed = result.get("can_commit", False)
         self.state.last_step_e2e_passed = test_passed
         ts_print(f"test_passed={test_passed}, "

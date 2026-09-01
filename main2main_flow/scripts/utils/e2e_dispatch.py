@@ -406,13 +406,23 @@ def _remote_branch_sha(wt: Path, fork: str, branch: str) -> str:
 
 def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
                        groups_json: list[dict], round_number: int,
-                       main_run_id: str) -> str:
+                       main_run_id: str,
+                       vllm_commit: str = "") -> str:
     """Force-push the round command to the fork's signal branch.
 
     The commit carries the accumulated patch (the working tree snapshot),
-    test_groups.json, and command.json = {"round", "main_run_id"} — the
-    resident runner jobs treat every new signal-branch commit for their
-    main run as the command to serve that round.
+    test_groups.json, and command.json = {"round", "main_run_id",
+    "vllm_commit"} — the resident runner jobs treat every new signal-branch
+    commit for their main run as the command to serve that round.
+
+    *vllm_commit* is the vllm commit THIS step's adaptation targets
+    (step["end_commit"]): the resident must test exactly that vllm tree,
+    not the one frozen at prep time (observed 2026-09-01 run 33507540907:
+    prep froze vllm main HEAD 40824284b while the flow adapted step-1 to
+    27ec8ac6 — the KV-cache shared_by→layers refactor landed in between,
+    so every e2e round failed on a KVCacheTensor attribute that exists on
+    the adapted tree but not the tested one).  Empty keeps the resident on
+    its existing checkout (local/manual use).
 
     Uses a detached git worktree so the main working branch (the PR branch)
     is never touched — a commit here would leak into the PR squash.  Any
@@ -453,7 +463,8 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
         groups_path.write_text(
             json.dumps(groups_json, indent=2) + "\n", encoding="utf-8")
         (wt / "command.json").write_text(
-            json.dumps({"round": round_number, "main_run_id": main_run_id})
+            json.dumps({"round": round_number, "main_run_id": main_run_id,
+                        "vllm_commit": vllm_commit})
             + "\n", encoding="utf-8")
         run_git(wt, "add", "-A")
         run_git(wt, "commit", "-m",
@@ -1104,7 +1115,8 @@ def run_external_e2e(cfg: E2EDispatchConfig, ascend_path: Path,
                      groups_json: list[dict], log_dir: Path,
                      round_number: int, step_id: int = 0,
                      push_before: bool = True,
-                     timeout_min: int | None = None) -> dict:
+                     timeout_min: int | None = None,
+                     vllm_commit: str = "") -> dict:
     """Push the round command (signal branch), wait for the resident
     runners to serve it, parse the results.
 
@@ -1117,7 +1129,8 @@ def run_external_e2e(cfg: E2EDispatchConfig, ascend_path: Path,
         try:
             command_sha = push_signal_branch(
                 ascend_path, cfg.signal_branch, cfg.signal_repo or cfg.repo,
-                groups_json, round_number, cfg.main_run_id)
+                groups_json, round_number, cfg.main_run_id,
+                vllm_commit=vllm_commit)
         except Exception as exc:
             # The push retries internally; reaching here means the command
             # channel is down.  Fail the round as a structured result (like

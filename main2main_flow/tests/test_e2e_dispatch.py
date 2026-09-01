@@ -689,7 +689,8 @@ def test_push_signal_branch_carries_command(tmp_path: Path,
         lambda wt, fork, branch: e2e_dispatch.run_git(
             wt, "rev-parse", "HEAD").strip())
     sha = e2e_dispatch.push_signal_branch(
-        repo, "main2main_e2e", "fork/x", [{"npu_type": "a2"}], 3, "42")
+        repo, "main2main_e2e", "fork/x", [{"npu_type": "a2"}], 3, "42",
+        vllm_commit="27ec8ac626")
     assert pushed == {"fork": "fork/x",
                       "refspec": "HEAD:refs/heads/main2main_e2e"}
     # The pushed commit is an orphan (no parents): the pack stays at
@@ -699,7 +700,8 @@ def test_push_signal_branch_carries_command(tmp_path: Path,
         cwd=str(repo), check=True, capture_output=True, text=True).stdout.split()
     assert len(parents) == 1
     cmd = json.loads(_git_show(repo, f"{sha}:command.json"))
-    assert cmd == {"round": 3, "main_run_id": "42"}
+    assert cmd == {"round": 3, "main_run_id": "42",
+                   "vllm_commit": "27ec8ac626"}
     groups = json.loads(_git_show(repo, f"{sha}:test_groups.json"))
     assert groups == [{"npu_type": "a2"}]
     assert _git_show(repo, f"{sha}:code.py") == "x = 2\n"
