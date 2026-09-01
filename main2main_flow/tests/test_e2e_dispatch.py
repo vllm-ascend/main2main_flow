@@ -701,7 +701,12 @@ def test_push_signal_branch_carries_command(tmp_path: Path,
     assert len(parents) == 1
     cmd = json.loads(_git_show(repo, f"{sha}:command.json"))
     assert cmd == {"round": 3, "main_run_id": "42",
-                   "vllm_commit": "27ec8ac626"}
+                   "vllm_commit": "27ec8ac626",
+                   # The uncommitted code.py edit is the round's ascend
+                   # patch; its stat line must travel with the command so
+                   # the resident can print what it is testing.
+                   "ascend_patch_stat": " 1 file changed, 1 insertion(+), "
+                                        "1 deletion(-)"}
     groups = json.loads(_git_show(repo, f"{sha}:test_groups.json"))
     assert groups == [{"npu_type": "a2"}]
     assert _git_show(repo, f"{sha}:code.py") == "x = 2\n"

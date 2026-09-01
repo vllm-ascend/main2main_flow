@@ -1464,6 +1464,21 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             return True
         self.state.e2e_round += 1
         round_no = self.state.e2e_round
+        # The resident will run against THIS commit — make it explicit in
+        # the main log before the command goes out (and in command.json,
+        # which the resident prints before serving).
+        ascend_stat = ""
+        try:
+            stat_lines = run_git(ascend_path, "diff", "HEAD",
+                                 "--stat").strip().splitlines()
+            ascend_stat = stat_lines[-1] if stat_lines else "no changes"
+        except Exception:
+            pass
+        ts_print(f"[run_e2e_test] {step_id}: dispatching e2e round "
+                 f"{round_no}: vllm_commit={step['end_commit']} "
+                 f"({step.get('commit_count', '?')} upstream commit(s)), "
+                 f"ascend working-tree patch: {ascend_stat}, "
+                 f"{len(groups)} group(s)")
         result = run_external_e2e(
             cfg, ascend_path, groups, WORKSPACE_DIR / STEPS_DIR,
             round_no, step_id=step_id,

@@ -462,9 +462,18 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
         groups_path = wt / "test_groups.json"
         groups_path.write_text(
             json.dumps(groups_json, indent=2) + "\n", encoding="utf-8")
+        # The ascend patch summary ("N files changed, M insertions(+)...")
+        # is computed HERE — the signal snapshot is a full tree, so the
+        # resident cannot diff it against anything to see what this round
+        # is actually testing.  It prints this line before running.
+        patch_stat_lines = run_git(
+            ascend_path, "diff", "HEAD", "--stat").strip().splitlines()
+        ascend_patch_stat = (patch_stat_lines[-1] if patch_stat_lines
+                             else "no working-tree changes")
         (wt / "command.json").write_text(
             json.dumps({"round": round_number, "main_run_id": main_run_id,
-                        "vllm_commit": vllm_commit})
+                        "vllm_commit": vllm_commit,
+                        "ascend_patch_stat": ascend_patch_stat})
             + "\n", encoding="utf-8")
         run_git(wt, "add", "-A")
         run_git(wt, "commit", "-m",
@@ -514,6 +523,9 @@ def push_signal_branch(ascend_path: Path, branch: str, head_fork: str,
         else:
             raise RuntimeError(
                 f"signal branch push failed after 5 attempts: {last_err}")
+        ts_print(f"[e2e-dispatch] round {round_number} command pushed "
+                 f"({sha[:12]}): vllm_commit={vllm_commit or '<unset>'}, "
+                 f"ascend patch: {ascend_patch_stat}")
         ts_print(f"[e2e-dispatch] signal branch {head_fork}:{branch} "
                  f"pushed at {sha[:12]} (round {round_number} command)")
     finally:
