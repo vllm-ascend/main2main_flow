@@ -1,10 +1,16 @@
-"""Pair-aligned device assignment for dual-die NPUs (A3)."""
+"""Pair-aligned device assignment for dual-die NPUs (A3) + OOM-hang env-flake
+classification."""
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
+from main2main_flow.scripts.utils import run_tests as rt
 from main2main_flow.scripts.utils.run_tests import (
     _assign_devices,
+    _is_oom_hang_failure,
+    _run_one_test,
     _test_cards,
     _validate_pair_aligned,
 )
@@ -97,3 +103,105 @@ def test_cards_inferred_from_path():
     assert _test_cards("tests/e2e/pull_request/one_card/test_x.py") == 1
     assert _test_cards("tests/e2e/pull_request/two_card/test_x.py") == 2
     assert _test_cards("tests/e2e/pull_request/four_card/test_x.py") == 4
+
+
+# ---- NPU-OOM hang → env_flake_pass (runs 33314256232/33406387872) ------------
+
+OOM_WORKER_LINE = (
+    "ERROR 09-01 10:00:00 [multiproc_executor.py:521] Worker failed with "
+    "error 'NPU out of memory. Tried to allocate 9.98 GiB (NPU 0; 61.28 GiB "
+    "total; 55.17 GiB already allocated; 2.76 GiB free)'")
+SKIP_GATHER_WORKER_LINE = (
+    "ERROR 09-01 10:00:00 [multiproc_executor.py:521] Worker failed with "
+    "error 'TypeError: AscendLogitsProcessor._get_logits() takes from 3 to 4 "
+    "positional arguments but 5 were given'")
+
+
+def _write_log(tmp_path: Path, body: str, name: str = "test.log") -> Path:
+    p = tmp_path / name
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def test_oom_hang_pure_oom_classified(tmp_path: Path):
+    # Round-2/3 gemma4 shape: OOM worker death + a bare traceback SOURCE line
+    # ("RuntimeError(" has no message) + pytest killed by the suite timeout.
+    log = _write_log(tmp_path, "\n".join([
+        "INFO ... adding tasks",
+        OOM_WORKER_LINE,
+        'raise RuntimeError(',
+        "[TIMEOUT] suite exceeded 1800s, killing process group",
+    ]) + "\n")
+    assert _is_oom_hang_failure(log)
+
+
+def test_oom_hang_ansi_colored_real_error_not_classified(tmp_path: Path):
+    # ANSI codes around AssertionError must not hide a real failure
+    # (prefix_caching garbage output asserts with colored pytest output).
+    log = _write_log(tmp_path, "\n".join([
+        OOM_WORKER_LINE,
+        "E   \x1b[31mAssertionError\x1b[0m: Test0: vllm_output does not "
+        "match golden",
+    ]) + "\n")
+    assert not _is_oom_hang_failure(log)
+
+
+def test_oom_hang_non_oom_worker_error_not_classified(tmp_path: Path):
+    # Round-1 gemma4 shape: engine died of the skip_gather TypeError —
+    # a real adaptation bug, even though OOM text may appear elsewhere.
+    log = _write_log(tmp_path, "\n".join([
+        SKIP_GATHER_WORKER_LINE,
+        "NPU out of memory is mentioned in a doc line",
+    ]) + "\n")
+    assert not _is_oom_hang_failure(log)
+
+
+def test_oom_hang_mixed_worker_errors_not_classified(tmp_path: Path):
+    log = _write_log(tmp_path, "\n".join([
+        OOM_WORKER_LINE,
+        "ERROR Worker failed with error 'AssertionError: Engine core "
+        "initialization failed'",
+    ]) + "\n")
+    assert not _is_oom_hang_failure(log)
+
+
+def test_oom_hang_no_oom_signature_not_classified(tmp_path: Path):
+    log = _write_log(tmp_path, "E   AssertionError: garbage output\n")
+    assert not _is_oom_hang_failure(log)
+
+
+def test_run_one_test_oom_hang_becomes_env_flake(monkeypatch, tmp_path: Path):
+    # exit -9 (suite-timeout SIGKILL) + pure-OOM log → env_flake_pass, so the
+    # round doesn't count as an adaptation failure.
+    log = _write_log(tmp_path, OOM_WORKER_LINE + "\n", "oom.log")
+    summary = _write_log(tmp_path, "", "oom-summary.json")
+    monkeypatch.setattr(rt, "_run_to_log", lambda *a, **k: -9)
+    monkeypatch.setattr(rt, "_run_summary",
+                        lambda *a, **k: {"summary": {"code_bugs": [],
+                                                     "env_flakes": []},
+                                         "summary_error": None})
+    result = _run_one_test(
+        ["pytest"], log, summary, "tests/e2e/pull_request/two_card/test_g.py",
+        "0,1", tmp_path / "ci", tmp_path, 0, 1, {},
+        is_remote=False, is_mock=False)
+    assert result["ci_result"] == "env_flake_pass"
+    assert result["run_suite_exit_code"] == -9
+
+
+def test_run_one_test_oom_with_real_error_stays_failed(monkeypatch,
+                                                       tmp_path: Path):
+    log = _write_log(tmp_path, "\n".join([
+        OOM_WORKER_LINE,
+        "E   AssertionError: vllm_output does not match golden",
+    ]) + "\n", "real.log")
+    summary = _write_log(tmp_path, "", "real-summary.json")
+    monkeypatch.setattr(rt, "_run_to_log", lambda *a, **k: -9)
+    monkeypatch.setattr(rt, "_run_summary",
+                        lambda *a, **k: {"summary": {"code_bugs": [],
+                                                     "env_flakes": []},
+                                         "summary_error": None})
+    result = _run_one_test(
+        ["pytest"], log, summary, "tests/e2e/pull_request/two_card/test_g.py",
+        "0,1", tmp_path / "ci", tmp_path, 0, 1, {},
+        is_remote=False, is_mock=False)
+    assert result["ci_result"] == "failed"

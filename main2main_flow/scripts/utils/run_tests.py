@@ -654,6 +654,60 @@ def _is_model_download_failure(log_path: Path) -> bool:
         return False
 
 
+# NPU OOM: when the engine dies of an NPU OOM, vllm's multiproc executor
+# hangs instead of exiting (the workers never answer the shutdown), so pytest
+# sits until the suite timeout kills it (exit -9).  Free NPU memory is shared
+# state on the resident runner — leftover from an earlier test in the round,
+# not the adaptation.  Runs 33314256232/33406387872: gemma4 two_card burned
+# three 30-min rounds this way with zero fix signal for the adapter.
+_NPU_OOM_RE = re.compile(r"NPU out of memory", re.IGNORECASE)
+
+# The multiproc executor wraps each worker's death reason in this message.
+_WORKER_ERROR_REASON_RE = re.compile(r"Worker failed with error '([^']*)'")
+
+# pytest --color=yes wraps "AssertionError" etc. in ANSI codes; stripped
+# first or the raised-message scan below misses real errors.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# A real error WITH A MESSAGE ("RuntimeError: <text>") next to the OOM means
+# the run had a genuine code failure — never env-flake it.  Bare keywords
+# ("RuntimeError(") are traceback SOURCE lines, not raised messages, and must
+# not match (round-2 gemma4 log carries exactly one such line).
+_RAISED_ERROR_MSG_RE = re.compile(
+    r"\b(?:ValueError|RuntimeError|TypeError|KeyError|AttributeError|"
+    r"AssertionError|ImportError|IndexError|OverflowError|OSError|"
+    r"NameError|NotImplementedError|EngineDeadError)\b:\s+\S")
+
+
+def _is_oom_hang_failure(log_path: Path) -> bool:
+    """True if the test log shows an NPU-OOM engine death with no real code
+    error alongside it (the suite timed out waiting for the dead engine)."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                   errors="replace"))
+        if not _NPU_OOM_RE.search(text):
+            return False
+        # Strip the worker-error wrapper lines before scanning for real
+        # errors: the wrapper itself renders as "RuntimeError: ..." with the
+        # OOM message inside.
+        rest = re.sub(r"^.*Worker failed with error.*$", "", text,
+                      flags=re.MULTILINE)
+        if _RAISED_ERROR_MSG_RE.search(rest):
+            ts_print("  [env-flake] real error with message found next to "
+                     "the OOM — NOT classifying as env flake")
+            return False
+        reasons = _WORKER_ERROR_REASON_RE.findall(text)
+        if reasons and not all("out of memory" in r.lower() for r in reasons):
+            ts_print("  [env-flake] engine died of a non-OOM worker error "
+                     "— NOT classifying as env flake")
+            return False
+        return True
+    except OSError:
+        return False
+
+
 _ERROR_SIGNATURES = re.compile(
     r"Traceback \(most recent call last\)|Traceback:"
     r"|EngineCore failed|exited unexpectedly"
@@ -795,6 +849,12 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
     if ci_result == "failed" and _is_model_download_failure(log_path):
         ts_print(f"  [env-flake] {test}: model download/cache failure "
                  f"classified as environment, not blocking")
+        ci_result = "env_flake_pass"
+    if (ci_result != "passed" and exit_code == -9
+            and _is_oom_hang_failure(log_path)):
+        ts_print(f"  [env-flake] {test}: engine died of NPU OOM and hung to "
+                 f"the suite timeout — classified as environment, not "
+                 f"blocking")
         ci_result = "env_flake_pass"
     return {"test": test, "cards_required": cards,
             "run_suite_exit_code": exit_code,
