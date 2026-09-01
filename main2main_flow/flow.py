@@ -35,6 +35,10 @@ _TRACKING_FILES_FOR_DESC: frozenset[str] = frozenset({
     ".github/vllm-main-verified.commit",
 })
 
+# Regression-e2e attempts inside the final quality gate once static checks
+# (format/mypy/UT) are green.  Same budget as a per-step e2e round.
+_GATE_E2E_ATTEMPTS = 3
+
 
 def _extract_diff_files(patch_text: str,
                         exclude: frozenset[str] = _TRACKING_FILES_FOR_DESC
@@ -180,6 +184,20 @@ def _resolve_test_timeouts() -> dict[str, int] | None:
         if isinstance(k, str) and isinstance(v, int) and v > 0:
             out[k] = v
     return out or None
+
+
+def _pre_ci_attempt_budget() -> int:
+    """Adapter attempts per step for pre_ci (format/mypy/UT) convergence.
+
+    Independent of the E2E retry budget (3, see process_steps): large
+    upstream refactors need more static-fix rounds than a fixed 3 — run
+    33406597604's step-7 (8bdc70ec KV-cache refactor, ~30 files) had
+    converged 53->22->9 UT failures when the old limit cut it off.
+    """
+    try:
+        return max(1, int(os.getenv("MAIN2MAIN_PRE_CI_ATTEMPTS", "5")))
+    except ValueError:
+        return 5
 
 
 def _has_source_changes(changed_files: list[str]) -> bool:
@@ -442,8 +460,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # least one step succeeded): format + mypy + UT must always execute so
         # lint issues never leak into the PR (run 174 pushed an E501 line
         # because the gate only ran on the all-steps-passed path).
-        # Failures enter adapter-fix mode (max 3 rounds); each fix re-runs e2e
-        # to confirm functional correctness wasn't broken by format/mypy edits.
+        # Failures enter adapter-fix mode (max 3 rounds).  The regression e2e
+        # that follows static green is non-blocking: it retries up to
+        # _GATE_E2E_ATTEMPTS times, and if all fail the PR is still created
+        # (with a ::warning::) — PR CI is the real arbiter for runtime.
         gate_passed = True
         if self.state.current_step > 0:
             gate_passed = self._final_quality_gate()
@@ -761,12 +781,16 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             step_id = step["id"]
 
             if not self._ai_analysis():
-                # Adaptation could not pass pre_ci + critic after 3 attempts.
-                # Discard the broken working-tree changes and fall through to
-                # generate_final_post / push with whatever passed in prior steps.
+                # Adaptation could not pass pre_ci + critic within the pre_ci
+                # attempt budget (see _pre_ci_attempt_budget).  KEEP the
+                # adapter's best-effort working tree: the final quality gate
+                # runs the same static checks and continues from this progress
+                # instead of re-deriving it from scratch on a reverted tree
+                # (run 33406597604: step-7 hit the old 3-attempt limit with 9
+                # residual UT failures; the gate then re-climbed the whole
+                # refactor and ran out of ITS budget 2 failures short).
                 ts_print(f"[process_steps] {step_id}: ai_analysis exhausted retries, "
-                         f"reverting to last committed state")
-                self._revert_working_tree(f"step {step_id} ai_analysis exhausted")
+                         f"carrying working tree into the final quality gate")
                 self.state.final_status = UpgradeFailed
                 return
 
@@ -857,10 +881,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                        cwd=self.state.vllm_ascend_path, capture_output=True)
 
     def _final_quality_gate(self) -> bool:
-        """Run format + mypy on final diff; fix + re-run e2e on failure.
+        """Run format + mypy + UT on final diff; fix and re-check on failure.
 
-        Returns True if quality gate passes (possibly after fixes), False if
-        3 fix rounds exhausted without passing.
+        Returns True if the static checks pass (possibly after fix rounds).
+        The regression e2e that follows is non-blocking: after its own
+        retries it can only emit a warning, never fail the gate — static
+        green is the PR-worthiness bar.
         """
         ascend_path = self.state.vllm_ascend_path
         vllm_path = self.state.vllm_path
@@ -891,16 +917,18 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     ts_print(f"[final_quality_gate] fix attempt {attempt}: passed "
                              f"(last step e2e={'passed' if self.state.last_step_e2e_passed else 'skipped/failed'}), "
                              f"running regression e2e")
-                    if not self._run_e2e_test_for_final_gate():
-                        # Revert the regression-inducing fix so it doesn't get
-                        # pushed (KEEP_BRANCH mode does `git add -A` + amend),
-                        # then continue the fix loop with remaining rounds.
-                        # The gate will re-run format+mypy on the reverted tree.
-                        ts_print(f"[final_quality_gate] e2e regression - "
-                                 f"reverting, continuing to next round")
-                        self._revert_working_tree("gate e2e regression")
-                        error_logs = [str(Path(gate_dir) / "quality_gate.json")]
-                        continue
+                    if not self._run_regression_e2e_with_retries():
+                        # Static checks (format/mypy/UT) are green — that is
+                        # the PR-worthiness bar.  A failing regression e2e
+                        # must not block the PR (run 33406597604: two residual
+                        # failures were pure mechanical noise while the gate
+                        # had nothing left to fix): PR CI re-verifies the code
+                        # and the failure detail stays in the workspace for
+                        # review.  Keep the tree, warn, and proceed.
+                        print(f"::warning title=main2main quality gate::"
+                              f"regression e2e failed after "
+                              f"{_GATE_E2E_ATTEMPTS} attempts with format/mypy/"
+                              f"UT green — creating PR anyway")
                 if attempt > 1:
                     # A fix round succeeded — record the failure knowledge
                     # (version guards, test isolation, etc.) so future runs
@@ -1046,6 +1074,21 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ts_print(f"\n[final_quality_gate] regression e2e: {'PASSED' if test_passed else 'FAILED'}")
         return test_passed
 
+    def _run_regression_e2e_with_retries(self) -> bool:
+        """Regression e2e with its own retry budget (_GATE_E2E_ATTEMPTS).
+
+        Bare re-runs (no adapter fix between them): the tree already passed
+        static review, so there is nothing to re-fix — retries only absorb
+        flakes.  Non-blocking by policy: the caller proceeds to the PR with
+        a warning when all attempts fail.
+        """
+        for e2e_try in range(1, _GATE_E2E_ATTEMPTS + 1):
+            if self._run_e2e_test_for_final_gate():
+                return True
+            ts_print(f"[final_quality_gate] regression e2e FAILED "
+                     f"(try {e2e_try}/{_GATE_E2E_ATTEMPTS})")
+        return False
+
     def _ai_analysis(self) -> bool:
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
@@ -1167,7 +1210,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print(f"\n[ai_analysis] {step_id}: vllm-report MCP available "
                      f"(dynamic mode, no static context) for {step['end_commit'][:8]}")
 
-        for attempt in range(1, 4):
+        # Budget applies to the pre_ci (format/mypy/UT) fix loop only — the
+        # per-step E2E retry budget (3) in process_steps is unchanged.
+        pre_ci_budget = _pre_ci_attempt_budget()
+        for attempt in range(1, pre_ci_budget + 1):
             role = "adapter-fix" if error_logs else "adapter"
             if role == "adapter-fix":
                 # Targeted upstream diff (runtime paths only) — the full
@@ -1282,7 +1328,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # outcome. Static review cannot settle semantic disputes (e.g.
             # packed-vs-summed KV pools), so iterating it further burns time
             # without converging; e2e verdict is the only signal that matters.
-            # pre_ci stays a hard gate across all 3 attempts.
+            # pre_ci stays a hard gate across all attempts.
             if pre_ci_passed and (review_passed or attempt >= 2):
                 if not review_passed:
                     ts_print(f"[ai_analysis] {step_id}: critic still has issues after "
@@ -1290,7 +1336,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 break
 
         if not pre_ci_passed:
-            ts_print(f"[ai_analysis] {step_id}: FAILED after 3 attempts "
+            ts_print(f"[ai_analysis] {step_id}: FAILED after {pre_ci_budget} attempts "
                      f"(pre_ci never passed) — skipping e2e")
             self.state.test_errors = error_logs if error_logs else []
             return False
