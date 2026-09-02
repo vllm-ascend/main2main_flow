@@ -415,6 +415,10 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 out = subprocess.run(
                     ["bash", "-c", f". {cann_setenv} && env"],
                     capture_output=True, text=True, timeout=60).stdout
+                ts_print(f"[{log_label}] ut: CANN env extract: "
+                         f"{len(out.splitlines())} vars, "
+                         f"LD_LIBRARY_PATH="
+                         f"{'present' if 'LD_LIBRARY_PATH=' in out else 'MISSING'}")
                 for line in out.splitlines():
                     key, _, val = line.partition("=")
                     if key in ("LD_LIBRARY_PATH", "PATH",
@@ -422,6 +426,9 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                                "ASCEND_AICPU_PATH", "ASCEND_OPPER_PATH",
                                "ASCEND_DRIVER_PATH"):
                         env[key] = val
+                if "LD_LIBRARY_PATH" in env:
+                    ts_print(f"[{log_label}] ut: CANN LD_LIBRARY_PATH: "
+                             f"{env['LD_LIBRARY_PATH'][:160]}")
             except Exception as exc:
                 ts_print(f"[{log_label}] ut: WARNING CANN env source failed "
                          f"({exc}) — torch_npu may fail to load")
