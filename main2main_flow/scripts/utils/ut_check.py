@@ -104,6 +104,35 @@ def _collect_cpu_ut_files(repo: Path, log_label: str = "pre_ci") -> list[str]:
     return files
 
 
+_COLLECTION_ERR_RE = re.compile(
+    r"^ERROR (?:collecting \S+|at setup of \S+|tests/\S+\.py\b)")
+_ERR_BLOCK_MAX = 3000
+
+
+def _extract_error_block(clean: str) -> str:
+    """Extract the pytest ERROR paragraph when no FAILED line matched.
+
+    A collection/setup error (ImportError, circular import) produces an
+    ``ERROR collecting <file>`` block in the MIDDLE of the output, while
+    the batch tail is often unrelated noise (e.g. pytest-asyncio
+    deprecation warnings).  Showing the tail alone misleads the adapter
+    into treating a real import failure as an environment flake — observed
+    33538038959: test_attn_utils_v2.py's collection ImportError was
+    invisible for 3 gate fix rounds.
+    """
+    for line in clean.splitlines():
+        m = _COLLECTION_ERR_RE.search(line.strip())
+        if m:
+            start = max(0, clean.find(line) - 200)
+            end = len(clean)
+            for marker in ("\n____", "\n===", "\n--------"):
+                cut = clean.find(marker, start + 1)
+                if cut > 0:
+                    end = min(end, cut)
+            return clean[start:end][:_ERR_BLOCK_MAX]
+    return ""
+
+
 _EXCERPT_SIG_RE = re.compile(
     r"Traceback \(most recent call last\)|Traceback:"
     r"|\b(?:ValueError|RuntimeError|TypeError|KeyError|AttributeError|"
@@ -255,6 +284,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     all_violations: list[str] = []
     all_files_clean = True
     details: list[str] = []
+    full_outputs: dict[str, str] = {}
     ansi_re = re.compile(r"\x1b\[[0-9;]*m")
     failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
 
@@ -362,10 +392,15 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                     all_violations.append(v)
             if rr.returncode != 0:
                 all_files_clean = False
+                full_outputs[f"{label}/{name}"] = clean
                 if not seen:
+                    # No FAILED/ERROR x.py::x line: a collection/setup
+                    # error or crash.  Prefer the pytest ERROR paragraph
+                    # (carries the traceback); fall back to the tail.
+                    err_block = _extract_error_block(clean)
                     all_violations.append(
                         f"[{label}] {name}: exit={rr.returncode} — "
-                        f"{clean[-500:]}")
+                        f"{err_block or clean[-500:]}")
             summary_m = re.search(
                 r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
             summary = (summary_m.group(1) if summary_m
@@ -385,7 +420,8 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             ts_print(f"  ... and {len(all_violations) - 20} more")
         return {"violations": all_violations,
                 "detail": f"{len(all_violations)} UT failure(s): "
-                          + "; ".join(details)}
+                          + "; ".join(details),
+                "full_outputs": full_outputs}
     finally:
         if venv_dir and venv_dir.exists():
             shutil.rmtree(venv_dir, ignore_errors=True)

@@ -746,6 +746,12 @@ def run_check(ascend_path: str | Path, release_tag: str,
             "detail": ut.get("detail", ""),
             "violations": ut.get("violations", []),
             "skipped": ut.get("skipped", False),
+            # Full pytest outputs of the failing runs — flows into the
+            # adapter's error_logs inline (head+tail kept on truncation),
+            # so a collection error the violation regex misses is still
+            # visible (33538038959 gate: ImportError hidden behind a
+            # pytest-asyncio deprecation-warning tail for 3 fix rounds).
+            "full_outputs": ut.get("full_outputs", {}),
         })
         if not ut_ok:
             all_passed = False

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from main2main_flow.scripts.utils import pre_ci_check
+from main2main_flow.scripts.utils import ut_check
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
 from main2main_flow.scripts.utils.ut_check import check_ut
 
@@ -96,3 +97,33 @@ def test_final_quality_gate_single_version_signature() -> None:
     params = inspect.signature(run_final_quality_gate).parameters
     assert "vllm_release_path" not in params
     assert "release_tag" not in params
+
+
+def test_extract_error_block_collection_error() -> None:
+    # A collection ImportError sits in the MIDDLE of the output, while
+    # the tail is pytest-asyncio deprecation noise.  The extractor must
+    # return the ERROR paragraph (with the traceback), not the tail —
+    # run 33538038959's gate adapter saw only the warning tail for 3
+    # fix rounds and never the real ImportError.
+    output = (
+        "collected 246 files / 1 error\n"
+        "ERROR collecting tests/ut/worker/test_attn_utils_v2.py\n"
+        "tests/ut/worker/test_attn_utils_v2.py:42: in <module>\n"
+        "    from vllm.v1.worker.gpu_model_runner import GPUModelRunner\n"
+        "E   ImportError: cannot import name 'GPUModelRunner'\n"
+        "\n"
+        "________ ERROR at setup of test_x ________\n"
+        "some other block\n"
+        "\n"
+        "warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))\n"
+    )
+    block = ut_check._extract_error_block(output)
+    assert "ERROR collecting tests/ut/worker/test_attn_utils_v2.py" in block
+    assert "ImportError: cannot import name 'GPUModelRunner'" in block
+    # The error paragraph ends at the next pytest section marker; the
+    # deprecation-warning tail must not leak in.
+    assert "PytestDeprecationWarning" not in block
+
+
+def test_extract_error_block_none_returns_empty() -> None:
+    assert ut_check._extract_error_block("all passed\n") == ""
