@@ -403,13 +403,34 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             env["PYTHONPATH"] = (
                 f"{ascend_abs}:{vllm_abs}:{existing}" if existing
                 else f"{ascend_abs}:{vllm_abs}")
-        # EXACT upstream cpu-0 env model (_selected_tests.yaml, "Run
-        # selected tests without device" step): AUTOLOAD=0 keeps torch from
-        # auto-loading torch_npu (whose backend fails on this container),
-        # and NO CANN set_env source — the cpu group does not source it.
-        # Removing AUTOLOAD=0 (2026-09-02 experiment) made every batch die
-        # exit=4 in torch._import_device_backends.
+        # AUTOLOAD=0 is upstream cpu-0's step env (_selected_tests.yaml):
+        # torch must NOT auto-load torch_npu (crashes exit=4 here without
+        # it).  BUT vllm's platform resolution still IMPORTS torch_npu
+        # explicitly (vllm_ascend/utils.py:33) when the ascend platform is
+        # selected — that import needs libascend_hal.so, so the CANN
+        # LD_LIBRARY_PATH is inherited from set_env.sh.  Without the libs,
+        # the import dies and vllm falls back to the default platform,
+        # loading vllm.config and breaking
+        # test_config_modules_do_not_load_vllm_config (trace 2026-09-02).
+        # PATH is deliberately NOT inherited: set_env.sh prepends the CANN
+        # bin dir whose REAL npu-smi would un-mock conftest.
         env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+        cann_setenv = "/usr/local/Ascend/ascend-toolkit/set_env.sh"
+        if os.path.exists(cann_setenv):
+            try:
+                out = subprocess.run(
+                    ["bash", "-c", f". {cann_setenv} && env"],
+                    capture_output=True, text=True, timeout=60).stdout
+                for line in out.splitlines():
+                    key, _, val = line.partition("=")
+                    if key in ("LD_LIBRARY_PATH",
+                               "ASCEND_TOOLKIT_HOME", "ASCEND_HOME_PATH",
+                               "ASCEND_AICPU_PATH", "ASCEND_OPPER_PATH",
+                               "ASCEND_DRIVER_PATH"):
+                        env[key] = val
+            except Exception as exc:
+                ts_print(f"[{log_label}] ut: WARNING CANN env source failed "
+                         f"({exc}) — torch_npu may fail to load")
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         # Match CI: offline mode so get_model_file / hf_hub_download
         # fails immediately (385s→0.5s for test_maybe_update_config_
