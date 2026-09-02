@@ -6,10 +6,11 @@ batch against the target main vllm checkout, mirroring vllm-ascend's
 ``run_selected_tests.sh`` cpu-ut batch.
 
 Key mechanisms:
-- **Fake npu-smi on the PATH**: vllm-ascend's tests/ut/conftest.py checks
-  ``npu-smi info`` to decide whether to mock torch_npu.  A fake npu-smi
-  (exit 1) forces the mock path even on an NPU runner, exactly like CI's
-  CPU runner.
+- **No npu-smi on the PATH** (matches upstream pr_test cpu-0, where the
+  command does not exist): tests/ut/conftest.py then takes the mock
+  torch_npu path, and triton/torch_npu platform discovery degrades the
+  same way upstream does — an exit-1 fake binary takes a DIFFERENT path
+  and broke test_config_modules_do_not_load_vllm_config (2026-09-02).
 - **Single-process batch**: all files in one pytest process (CI-aligned,
   fast); files known to pollute the shared process (module-level
   monkeypatches without cleanup) run in their own subprocess.
@@ -361,15 +362,16 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                  "falling back to system pytest")
         venv_dir = None
 
-    # Fake npu-smi (exit 1) so tests/ut/conftest.py takes the mock path even
-    # on an NPU runner — otherwise CPU UT cases hit real NPU ops.
-    fake_bin_dir = Path(tempfile.mkdtemp(prefix="ut_fake_bin_"))
-    npu_smi_fake = fake_bin_dir / "npu-smi"
-    try:
-        npu_smi_fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        npu_smi_fake.chmod(0o755)
-    except OSError:
-        pass
+    # NO fake npu-smi: the batch runs on the pure-CPU runner where the
+    # command does not exist, exactly like upstream pr_test's cpu-0 — and
+    # that absence matters beyond conftest: triton-ascend / torch_npu
+    # probe npu-smi during platform discovery, and a fake binary that
+    # EXISTS but exits 1 takes a different path than a missing command
+    # (upstream run 33582304976's test_ascend_config printed "can not use
+    # command: npu-smi info" and passed; with the exit-1 fake the same
+    # test failed its subprocess assert — verified 2026-09-02).  A fake
+    # would also be pointless on this runner: it has no NPU anyway.
+
 
     all_violations: list[str] = []
     all_files_clean = True
@@ -408,10 +410,8 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         # non_directory_raises) instead of retrying network timeouts.
         env["HF_HUB_OFFLINE"] = "1"
         env["VLLM_USE_MODELSCOPE"] = "True"
-        env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
         # Hide NPU so platform detection sees pure CPU — matches
-        # PR CI cpu-0.  fake npu-smi still mocks conftest, but
-        # torch_npu's runtime sees no visible devices.
+        # PR CI cpu-0; npu-smi is absent on this runner (upstream model).
         env["ASCEND_RT_VISIBLE_DEVICES"] = ""
         env.pop("CUDA_VISIBLE_DEVICES", None)
         ts_print(f"[{log_label}] ut: [{label}] pure-CPU env "
@@ -551,7 +551,5 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     finally:
         if venv_dir and venv_dir.exists():
             shutil.rmtree(venv_dir, ignore_errors=True)
-        if fake_bin_dir.exists():
-            shutil.rmtree(fake_bin_dir, ignore_errors=True)
         if reports_dir and reports_dir.exists():
             shutil.rmtree(reports_dir, ignore_errors=True)
