@@ -419,9 +419,15 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                          f"{len(out.splitlines())} vars, "
                          f"LD_LIBRARY_PATH="
                          f"{'present' if 'LD_LIBRARY_PATH=' in out else 'MISSING'}")
+                # PATH deliberately NOT inherited: set_env.sh prepends the
+                # CANN bin dir, which contains a REAL npu-smi — conftest
+                # would then take the non-mock path and real torch_npu
+                # crashes without devices (exit=4, 2026-09-02).  Upstream
+                # cpu-0 has npu-smi absent: conftest mocks, triton probes
+                # degrade — both need the command invisible.
                 for line in out.splitlines():
                     key, _, val = line.partition("=")
-                    if key in ("LD_LIBRARY_PATH", "PATH",
+                    if key in ("LD_LIBRARY_PATH",
                                "ASCEND_TOOLKIT_HOME", "ASCEND_HOME_PATH",
                                "ASCEND_AICPU_PATH", "ASCEND_OPPER_PATH",
                                "ASCEND_DRIVER_PATH"):
