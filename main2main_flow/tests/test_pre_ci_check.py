@@ -107,7 +107,8 @@ def test_extract_error_block_collection_error() -> None:
     # fix rounds and never the real ImportError.
     output = (
         "collected 246 files / 1 error\n"
-        "ERROR collecting tests/ut/worker/test_attn_utils_v2.py\n"
+        "===================== ERRORS =====================\n"
+        "___________ ERROR collecting tests/ut/worker/test_attn_utils_v2.py ____________\n"
         "tests/ut/worker/test_attn_utils_v2.py:42: in <module>\n"
         "    from vllm.v1.worker.gpu_model_runner import GPUModelRunner\n"
         "E   ImportError: cannot import name 'GPUModelRunner'\n"

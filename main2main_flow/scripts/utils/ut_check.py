@@ -104,8 +104,12 @@ def _collect_cpu_ut_files(repo: Path, log_label: str = "pre_ci") -> list[str]:
     return files
 
 
+# pytest decorates the ERROR paragraph with underscores
+# (_____ ERROR collecting tests/foo.py _____); the underscore must be
+# allowed before the keyword (verified against real pytest output,
+# 2026-09-02: local collection-error reproduction).
 _COLLECTION_ERR_RE = re.compile(
-    r"^ERROR (?:collecting \S+|at setup of \S+|tests/\S+\.py\b)")
+    r"^[_=\s]*ERROR (?:collecting \S+|at setup of \S+|tests/\S+\.py\b)")
 _ERR_BLOCK_MAX = 3000
 
 
@@ -123,10 +127,15 @@ def _extract_error_block(clean: str) -> str:
     for line in clean.splitlines():
         m = _COLLECTION_ERR_RE.search(line.strip())
         if m:
-            start = max(0, clean.find(line) - 200)
+            line_pos = clean.find(line)
+            start = max(0, line_pos - 200)
             end = len(clean)
+            # Section markers must be sought AFTER the matched line — the
+            # "===== ERRORS =====" header precedes it, and searching from
+            # start would truncate the block to nothing (verified against
+            # real pytest output, 2026-09-02).
             for marker in ("\n____", "\n===", "\n--------"):
-                cut = clean.find(marker, start + 1)
+                cut = clean.find(marker, line_pos + 1)
                 if cut > 0:
                     end = min(end, cut)
             return clean[start:end][:_ERR_BLOCK_MAX]
