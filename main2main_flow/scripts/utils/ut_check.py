@@ -403,7 +403,28 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             env["PYTHONPATH"] = (
                 f"{ascend_abs}:{vllm_abs}:{existing}" if existing
                 else f"{ascend_abs}:{vllm_abs}")
-        env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+        # CANN runtime libs (LD_LIBRARY_PATH etc.) — the container does not
+        # set them, so without this torch_npu auto-load fails on
+        # libascend_hal.so, and the old AUTOLOAD=0 bypass changed the import
+        # chain (loading vllm.config), breaking
+        # test_config_modules_do_not_load_vllm_config (bisected 2026-09-02:
+        # source set_env.sh -> PROBE PASS).  Mirrors the e2e serve path.
+        cann_setenv = "/usr/local/Ascend/ascend-toolkit/set_env.sh"
+        if os.path.exists(cann_setenv):
+            try:
+                out = subprocess.run(
+                    ["bash", "-c", f". {cann_setenv} && env"],
+                    capture_output=True, text=True, timeout=60).stdout
+                for line in out.splitlines():
+                    key, _, val = line.partition("=")
+                    if key in ("LD_LIBRARY_PATH", "PATH",
+                               "ASCEND_TOOLKIT_HOME", "ASCEND_HOME_PATH",
+                               "ASCEND_AICPU_PATH", "ASCEND_OPPER_PATH",
+                               "ASCEND_DRIVER_PATH"):
+                        env[key] = val
+            except Exception as exc:
+                ts_print(f"[{log_label}] ut: WARNING CANN env source failed "
+                         f"({exc}) — torch_npu may fail to load")
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         # Match CI: offline mode so get_model_file / hf_hub_download
         # fails immediately (385s→0.5s for test_maybe_update_config_
