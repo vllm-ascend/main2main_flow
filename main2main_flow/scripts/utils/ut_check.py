@@ -131,15 +131,6 @@ def _collect_cpu_ut_files(repo: Path, log_label: str = "pre_ci") -> list[str]:
     return files
 
 
-# pytest decorates the ERROR paragraph with underscores
-# (_____ ERROR collecting tests/foo.py _____); the underscore must be
-# allowed before the keyword (verified against real pytest output,
-# 2026-09-02: local collection-error reproduction).
-def _slug(path: str) -> str:
-    return (path.replace("/", "__").replace(".py", "")
-            .replace("::", "--"))
-
-
 def _violations_from_junit(label: str, name: str, xml_path: Path) -> list[str]:
     """Build violations from pytest's built-in junitxml report.
 
@@ -390,31 +381,15 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         ts_print(f"\n[{log_label}] ut: === batch [{label}] "
                  f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
 
-        # Files known to pollute the shared process get their own
-        # subprocess.  Verified on the A2 env: test_batch_invariant.py
-        # installs a global torch.library.Library monkeypatch that breaks
-        # test_gdn_layerwise_kv.py when run in the same process.
-        # test_vocab_parallel_embedding.py assigns module-level
-        # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
-        # polluting test_linear.py / test_gdn_layerwise_kv.py in the
-        # same process (verified on A2, run 2026-08-12).
-        # test_gdn_layerwise_kv.py itself fails only inside the batch
-        # (qwen_gdn_attention_core CPU-backend NotImplementedError;
-        # passes standalone) — isolate it too so the batch stays clean.
-        # MAIN2MAIN_UT_NO_ISOLATION=1: fold the isolated files back into
-        # the single batch.  Upstream runs them in one batch with no
-        # isolation (pr_test 3307 items all green) — the isolation was
-        # tuned on the OLD env (pytest 9.1.1 / PYTHONPATH source tree /
-        # fake npu-smi); under the upstream-aligned env it may be
-        # unnecessary.  Probe before removing permanently.
-        if os.getenv("MAIN2MAIN_UT_NO_ISOLATION", "0") == "1":
-            isolated: list[str] = []
-        else:
-            isolated = [f for f in cpu_files
-                        if f.endswith(("test_batch_invariant.py",
-                                       "test_vocab_parallel_embedding.py",
-                                       "test_gdn_layerwise_kv.py"))]
-        batch = [f for f in cpu_files if f not in isolated]
+        # Single batch over ALL files — the exact upstream model
+        # (run_selected_tests.sh cpu-ut runs one pytest process; pr_test
+        # 3307 items all green).  The per-file isolation of
+        # test_batch_invariant / test_vocab_parallel_embedding /
+        # test_gdn_layerwise_kv was tuned on the OLD env (pytest 9.1.1 /
+        # PYTHONPATH source tree / fake npu-smi) and was verified
+        # unnecessary under the upstream-aligned env (2026-09-02
+        # no-isolation probe: all_passed with them folded into the batch).
+        batch = list(cpu_files)
 
         exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
 
@@ -455,20 +430,6 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             ts_print(f"[{log_label}] ut: [{label}] batch TIMEOUT(1200s)")
             all_files_clean = False
             details.append(f"{label}/batch: TIMEOUT(1200s)")
-        for f in isolated:
-            f_report = reports_dir / f"iso-{_slug(f)}.xml"
-            try:
-                rr = subprocess.run(
-                    [*pytest_cmd, "-q", "--tb=short", "--no-header", f,
-                     f"--junitxml={f_report}"],
-                    cwd=str(repo), capture_output=True, text=True,
-                    env=env, timeout=300,
-                )
-                runs.append((f, rr))
-                run_reports.append(f_report)
-            except subprocess.TimeoutExpired:
-                ts_print(f"[{log_label}] ut: [{label}] {f} TIMEOUT(300s)")
-                all_files_clean = False
 
         for idx, (name, rr) in enumerate(runs):
             clean = ansi_re.sub("", rr.stdout + rr.stderr)
