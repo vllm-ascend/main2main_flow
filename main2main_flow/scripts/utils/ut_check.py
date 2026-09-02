@@ -431,12 +431,14 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         # non_directory_raises) instead of retrying network timeouts.
         env["HF_HUB_OFFLINE"] = "1"
         env["VLLM_USE_MODELSCOPE"] = "True"
-        # Hide NPU so platform detection sees pure CPU — matches
-        # PR CI cpu-0; npu-smi is absent on this runner (upstream model).
-        env["ASCEND_RT_VISIBLE_DEVICES"] = ""
+        # No ASCEND_RT_VISIBLE_DEVICES override (upstream cpu-0 sets none):
+        # torch_npu now loads for real under the CANN env, and an empty
+        # device string crashes it ("Failed to load the backend
+        # extension" — bisected 2026-09-02).  npu-smi is absent on this
+        # runner, so conftest still takes the mock path.
         env.pop("CUDA_VISIBLE_DEVICES", None)
-        ts_print(f"[{log_label}] ut: [{label}] pure-CPU env "
-                 f"(ASCEND_RT_VISIBLE_DEVICES='')")
+        ts_print(f"[{log_label}] ut: [{label}] pure-CPU env (CANN sourced, "
+                 f"no device overrides)")
 
         ts_print(f"\n[{log_label}] ut: === batch [{label}] "
                  f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
