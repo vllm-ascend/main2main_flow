@@ -22,6 +22,7 @@ Key mechanisms:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -46,15 +47,40 @@ def _is_npu_convention_ut_path(rel_path: str) -> bool:
 def _collect_cpu_ut_files(repo: Path, log_label: str = "pre_ci") -> list[str]:
     """Return CPU-routed tests/ut paths (rel to repo).
 
-    Routes from the vendored ``test_config.yaml`` (see e2e_dispatch.
-    _VENDOR_DIR: upstream's 2026-09 overhaul rewrote the config into a
-    single-document format the two-document reader cannot parse, and the
-    source->test mapping data moved into the coverage pipeline) — the
-    same ``runner_mapping`` + ``skip_tests`` the vendored select_tests.py
-    reads, so UT routing and e2e grouping stay on one pinned generation.
-    Falls back to the ascend checkout's own config, then to the
-    convention regexes.
+    PRIMARY: invoke the ascend checkout's OWN select_tests.py --all-tests
+    — the upstream four-mode contract's ready-all path (pr_test.yaml's
+    "Run select-tests" ready-all branch), so the collected set tracks
+    upstream's Collect/Skip/Route logic exactly (verified 2026-09-02:
+    --all-tests cpu group = 246 files, identical to the vendored-config
+    scan).  GITHUB_OUTPUT="" forces the test_groups= line to stdout.
+    Falls back to the vendored test_config.yaml parsing (same set), then
+    to the convention regexes.
     """
+    select_script = repo / ".github/workflows/scripts/select_tests.py"
+    if select_script.exists():
+        try:
+            r = subprocess.run(
+                [sys.executable, str(select_script), "--all-tests"],
+                cwd=str(repo), capture_output=True, text=True,
+                env={**os.environ, "GITHUB_OUTPUT": ""}, timeout=300,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.strip().splitlines():
+                    if not line.startswith("test_groups="):
+                        continue
+                    groups = json.loads(line[len("test_groups="):])
+                    cpu_tests: list[str] = []
+                    for g in groups:
+                        if g.get("npu_type") == "cpu":
+                            cpu_tests.extend(g.get("tests", "").split())
+                    if cpu_tests:
+                        ts_print(f"[{log_label}] ut: routed from upstream "
+                                 f"select_tests.py --all-tests "
+                                 f"({len(cpu_tests)} CPU test file(s))")
+                        return cpu_tests
+        except Exception as exc:
+            ts_print(f"[{log_label}] ut: select_tests.py --all-tests failed "
+                     f"({exc}) — falling back to vendored config")
     skip_tests: set[str] = set()
     npu_patterns: list[re.Pattern] = []
     vendor_config = (Path(__file__).resolve().parent
