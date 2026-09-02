@@ -389,10 +389,18 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         env = os.environ.copy()
         ascend_abs = str(repo.resolve())
         vllm_abs = str(vpath.resolve())
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = (
-            f"{ascend_abs}:{vllm_abs}:{existing}" if existing
-            else f"{ascend_abs}:{vllm_abs}")
+        # MAIN2MAIN_UT_SYSTEM_IMPORT=1: skip the source-tree PYTHONPATH and
+        # let pytest import ascend/vllm from the installed packages — the
+        # exact model of upstream pr_test (pip/uv-installed, single module
+        # identity).  PYTHONPATH=ascend:vllm can split module identity
+        # when the same package is also installed (mock patches one object
+        # while code calls another) — under investigation for the
+        # pristine-baseline failures (2026-09-02).
+        if os.getenv("MAIN2MAIN_UT_SYSTEM_IMPORT", "0") != "1":
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = (
+                f"{ascend_abs}:{vllm_abs}:{existing}" if existing
+                else f"{ascend_abs}:{vllm_abs}")
         env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         # Match CI: offline mode so get_model_file / hf_hub_download
