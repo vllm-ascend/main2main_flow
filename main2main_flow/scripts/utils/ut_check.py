@@ -403,41 +403,13 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             env["PYTHONPATH"] = (
                 f"{ascend_abs}:{vllm_abs}:{existing}" if existing
                 else f"{ascend_abs}:{vllm_abs}")
-        # CANN runtime libs (LD_LIBRARY_PATH etc.) — the container does not
-        # set them, so without this torch_npu auto-load fails on
-        # libascend_hal.so, and the old AUTOLOAD=0 bypass changed the import
-        # chain (loading vllm.config), breaking
-        # test_config_modules_do_not_load_vllm_config (bisected 2026-09-02:
-        # source set_env.sh -> PROBE PASS).  Mirrors the e2e serve path.
-        cann_setenv = "/usr/local/Ascend/ascend-toolkit/set_env.sh"
-        if os.path.exists(cann_setenv):
-            try:
-                out = subprocess.run(
-                    ["bash", "-c", f". {cann_setenv} && env"],
-                    capture_output=True, text=True, timeout=60).stdout
-                ts_print(f"[{log_label}] ut: CANN env extract: "
-                         f"{len(out.splitlines())} vars, "
-                         f"LD_LIBRARY_PATH="
-                         f"{'present' if 'LD_LIBRARY_PATH=' in out else 'MISSING'}")
-                # PATH deliberately NOT inherited: set_env.sh prepends the
-                # CANN bin dir, which contains a REAL npu-smi — conftest
-                # would then take the non-mock path and real torch_npu
-                # crashes without devices (exit=4, 2026-09-02).  Upstream
-                # cpu-0 has npu-smi absent: conftest mocks, triton probes
-                # degrade — both need the command invisible.
-                for line in out.splitlines():
-                    key, _, val = line.partition("=")
-                    if key in ("LD_LIBRARY_PATH",
-                               "ASCEND_TOOLKIT_HOME", "ASCEND_HOME_PATH",
-                               "ASCEND_AICPU_PATH", "ASCEND_OPPER_PATH",
-                               "ASCEND_DRIVER_PATH"):
-                        env[key] = val
-                if "LD_LIBRARY_PATH" in env:
-                    ts_print(f"[{log_label}] ut: CANN LD_LIBRARY_PATH: "
-                             f"{env['LD_LIBRARY_PATH'][:160]}")
-            except Exception as exc:
-                ts_print(f"[{log_label}] ut: WARNING CANN env source failed "
-                         f"({exc}) — torch_npu may fail to load")
+        # EXACT upstream cpu-0 env model (_selected_tests.yaml, "Run
+        # selected tests without device" step): AUTOLOAD=0 keeps torch from
+        # auto-loading torch_npu (whose backend fails on this container),
+        # and NO CANN set_env source — the cpu group does not source it.
+        # Removing AUTOLOAD=0 (2026-09-02 experiment) made every batch die
+        # exit=4 in torch._import_device_backends.
+        env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         # Match CI: offline mode so get_model_file / hf_hub_download
         # fails immediately (385s→0.5s for test_maybe_update_config_
