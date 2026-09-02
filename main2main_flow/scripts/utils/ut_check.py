@@ -401,10 +401,19 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         # test_gdn_layerwise_kv.py itself fails only inside the batch
         # (qwen_gdn_attention_core CPU-backend NotImplementedError;
         # passes standalone) — isolate it too so the batch stays clean.
-        isolated = [f for f in cpu_files
-                    if f.endswith(("test_batch_invariant.py",
-                                   "test_vocab_parallel_embedding.py",
-                                   "test_gdn_layerwise_kv.py"))]
+        # MAIN2MAIN_UT_NO_ISOLATION=1: fold the isolated files back into
+        # the single batch.  Upstream runs them in one batch with no
+        # isolation (pr_test 3307 items all green) — the isolation was
+        # tuned on the OLD env (pytest 9.1.1 / PYTHONPATH source tree /
+        # fake npu-smi); under the upstream-aligned env it may be
+        # unnecessary.  Probe before removing permanently.
+        if os.getenv("MAIN2MAIN_UT_NO_ISOLATION", "0") == "1":
+            isolated: list[str] = []
+        else:
+            isolated = [f for f in cpu_files
+                        if f.endswith(("test_batch_invariant.py",
+                                       "test_vocab_parallel_embedding.py",
+                                       "test_gdn_layerwise_kv.py"))]
         batch = [f for f in cpu_files if f not in isolated]
 
         exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
