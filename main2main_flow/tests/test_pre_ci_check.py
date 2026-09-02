@@ -132,8 +132,8 @@ def test_extract_error_block_none_returns_empty() -> None:
     assert ut_check._extract_error_block("all passed\n") == ""
 
 
-def test_ut_report_plugin_structured(tmp_path: Path) -> None:
-    # End-to-end: pytest + the report plugin must capture BOTH a failed
+def test_junitxml_structured(tmp_path: Path) -> None:
+    # End-to-end: pytest's built-in junitxml must capture BOTH a failed
     # test and a collection error with full tracebacks — the structured
     # route that text parsing (run 33538038959) missed.
     tdir = tmp_path / "proj"
@@ -142,44 +142,38 @@ def test_ut_report_plugin_structured(tmp_path: Path) -> None:
         "def test_boom():\n    assert 1 == 2\n", encoding="utf-8")
     (tdir / "tests" / "test_coll.py").write_text(
         "import nonexistent_module_xyz\n", encoding="utf-8")
-    report = tmp_path / "report.json"
+    report = tmp_path / "report.xml"
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "--no-header",
          "--continue-on-collection-errors",
-         "-p", "main2main_flow.scripts.utils.ut_report_plugin",
-         f"--ut-report={report}", "tests/"],
+         f"--junitxml={report}", "tests/"],
         cwd=str(tdir), capture_output=True, text=True)
     assert r.returncode != 0
-    data = json.loads(report.read_text(encoding="utf-8"))
-    failed = data["failed_tests"]
-    errors = data["collect_errors"]
-    assert any(t["nodeid"] == "tests/test_fail.py::test_boom"
-               and "assert 1 == 2" in t["longrepr"]["traceback"]
-               for t in failed)
-    assert any(c["nodeid"] == "tests/test_coll.py"
-               and "ModuleNotFoundError" in c["longrepr"]["message"]
-               for c in errors)
+    vs = ut_check._violations_from_junit("main", "batch", report)
+    # junitxml nodeid form: classname is dotted (tests.test_fail), name
+    # is the test function — joined as classname::name.
+    assert any("tests.test_fail::test_boom FAILED" in v
+               and "assert 1 == 2" in v for v in vs)
+    assert any("COLLECTION ERROR" in v and "ModuleNotFoundError" in v
+               for v in vs)
 
 
-def test_violations_from_report(tmp_path: Path) -> None:
-    report = tmp_path / "r.json"
-    report.write_text(json.dumps({
-        "exitstatus": 1,
-        "failed_tests": [{"nodeid": "tests/a.py::t", "outcome": "failed",
-                          "duration": 0.1,
-                          "longrepr": {"path": "tests/a.py", "lineno": 3,
-                                       "message": "boom",
-                                       "traceback": "line1\nline2"}}],
-        "collect_errors": [{"nodeid": "tests/b.py",
-                            "longrepr": {"message": "ImportError: x",
-                                         "traceback": "tb1\ntb2"}}],
-    }, ensure_ascii=False), encoding="utf-8")
-    vs = ut_check._violations_from_report("main", "batch", report)
+def test_violations_from_junit(tmp_path: Path) -> None:
+    xml = tmp_path / "r.xml"
+    xml.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<testsuites><testsuite errors="1" failures="1">'
+        '<testcase classname="tests.a" name="t"><failure '
+        'message="boom">tb1\ntb2\n</failure></testcase>'
+        '<testcase classname="" name="tests.b"><error '
+        'message="collection failure">ImportError: x\ntb3\n</error>'
+        '</testcase></testsuite></testsuites>', encoding="utf-8")
+    vs = ut_check._violations_from_junit("main", "batch", xml)
     assert len(vs) == 2
-    assert "tests/a.py::t FAILED — boom" in vs[0]
-    assert "line2" in vs[0]
-    assert "COLLECTION ERROR tests/b.py — ImportError: x" in vs[1]
-    assert "tb2" in vs[1]
+    assert "tests.a::t FAILED — boom" in vs[0]
+    assert "tb2" in vs[0]
+    assert "COLLECTION ERROR tests.b — collection failure" in vs[1]
+    assert "ImportError: x" in vs[1]
     # Missing report -> [] (caller falls back to text parsing).
-    assert ut_check._violations_from_report("main", "batch",
-                                            tmp_path / "none.json") == []
+    assert ut_check._violations_from_junit("main", "batch",
+                                           tmp_path / "none.xml") == []
