@@ -326,22 +326,32 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             venv_dir = None
         else:
             venv_python = venv_dir / "bin" / "python"
-            if target_numpy_spec:
-                try:
-                    r2 = subprocess.run(
-                        [str(venv_python), "-m", "pip", "install", "-q",
-                         f"numpy{target_numpy_spec}"],
-                        capture_output=True, text=True, timeout=180,
-                    )
-                except subprocess.TimeoutExpired:
-                    ts_print(f"[{log_label}] ut: WARNING numpy install TIMED OUT — "
-                             "falling back to system pytest")
-                    r2 = None
-                if r2 is not None and r2.returncode != 0:
-                    ts_print(f"[{log_label}] ut: WARNING numpy install FAILED "
-                             f"({r2.stderr.strip()[:200]}) — falling back "
-                             "to system pytest")
-                    venv_dir = None
+            # Pin the pytest toolchain to what upstream pr_test resolves
+            # (verified 2026-09-02 on run 33582304976: pytest==8.3.2,
+            # pytest-asyncio==1.3.0): the runner's unpinned `pip install
+            # pytest` pulls 9.1.1, which changed collection/plugin
+            # behavior — collected 3165 items vs upstream's 3307 on the
+            # SAME 246-file set, and the batch failed where upstream
+            # passed.  Overriding in the venv keeps system pytest intact.
+            installs = ([f"numpy{target_numpy_spec}"] if target_numpy_spec
+                        else [])
+            installs += ["pytest==8.3.2", "pytest-asyncio==1.3.0",
+                         "pytest-cov==7.1.0", "pytest-mock==3.15.1"]
+            try:
+                r2 = subprocess.run(
+                    [str(venv_python), "-m", "pip", "install", "-q",
+                     *installs],
+                    capture_output=True, text=True, timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                ts_print(f"[{log_label}] ut: WARNING venv install TIMED OUT — "
+                         "falling back to system pytest")
+                r2 = None
+            if r2 is not None and r2.returncode != 0:
+                ts_print(f"[{log_label}] ut: WARNING venv install FAILED "
+                         f"({r2.stderr.strip()[:200]}) — falling back "
+                         "to system pytest")
+                venv_dir = None
             if venv_dir is not None:
                 pytest_cmd = [str(venv_python), "-m", "pytest"]
                 ts_print(f"[{log_label}] ut: using venv pytest via "
