@@ -397,10 +397,16 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                     # No FAILED/ERROR x.py::x line: a collection/setup
                     # error or crash.  Prefer the pytest ERROR paragraph
                     # (carries the traceback); fall back to the tail.
+                    # Print it — the batch output is captured, so without
+                    # this the ERROR paragraph never reaches any log.
                     err_block = _extract_error_block(clean)
+                    detail_tail = err_block or clean[-500:]
+                    ts_print(f"[{log_label}] ut: [{label}/{name}] "
+                             f"exit={rr.returncode} — pytest error "
+                             f"block:\n{detail_tail[:1500]}")
                     all_violations.append(
                         f"[{label}] {name}: exit={rr.returncode} — "
-                        f"{err_block or clean[-500:]}")
+                        f"{detail_tail}")
             summary_m = re.search(
                 r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
             summary = (summary_m.group(1) if summary_m
