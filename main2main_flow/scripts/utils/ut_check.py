@@ -387,10 +387,17 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         # test_gdn_layerwise_kv.py itself fails only inside the batch
         # (qwen_gdn_attention_core CPU-backend NotImplementedError;
         # passes standalone) — isolate it too so the batch stays clean.
+        # test_mooncake_connector.py: its module-level get_pp_group mock
+        # dies inside the single-process batch — the upstream file itself
+        # documents other files' mocks polluting kv_transfer (ascend_store
+        # _mock_deps); pristine-baseline probe (2026-09-02) failed 5
+        # mooncake tests in-batch with "pipeline model parallel group is
+        # not initialized" while the file carries the mock.
         isolated = [f for f in cpu_files
                     if f.endswith(("test_batch_invariant.py",
                                    "test_vocab_parallel_embedding.py",
-                                   "test_gdn_layerwise_kv.py"))]
+                                   "test_gdn_layerwise_kv.py",
+                                   "test_mooncake_connector.py"))]
         batch = [f for f in cpu_files if f not in isolated]
 
         exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
