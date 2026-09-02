@@ -153,13 +153,18 @@ def _check_fast_format(repo: Path) -> dict:
     ~35 min of adapter retries).
     """
     if not shutil.which("pre-commit"):
+        ts_print("\n[pre_ci] format: SKIPPED — pre-commit not installed")
         return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
     py_files = subprocess.run(
         ["git", "diff", "HEAD", "--name-only", "--", "*.py"],
         cwd=str(repo), capture_output=True, text=True,
     ).stdout.splitlines()
     if not py_files:
+        ts_print("\n[pre_ci] format: SKIPPED — no changed python files "
+                 "(ruff-check fast path has nothing to scan)")
         return {"violations": [], "detail": "no changed python files", "skipped": True}
+    ts_print(f"\n[pre_ci] === ruff-check (fast format) output begin "
+             f"({len(py_files)} changed file(s)) ===")
     snapshot = subprocess.run(
         ["git", "diff", "HEAD", "--", "*.py"], cwd=str(repo),
         capture_output=True, text=True,
@@ -169,6 +174,8 @@ def _check_fast_format(repo: Path) -> dict:
         cwd=str(repo), capture_output=True, text=True,
     )
     output = (r.stdout + "\n" + r.stderr)
+    ts_print(output.strip()[-1500:] or "(no output)")
+    ts_print(f"[pre_ci] === ruff-check output end (exit={r.returncode}) ===")
     if r.returncode == 0:
         return {"violations": [], "detail": "ruff-check OK"}
     if r.returncode == 2:
