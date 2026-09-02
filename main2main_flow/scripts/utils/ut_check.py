@@ -22,6 +22,7 @@ Key mechanisms:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -108,6 +109,46 @@ def _collect_cpu_ut_files(repo: Path, log_label: str = "pre_ci") -> list[str]:
 # (_____ ERROR collecting tests/foo.py _____); the underscore must be
 # allowed before the keyword (verified against real pytest output,
 # 2026-09-02: local collection-error reproduction).
+def _slug(path: str) -> str:
+    return (path.replace("/", "__").replace(".py", "")
+            .replace("::", "--"))
+
+
+def _violations_from_report(label: str, name: str,
+                            report_path: Path) -> list[str]:
+    """Build violations from the structured pytest report (ut_report_plugin).
+
+    Each failed test and collection error carries the full longrepr
+    (path/lineno/message/traceback) — no terminal-text parsing.  Returns
+    [] when the report is missing/empty (plugin failed to load), and the
+    caller falls back to text parsing.
+    """
+    if not report_path.exists():
+        return []
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    out: list[str] = []
+    for t in data.get("failed_tests", []):
+        lr = t.get("longrepr", {}) or {}
+        msg = lr.get("message", "") or lr.get("traceback", "")
+        v = f"[{label}] {t.get('nodeid', '?')} FAILED — {msg}"
+        tb = lr.get("traceback", "")
+        if tb and tb != msg:
+            v += "\n" + tb
+        out.append(v)
+    for c in data.get("collect_errors", []):
+        lr = c.get("longrepr", {}) or {}
+        v = (f"[{label}] COLLECTION ERROR {c.get('nodeid', '?')} — "
+             f"{lr.get('message', '')}")
+        tb = lr.get("traceback", "")
+        if tb:
+            v += "\n" + tb
+        out.append(v)
+    return out
+
+
 _COLLECTION_ERR_RE = re.compile(
     r"^[_=\s]*ERROR (?:collecting \S+|at setup of \S+|tests/\S+\.py\b)")
 _ERR_BLOCK_MAX = 3000
@@ -296,6 +337,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     full_outputs: dict[str, str] = {}
     ansi_re = re.compile(r"\x1b\[[0-9;]*m")
     failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
+    reports_dir: Path | None = None
 
     try:
         vpath = Path(vllm_path) if vllm_path else None
@@ -350,6 +392,12 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
 
         runs: list[tuple[str, subprocess.CompletedProcess]] = []
+        # Structured per-run reports via the ut_report_plugin hook (JSON):
+        # failures and collection errors carry full longrepr, no terminal-
+        # text parsing.  Missing report (plugin load failure) falls back
+        # to the text path below.
+        reports_dir = Path(tempfile.mkdtemp(prefix="ut_reports_"))
+        run_reports: list[Path] = []
         try:
             # --continue-on-collection-errors: a single file that fails
             # to import (e.g. an env-specific ModuleNotFoundError) must
@@ -362,47 +410,59 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             # namespace examples/ — pre-register the ascend dir so the
             # batch matches real CI (vllm installed, no examples/ on
             # sys.path).
+            batch_report = reports_dir / "batch.json"
             rr = subprocess.run(
                 [*pytest_cmd, "-q", "--tb=short", "--no-header",
                  "--continue-on-collection-errors",
                  "-p", "main2main_flow.scripts.utils.ut_namespace",
+                 "-p", "main2main_flow.scripts.utils.ut_report_plugin",
+                 f"--ut-report={batch_report}",
                  *batch, "-k", exclude_expr],
                 cwd=str(repo), capture_output=True, text=True,
                 env=env, timeout=1200,
             )
             runs.append(("batch", rr))
+            run_reports.append(batch_report)
         except subprocess.TimeoutExpired:
             ts_print(f"[{log_label}] ut: [{label}] batch TIMEOUT(1200s)")
             all_files_clean = False
             details.append(f"{label}/batch: TIMEOUT(1200s)")
         for f in isolated:
+            f_report = reports_dir / f"iso-{_slug(f)}.json"
             try:
                 rr = subprocess.run(
-                    [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
+                    [*pytest_cmd, "-q", "--tb=short", "--no-header", f,
+                     "-p", "main2main_flow.scripts.utils.ut_report_plugin",
+                     f"--ut-report={f_report}"],
                     cwd=str(repo), capture_output=True, text=True,
                     env=env, timeout=300,
                 )
                 runs.append((f, rr))
+                run_reports.append(f_report)
             except subprocess.TimeoutExpired:
                 ts_print(f"[{log_label}] ut: [{label}] {f} TIMEOUT(300s)")
                 all_files_clean = False
 
-        for name, rr in runs:
+        for idx, (name, rr) in enumerate(runs):
             clean = ansi_re.sub("", rr.stdout + rr.stderr)
             seen: set[str] = set()
-            for line in clean.splitlines():
-                m = failed_re.search(line.strip())
-                if m and m.group(2) not in seen:
-                    seen.add(m.group(2))
-                    v = f"[{label}] {line.strip()}"
-                    ex = _failure_excerpt(clean, line.strip())
-                    if ex:
-                        v += "\n" + ex
-                    all_violations.append(v)
-            if rr.returncode != 0:
+            json_violations = _violations_from_report(
+                label, name, run_reports[idx])
+            if json_violations:
+                # Structured report is authoritative — no text parsing.
+                all_violations.extend(json_violations)
                 all_files_clean = False
-                full_outputs[f"{label}/{name}"] = clean
-                if not seen:
+            else:
+                for line in clean.splitlines():
+                    m = failed_re.search(line.strip())
+                    if m and m.group(2) not in seen:
+                        seen.add(m.group(2))
+                        v = f"[{label}] {line.strip()}"
+                        ex = _failure_excerpt(clean, line.strip())
+                        if ex:
+                            v += "\n" + ex
+                        all_violations.append(v)
+                if rr.returncode != 0 and not seen:
                     # No FAILED/ERROR x.py::x line: a collection/setup
                     # error or crash.  Prefer the pytest ERROR paragraph
                     # (carries the traceback); fall back to the tail.
@@ -416,6 +476,9 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                     all_violations.append(
                         f"[{label}] {name}: exit={rr.returncode} — "
                         f"{detail_tail}")
+            if rr.returncode != 0:
+                all_files_clean = False
+                full_outputs[f"{label}/{name}"] = clean
             summary_m = re.search(
                 r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
             summary = (summary_m.group(1) if summary_m
@@ -442,3 +505,5 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             shutil.rmtree(venv_dir, ignore_errors=True)
         if fake_bin_dir.exists():
             shutil.rmtree(fake_bin_dir, ignore_errors=True)
+        if reports_dir and reports_dir.exists():
+            shutil.rmtree(reports_dir, ignore_errors=True)
