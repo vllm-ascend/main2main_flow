@@ -292,85 +292,16 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
              f"(per-file isolation, NPU-convention a2/ and a3_2/ excluded)")
 
     # Read numpy constraint from triton-ascend metadata (mirror _check_mypy).
-    target_numpy_spec = ""
-    try:
-        from packaging.requirements import Requirement
-        reqs = _md.requires("triton-ascend") or []
-        for req in reqs:
-            if "extra" in req.lower():
-                continue
-            try:
-                r = Requirement(req)
-            except Exception:
-                continue
-            if r.name.lower() == "numpy":
-                target_numpy_spec = ",".join(
-                    f"{s.operator}{s.version}" for s in r.specifier)
-                break
-    except Exception as e:
-        ts_print(f"[{log_label}] ut: failed to read triton-ascend numpy constraint ({e})")
-
-    # MAIN2MAIN_UT_NO_VENV=1: run the batch on the SYSTEM pytest/numpy —
-    # the exact upstream cpu-0 model (_selected_tests.yaml has no venv).
-    # The venv exists to pin numpy 1.26.4 (triton-ascend constraint;
-    # system numpy 2.x produced mypy false positives) and pytest 8.3.2
-    # (upstream resolution); when the system environment already matches
-    # upstream, the venv is redundant.
+    # Run on the SYSTEM pytest/numpy — the exact upstream cpu-0 model
+    # (_selected_tests.yaml has no venv; verified 2026-09-02: system numpy
+    # 1.26.4 + pytest 8.3.2 from requirements-dev give a clean 247-file
+    # batch).  The venv that used to pin numpy/pytest here was removed:
+    # its reasons (system numpy 2.x / unpinned pytest 9.1.1) are gone once
+    # the environment installs pytest via requirements-dev like upstream.
     venv_dir: Path | None = None
     pytest_cmd = [pytest_bin]
-    if os.getenv("MAIN2MAIN_UT_NO_VENV", "0") == "1":
-        ts_print(f"[{log_label}] ut: NO_VENV mode — system pytest "
-                 f"({pytest_bin}) + system numpy")
-    else:
-        try:
-            venv_dir = Path(tempfile.mkdtemp(prefix="ut_venv_"))
-            ts_print(f"[{log_label}] ut: creating venv at {venv_dir} "
-                     f"(numpy{target_numpy_spec} from triton-ascend)")
-            r = subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_dir), "--system-site-packages"],
-                capture_output=True, text=True, timeout=180,
-            )
-            if r.returncode != 0:
-                ts_print(f"[{log_label}] ut: WARNING venv creation FAILED — "
-                         "falling back to system pytest")
-                venv_dir = None
-            else:
-                venv_python = venv_dir / "bin" / "python"
-                # Pin the pytest toolchain to what upstream pr_test
-                # resolves (verified 2026-09-02 on run 33582304976:
-                # pytest==8.3.2, pytest-asyncio==1.3.0): the runner's
-                # unpinned `pip install pytest` pulls 9.1.1, which changed
-                # collection/plugin behavior — collected 3165 items vs
-                # upstream's 3307 on the SAME 246-file set, and the batch
-                # failed where upstream passed.  Overriding in the venv
-                # keeps system pytest intact.
-                installs = ([f"numpy{target_numpy_spec}"]
-                            if target_numpy_spec else [])
-                installs += ["pytest==8.3.2", "pytest-asyncio==1.3.0",
-                             "pytest-cov==7.1.0", "pytest-mock==3.15.1"]
-                try:
-                    r2 = subprocess.run(
-                        [str(venv_python), "-m", "pip", "install", "-q",
-                         *installs],
-                        capture_output=True, text=True, timeout=300,
-                    )
-                except subprocess.TimeoutExpired:
-                    ts_print(f"[{log_label}] ut: WARNING venv install "
-                             f"TIMED OUT — falling back to system pytest")
-                    r2 = None
-                if r2 is not None and r2.returncode != 0:
-                    ts_print(f"[{log_label}] ut: WARNING venv install "
-                             f"FAILED ({r2.stderr.strip()[:200]}) — "
-                             "falling back to system pytest")
-                    venv_dir = None
-                if venv_dir is not None:
-                    pytest_cmd = [str(venv_python), "-m", "pytest"]
-                    ts_print(f"[{log_label}] ut: using venv pytest via "
-                             f"{venv_python} -m pytest")
-        except subprocess.TimeoutExpired:
-            ts_print(f"[{log_label}] ut: WARNING venv creation TIMED OUT "
-                     f"(180s) — falling back to system pytest")
-            venv_dir = None
+    ts_print(f"[{log_label}] ut: system pytest ({pytest_bin}) — "
+             f"no venv (upstream cpu-0 model)")
 
     # NO fake npu-smi: the batch runs on the pure-CPU runner where the
     # command does not exist, exactly like upstream pr_test's cpu-0 — and
@@ -588,7 +519,5 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                           + "; ".join(details),
                 "full_outputs": full_outputs}
     finally:
-        if venv_dir and venv_dir.exists():
-            shutil.rmtree(venv_dir, ignore_errors=True)
         if reports_dir and reports_dir.exists():
             shutil.rmtree(reports_dir, ignore_errors=True)
