@@ -64,7 +64,9 @@ def test_zero_diff_fix_loop_warns_then_fails_fast(monkeypatch, tmp_path):
 
     assert len(e2e_calls) == 1  # zero-diff rounds never re-run e2e
     assert len(reverts) == 1
-    assert f.state.final_status == flow_mod.UpgradeFailed
+    # Exhaustion now marks PARTIAL success (prior steps stay shippable
+    # through the gate) rather than wholesale failure.
+    assert f.state.final_status == flow_mod.UpgradePartial
     warn = tmp_path / "ws" / "steps" / "step-1" / "zero-progress-fix-warning.txt"
     assert warn.exists()
     assert f.state.test_errors[0] == str(warn)

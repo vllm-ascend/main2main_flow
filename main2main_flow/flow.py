@@ -26,7 +26,7 @@ from main2main_flow.scripts.utils.e2e_dispatch import (
 from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
 from main2main_flow.scripts.utils.utils import (
-    UpgradeCompleted, UpgradeFailed,
+    UpgradeCompleted, UpgradeFailed, UpgradePartial,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
@@ -480,6 +480,20 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # step was verified on the external A2/A3 runners.
         gate_passed = True
         if self.state.current_step > 0:
+            # Re-verify against the LAST VERIFIED vllm commit, not the
+            # target.  A step that exhausted its retries was reverted, but
+            # the vllm checkout was left on that step's commit — running
+            # the gate there pairs the committed (older-shape) adaptation
+            # with vllm changes it never adapted to, failing spuriously
+            # (2026-09-03 run 33638863120: step-21 exhausted, gate then
+            # died on a mamba get_mamba_groups shape the 20 committed
+            # steps never saw).  On the all-steps-completed path
+            # last_verified_commit == the target, so this is a no-op.
+            if self.state.last_verified_commit:
+                run_git(self.state.vllm_path, "checkout",
+                        self.state.last_verified_commit)
+                ts_print(f"[run] gate against last verified vllm "
+                         f"{self.state.last_verified_commit[:12]}")
             gate_passed = self._final_quality_gate()
             if not gate_passed:
                 self.state.final_status = UpgradeFailed
@@ -783,7 +797,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 ts_print(f"[process_steps] {step_id}: ai_analysis exhausted retries, "
                          f"reverting to last committed state")
                 self._revert_working_tree(f"step {step_id} ai_analysis exhausted")
-                self.state.final_status = UpgradeFailed
+                # Partial success: steps before this one passed pre_ci +
+                # e2e and stay committed — the final gate (against the last
+                # verified vllm) decides whether that partial adaptation is
+                # shippable as a PR instead of discarding it wholesale.
+                self.state.final_status = UpgradePartial
                 return
 
             # A fix round (retry_count > 0) whose diff is byte-identical to
@@ -802,7 +820,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                  f"giving up")
                         self._revert_working_tree(
                             f"step {step_id} no-op fix loop")
-                        self.state.final_status = UpgradeFailed
+                        self.state.final_status = UpgradePartial
                         return
                     step_dir = WORKSPACE_DIR / STEPS_DIR / step["id"]
                     warn_path = step_dir / "zero-progress-fix-warning.txt"
@@ -869,7 +887,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     ts_print(f"[process_steps] {step_id}: e2e exhausted retries, "
                              f"reverting to last committed state")
                     self._revert_working_tree(f"step {step_id} e2e exhausted")
-                    self.state.final_status = UpgradeFailed
+                    self.state.final_status = UpgradePartial
                     return
                 continue
         self.state.final_status = UpgradeCompleted
@@ -2029,7 +2047,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")
 
-        status = "completed" if self.state.final_status == UpgradeCompleted else "failed"
+        if self.state.final_status == UpgradeCompleted:
+            status = "completed"
+        elif self.state.final_status == UpgradePartial:
+            # Steps before the failing one passed pre_ci + e2e and are
+            # shippable — the workflow treats partial like completed (the
+            # PR exists) but the steps numbers tell the real coverage.
+            status = "partial"
+        else:
+            status = "failed"
         status_json = {
             "status": status,
             "steps_completed": self.state.current_step,

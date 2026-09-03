@@ -20,6 +20,11 @@ def ts_print(*args, **kwargs) -> None:
 
 UpgradeCompleted = "UpgradeCompleted"
 UpgradeFailed = "UpgradeFailed"
+# A step exhausted its pre_ci/e2e retries: the run stops short of the
+# target, but every step BEFORE the failure passed pre_ci + e2e and is
+# committed — that partial adaptation is shippable as a PR (the final
+# gate re-verifies it against the last verified vllm commit).
+UpgradePartial = "UpgradePartial"
 HasCommit = "HasCommit"
 HasNoCommit = "HasNoCommit"
 
