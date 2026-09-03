@@ -205,3 +205,41 @@ def test_run_one_test_oom_with_real_error_stays_failed(monkeypatch,
         "0,1", tmp_path / "ci", tmp_path, 0, 1, {},
         is_remote=False, is_mock=False)
     assert result["ci_result"] == "failed"
+
+
+# ---- numeric-precision failures → precision_pass (2026-09-03 user) ----
+
+def test_precision_failure_detected(tmp_path: Path) -> None:
+    log = tmp_path / "t.log"
+    log.write_text(
+        ">           assert torch.allclose(hf_output, vllm_output, 1e-2)\n"
+        "E           assert False\n"
+        "E            +  where False = allclose(tensor([0.0018, 0.9980]), "
+        "tensor([0.0018, 0.9982]), 0.01)\n"
+        "tests/.../test_classification_310p.py:39: AssertionError\n",
+        encoding="utf-8")
+    assert rt._is_precision_failure(log)
+
+
+def test_precision_failure_not_detected_for_other_assert(tmp_path: Path) -> None:
+    log = tmp_path / "t.log"
+    log.write_text(
+        "E   AssertionError: pipeline model parallel group is not initialized\n",
+        encoding="utf-8")
+    assert not rt._is_precision_failure(log)
+
+
+def test_aggregate_precision_pass_can_commit(tmp_path: Path) -> None:
+    from main2main_flow.scripts.utils.run_tests import aggregate_suite_results
+    r = aggregate_suite_results(
+        0, 1, [{"test": "t1", "ci_result": "passed", "code_bugs_count": 0,
+                "env_flakes_count": 0, "failed_test_files_count": 0,
+                "failed_test_cases_count": 0},
+               {"test": "t2", "ci_result": "precision_pass",
+                "code_bugs_count": 0, "env_flakes_count": 0,
+                "failed_test_files_count": 1, "failed_test_cases_count": 1}],
+        total_cards=1, sequential=False, remote="x", ci_dir=tmp_path,
+        rounds_info=[], total_elapsed=1.0)
+    assert r["ci_result"] == "precision_pass"
+    assert r["can_commit"] is True
+    assert r["requires_fix"] is False

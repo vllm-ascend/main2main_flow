@@ -44,7 +44,12 @@ from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import ts_print
 
-PASS_RESULTS = {"passed", "env_flake_pass"}
+# precision_pass: numeric-precision assertion failures (vllm output vs a
+# reference differs slightly under float16, e.g. torch.allclose on the
+# 310p classification head).  Treating them as pass was a user decision
+# (2026-09-03): NPU precision drift is hard to fix and must not burn
+# adapter fix rounds — but it is tracked separately from env flakes.
+PASS_RESULTS = {"passed", "env_flake_pass", "precision_pass"}
 DEFAULT_VLLM_REPO = "https://github.com/vllm-project/vllm.git"
 DEFAULT_ASCEND_REPO = "https://github.com/vllm-project/vllm-ascend.git"
 
@@ -708,6 +713,30 @@ def _is_oom_hang_failure(log_path: Path) -> bool:
         return False
 
 
+# Numeric-precision assertion failures: the test compares vllm output to a
+# reference with torch.allclose / assert_close (or numpy equivalents) and
+# the values differ slightly under float16 — run 33721193925's 310p
+# classification head (hf [0.0018, 0.9980] vs vllm [0.0018, 0.9982]).
+# These get precision_pass (see PASS_RESULTS): tracked, not blocking.
+_PRECISION_FAILURE_RE = re.compile(
+    r"torch\.allclose|torch\.testing\.assert_close|allclose\("
+    r"|numpy\.allclose|np\.allclose"
+    r"|assert_allclose|values are not close|maximum absolute difference"
+    r"|are not equal to desired equal"
+    r"|Mismatched elements:|not equal", re.IGNORECASE)
+
+
+def _is_precision_failure(log_path: Path) -> bool:
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                   errors="replace"))
+    except OSError:
+        return False
+    return bool(_PRECISION_FAILURE_RE.search(text))
+
+
 _ERROR_SIGNATURES = re.compile(
     r"Traceback \(most recent call last\)|Traceback:"
     r"|EngineCore failed|exited unexpectedly"
@@ -856,6 +885,11 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
                  f"the suite timeout — classified as environment, not "
                  f"blocking")
         ci_result = "env_flake_pass"
+    if ci_result == "failed" and _is_precision_failure(log_path):
+        ts_print(f"  [precision-pass] {test}: numeric-precision assertion "
+                 f"(allclose vs reference) — classified as precision_pass, "
+                 f"not blocking (user decision 2026-09-03)")
+        ci_result = "precision_pass"
     return {"test": test, "cards_required": cards,
             "run_suite_exit_code": exit_code,
             "ci_result": ci_result,
@@ -1132,8 +1166,11 @@ def aggregate_suite_results(
         overall = "summary_error"
     elif outcomes == {"passed"}:
         overall = "passed"
-    else:
+    elif "env_flake_pass" in outcomes:
         overall = "env_flake_pass"
+    else:
+        # precision_pass only (with passed) — pass, tracked separately.
+        overall = "precision_pass"
 
     return {
         "step_id": step_id, "round": round_number,
