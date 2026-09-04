@@ -37,6 +37,8 @@ _TEMP_PATTERNS = [
 
 _VERSION_IS_RE = re.compile(r'vllm_version_is\(\s*["\']([^"\']+)["\']\s*\)')
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 # test_schedule_body_matches_pinned_release_tag compares the copied
 # BalanceScheduler.schedule() body against the pinned vLLM release tag, but
 # vllm-ascend's copy deliberately tracks vllm MAIN (the drop-in replacement
@@ -149,8 +151,14 @@ def _check_format(repo: Path) -> dict:
     (shellcheck not installed, Exec format error) are also ignored.
 
     Real errors come from hooks that CANNOT auto-fix: ruff E501/F821,
-    codespell typos, typos, etc.  These are detected by checking each
-    failed hook's output for actual violation lines.
+    codespell typos, typos, etc.
+
+    Status is made TRUTHFUL by re-running format.sh after a failure: the
+    pre-commit --fix hooks exit 1 after auto-fixing (they want a re-run to
+    confirm), so a single exit != 0 is ambiguous.  Second run exit 0
+    -> auto-fix-only, pass.  Second run still failing -> real residual
+    errors; the FULL cleaned output is handed over (the output is only
+    tens of lines — excerpting it lost the violation, run 33784514899).
     """
     fmt_script = repo / "format.sh"
     if not fmt_script.exists():
@@ -160,35 +168,44 @@ def _check_format(repo: Path) -> dict:
         ts_print("\n[pre_ci] format: SKIPPED — pre-commit not installed, all lint checks bypassed!")
         return {"violations": [], "detail": "pre-commit not installed", "skipped": True}
 
-    ts_print("\n[pre_ci] === format.sh output begin ===")
-    r = run_format_sh(repo)
-    output = (r.stdout + "\n" + r.stderr)
-    ts_print(output.strip())
-    ts_print(f"[pre_ci] === format.sh output end (exit={r.returncode}) ===")
+    def _run_once(tag: str) -> tuple[int, str, str]:
+        ts_print(f"\n[pre_ci] === format.sh output begin ({tag}) ===")
+        rr = run_format_sh(repo)
+        out = _ANSI_RE.sub("", (rr.stdout + "\n" + rr.stderr))
+        ts_print(out.strip() or "(no output)")
+        ts_print(f"[pre_ci] === format.sh output end (exit={rr.returncode}) ===")
+        diff_after = subprocess.run(
+            ["git", "diff", "--stat"], cwd=str(repo), capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if diff_after:
+            ts_print(f"[pre_ci] format.sh modified files in working tree:\n{diff_after}")
+        return rr.returncode, out, diff_after
 
-    diff_after = subprocess.run(
-        ["git", "diff", "--stat"], cwd=str(repo), capture_output=True, text=True,
-    ).stdout.strip()
-    if diff_after:
-        ts_print(f"[pre_ci] format.sh modified files in working tree:\n{diff_after}")
-
-    # Extract real errors — hook-level, not regex-based line parsing.
-    # For each FAILED hook, skip auto-fix noise and env-related failures;
-    # everything else is a real violation.
-    real_errors: list[str] = []
-    for hook_name, hook_lines in _iter_failed_hooks(output):
-        real_lines = [l for l in hook_lines if _is_real_error(l)]
-        if real_lines:
-            real_errors.extend(real_lines)
-
-    if real_errors:
-        ts_print(f"\n[pre_ci] format: {len(real_errors)} non-auto-fixable issue(s):")
-        for e in real_errors[:20]:
-            ts_print(f"  {e}")
-        return {"violations": real_errors,
-                "detail": f"{len(real_errors)} lint issue(s) (not auto-fixable)"}
-    ts_print("\n[pre_ci] format: OK")
-    return {"violations": [], "detail": "format.sh OK"}
+    rc, output, diff_after = _run_once("run 1")
+    if rc == 0:
+        ts_print("\n[pre_ci] format: OK")
+        return {"violations": [], "detail": "format.sh OK"}
+    # exit != 0: auto-fix hooks may have fixed files (they exit 1 to ask
+    # for a re-run).  Re-run to separate "fixed, clean now" from "real
+    # residual errors".
+    rc2, output2, diff_after2 = _run_once("run 2 (post auto-fix confirm)")
+    if rc2 == 0:
+        ts_print("\n[pre_ci] format: OK (auto-fixed on the first run)")
+        return {"violations": [],
+                "detail": "format.sh OK (auto-fixed on first run)"}
+    # Still failing after the auto-fix pass — real residual lint errors.
+    # Hand over the FULL cleaned output: excerpting it is how an E402 was
+    # lost (run 33784514899).  Prefix-normalized lines (::error::,
+    # ##[error], ANSI) are stripped so the adapter sees clean violations.
+    full = output if rc2 == rc and not diff_after2 else output2
+    violations = [re.sub(r'^#{0,2}\[error\]\s*|^::error::\s*', '', l)
+                  for l in full.splitlines() if l.strip()]
+    ts_print(f"\n[pre_ci] format: FAILED — {len(violations)} line(s) from "
+             f"format.sh output (exit={rc2})")
+    return {"violations": violations,
+            "detail": f"format.sh FAILED (exit={rc2}) — residual lint errors "
+                      f"after auto-fix pass; full output in violations"}
 
 
 def _iter_failed_hooks(output: str):
