@@ -29,7 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import ts_print
+from main2main_flow.scripts.utils.utils import pip_install_with_fallback, ts_print
 
 _BALANCE_TAG_BODY_TEST = "test_schedule_body_matches_pinned_release_tag"
 
@@ -213,11 +213,8 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             venv_python = venv_dir / "bin" / "python"
             if target_numpy_spec:
                 try:
-                    r2 = subprocess.run(
-                        [str(venv_python), "-m", "pip", "install", "-q",
-                         f"numpy{target_numpy_spec}"],
-                        capture_output=True, text=True, timeout=180,
-                    )
+                    r2 = pip_install_with_fallback(
+                        venv_python, ["-q", f"numpy{target_numpy_spec}"])
                 except subprocess.TimeoutExpired:
                     ts_print("[pre_ci] ut: WARNING numpy install TIMED OUT — "
                              "falling back to system pytest")

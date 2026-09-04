@@ -21,7 +21,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import run_format_sh, run_git, ts_print
+from main2main_flow.scripts.utils.utils import (run_format_sh, run_git,
+                                                pip_install_with_fallback,
+                                                ts_print)
 from main2main_flow.scripts.utils.ut_check import check_ut as _check_ut  # noqa: E402
 
 _TEMP_PATTERNS = [
@@ -395,11 +397,9 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
             # Check returncode - a failed install silently leaves system
             # numpy 2.x in the venv, reproducing the false positives.
             try:
-                r2 = subprocess.run(
-                    [str(venv_python), "-m", "pip", "install", f"numpy{target_numpy_spec}",
-                     "--no-build-isolation"],
-                    capture_output=True, text=True, timeout=180,
-                )
+                r2 = pip_install_with_fallback(
+                    venv_python,
+                    [f"numpy{target_numpy_spec}", "--no-build-isolation"])
             except subprocess.TimeoutExpired:
                 ts_print("[pre_ci] mypy: WARNING numpy install in venv TIMED OUT (180s) - "
                          "falling back to system mypy")

@@ -229,6 +229,33 @@ def test_precision_failure_not_detected_for_other_assert(tmp_path: Path) -> None
     assert not rt._is_precision_failure(log)
 
 
+def test_precision_failure_detected_for_graph_mode_logprob(tmp_path: Path) -> None:
+    # run 33897770317: four_card/test_graph_mode.py aclgraph baseline-vs-
+    # compiled decode logprob assertion (own decode_atol) on the a3 soc.
+    log = tmp_path / "t.log"
+    log.write_text(
+        "E   AssertionError: Decode logprob mismatch at prompt 2, token 3: "
+        "baseline=-1.6962, compiled=-1.0638, diff=0.6324 > decode_atol=0.1378\n",
+        encoding="utf-8")
+    assert rt._is_precision_failure(log)
+
+
+def test_npu_memory_pressure_detected(tmp_path: Path) -> None:
+    # run 33897770317: one_card/test_sampler.py — harness-level resource
+    # check (tests/e2e/conftest.py) hit while sibling suites held HBM.
+    log = tmp_path / "t.log"
+    log.write_text(
+        "E               RuntimeError: Failed to get enough NPU memory! "
+        "Available: 3.12 GiB, Required: 55.14 GiB.\n"
+        "tests/e2e/conftest.py:1290: RuntimeError\n",
+        encoding="utf-8")
+    assert rt._is_npu_memory_pressure(log)
+    other = tmp_path / "ok.log"
+    other.write_text("E   AssertionError: sampler params invalid\n",
+                     encoding="utf-8")
+    assert not rt._is_npu_memory_pressure(other)
+
+
 def test_aggregate_precision_pass_can_commit(tmp_path: Path) -> None:
     from main2main_flow.scripts.utils.run_tests import aggregate_suite_results
     r = aggregate_suite_results(

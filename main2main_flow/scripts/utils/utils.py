@@ -134,6 +134,23 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
     return r
 
 
+# The image's default index (tuna) occasionally 403s aarch64 wheels under
+# load (run 33897770317: numpy 1.26.4 cp312 aarch64) — one retry on aliyun
+# keeps the venv usable instead of degrading to system numpy 2.x, which
+# breaks import-smoke and fails pre_ci for every later attempt.
+_PIP_FALLBACK_INDEX = "https://mirrors.aliyun.com/pypi/simple/"
+
+
+def pip_install_with_fallback(python: Path,
+                              args: list[str]) -> subprocess.CompletedProcess:
+    cmd = [str(python), "-m", "pip", "install", *args]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if r.returncode != 0:
+        r = subprocess.run([*cmd, "-i", _PIP_FALLBACK_INDEX],
+                           capture_output=True, text=True, timeout=180)
+    return r
+
+
 # Generated-artifact dirs that must never enter the gate's checks or the PR
 # diff — tool output, not business code.  torch.compile dumps
 # ``torch_compile_debug/`` into the repo root when a2 UTs run (e.g.
