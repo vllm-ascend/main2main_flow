@@ -1,4 +1,5 @@
 import os
+import platform
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -19,6 +20,11 @@ def ts_print(*args, **kwargs) -> None:
 
 UpgradeCompleted = "UpgradeCompleted"
 UpgradeFailed = "UpgradeFailed"
+# A step exhausted its pre_ci/e2e retries: the run stops short of the
+# target, but every step BEFORE the failure passed pre_ci + e2e and is
+# committed — that partial adaptation is shippable as a PR (the final
+# gate re-verifies it against the last verified vllm commit).
+UpgradePartial = "UpgradePartial"
 HasCommit = "HasCommit"
 HasNoCommit = "HasNoCommit"
 
@@ -83,12 +89,16 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
     Sets ``PRE_COMMIT_HOME`` to a persistent cache path so pre-commit hooks
     don't re-download environments on every invocation.
 
-    PRE_COMMIT_HOME is FORCED to ``~/.cache/main2main-pre-commit``: the CI
-    workflow sets /tmp/main2main-pre-commit, which is wiped on every
+    PRE_COMMIT_HOME is FORCED to ``~/.cache/main2main-pre-commit-<arch>``:
+    the CI workflow sets /tmp/main2main-pre-commit, which is wiped on every
     container start — format.sh then re-downloaded all hook environments
     each run and timed out (run 32785447082: URLError Errno 110). On the
     A2 runners ``/root/.cache`` is a bind-mounted persistent volume, so the
-    environments install once and later runs complete in seconds.
+    environments install once and later runs complete in seconds.  The
+    cache is keyed by machine architecture: the shared volume carried
+    aarch64 hook binaries (ruff/typos/clang-format/actionlint) that failed
+    with ``[Errno 8] Exec format error`` on the amd64 CPU runner (run
+    32969478105) — each arch gets its own cache so they never cross.
 
     After format.sh, removes the ``gitleaks`` binary that ``gitleaks.sh``
     downloads to the repo root when the system has no gitleaks in PATH.
@@ -98,7 +108,8 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
     """
     fmt_script = repo / "format.sh"
     env = os.environ.copy()
-    env["PRE_COMMIT_HOME"] = str(Path.home() / ".cache" / "main2main-pre-commit")
+    env["PRE_COMMIT_HOME"] = str(
+        Path.home() / ".cache" / f"main2main-pre-commit-{platform.machine()}")
     r = subprocess.run(
         ["bash", str(fmt_script), "ci"], cwd=str(repo),
         capture_output=True, text=True, env=env,

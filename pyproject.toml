@@ -7,6 +7,9 @@ requires-python = ">=3.10,<3.14"
 dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
+    # vllm-ascend's select_tests.py (CI overhaul, 2026-09) imports `regex`
+    # as re; compute_test_groups shells it out with the flow's interpreter.
+    "regex",
     # do not re-add `ripgrep`: the internal PyPI mirror only proxies its
     # sdist, whose metadata build hangs pip in the runner container
 ]

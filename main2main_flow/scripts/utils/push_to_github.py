@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -146,11 +147,20 @@ def resolve_squash_baseline(ascend_path: Path | str, fallback: str = "") -> str:
 
 
 def _has_divergent_commits(ascend_path: Path, branch: str, base_sha: str) -> bool:
-    """Check whether *branch* has commits that are not in *base_sha*."""
+    """Check whether *branch* has commits that are not in *base_sha*.
+
+    Fails open (True) when rev-list errors: treating an error as "no
+    divergent commits" would skip PR creation AND the baseline update for
+    the whole run.
+    """
     r = subprocess.run(
         ["git", "rev-list", "--count", f"{base_sha}..{branch}"],
         cwd=str(ascend_path), capture_output=True, text=True,
     )
+    if r.returncode != 0:
+        ts_print(f"[push] rev-list failed ({r.stderr.strip()[:200]}) — "
+                 f"assuming divergent commits and proceeding")
+        return True
     count = int(r.stdout.strip()) if r.stdout.strip().isdigit() else 0
     return count > 0
 
@@ -178,12 +188,32 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
     The CI runner has ``url.*.insteadOf`` rewrites that route
     ``https://github.com/`` through ``gh-proxy.test.osinfra.cn``.  The proxy
     allows anonymous fetch but needs a PAT token in the URL for push.
-    Retries up to 5 times with linear backoff.
+    Retries 6 times with capped linear backoff (~3.5 min window).
+
+    Two pack-size guards: before pushing, the remote destination tip is
+    shallow-fetched when absent locally (keeps the pack a delta even when
+    the local history diverges from the fork), and on an HTTP 413 rejection
+    the same refspec is retried DIRECT against github.com (the resident
+    jobs' results pushes prove that route works from the runners).
+
+    Routes rotate across attempts: gh-proxy first, then the runner's own
+    git-cdn rewrite (``url.*.insteadOf``) when one is configured, with a
+    413'd route dropped from the rotation (its rejection is deterministic).
+    gh-proxy sits behind a public WAF whose body-size limit produced
+    30 consecutive 413s (run 33365868688); the git-cdn route is in-cluster
+    and does not traverse that WAF.
 
     If ``lease_branch`` is given, re-fetch that branch to
     ``refs/remotes/m2m-lease/<branch>`` before EACH attempt - the lease ref
     must be fresh, or a stale ref makes --force-with-lease fail with
-    "stale info" on every retry.
+    "stale info" on every retry.  If the lease re-fetch itself fails
+    (transient network), fall back to a plain --force for that attempt:
+    the pushed branch has a single writer (the flow's concurrency group),
+    so the lease is an extra guard, not a correctness requirement.
+
+    The retry window is outage-scale (github.com blackouts of several
+    minutes have been observed in CI): ~3.5 min of backoff per call, and
+    callers may add their own outer retry loop.
     """
     token = os.environ.get("GH_TOKEN") or ""
     if not token:
@@ -197,23 +227,86 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
         f"https://github.com/{head_fork}.git"
     )
     cwd = str(ascend_path) if ascend_path else None
+    attempts = 6
+
+    # Second proxy route: the runner's own github rewrite
+    # (``url.*.insteadOf``, e.g. an in-cluster git-cdn service).  It is
+    # reachable wherever the runner's fetches work, and it does not sit
+    # behind the public WAF fronting gh-proxy.  Discovered at runtime with
+    # the token embedded — the pattern proven by _resolve_push_targets
+    # (lessons.py); hosts without the rewrite simply get no extra route.
+    gitcdn_url = ""
+    cfg = subprocess.run(
+        ["git", "config", "--get-regexp", r"^url\..*\.insteadof$"],
+        cwd=cwd, capture_output=True, text=True)
+    for line in cfg.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if "github.com" not in value:
+            continue
+        base = key[len("url."):-len(".insteadof")]
+        scheme, _, rest = base.partition("://")
+        if scheme and rest:
+            gitcdn_url = (f"{scheme}://x-access-token:{token}@{rest}"
+                          f"https://github.com/{head_fork}.git")
+        break
+    routes = [proxy_url] + ([gitcdn_url] if gitcdn_url else [])
+
+    # Negotiation seed: the push pack degenerates to a full tree when the
+    # client lacks the remote destination tip (fresh-mode histories diverge
+    # from the fork), which once blew past the proxy's HTTP 413 body limit.
+    # Shallow-fetch just that tip so pack-objects can exclude its tree as a
+    # "have".  Best effort — a failed seed leaves negotiation to the push.
+    dst = refspec.rsplit(":", 1)[-1] if ":" in refspec else ""
+    dst_branch = (dst[len("refs/heads/"):]
+                  if dst.startswith("refs/heads/") else "")
+    if dst_branch:
+        ls = subprocess.run(
+            ["git", "ls-remote", f"https://github.com/{head_fork}.git",
+             f"refs/heads/{dst_branch}"],
+            cwd=cwd, capture_output=True, text=True, timeout=120)
+        tip = ls.stdout.split()[0] if (ls.returncode == 0
+                                       and ls.stdout.split()) else ""
+        have_tip = subprocess.run(
+            ["git", "cat-file", "-e", tip + "^{commit}"],
+            cwd=cwd, capture_output=True).returncode == 0
+        if tip and not have_tip:
+            sf = subprocess.run(
+                ["git", "fetch", "--force", "--no-tags", "--depth", "1",
+                 proxy_url, f"refs/heads/{dst_branch}"],
+                cwd=cwd, capture_output=True, text=True, timeout=300)
+            if sf.returncode == 0:
+                ts_print(f"[push] negotiation seed: remote {dst_branch} tip "
+                         f"{tip[:12]} was absent locally — fetched shallow")
+            else:
+                ts_print(f"[push] negotiation seed fetch failed (push "
+                         f"continues): {sf.stderr.strip()[:200]}")
 
     last_error = ""
-    for attempt in range(1, 6):
+    for attempt in range(1, attempts + 1):
+        # Rotate routes across attempts: a proxy-specific failure (WAF 413,
+        # transient outage) must not burn every attempt on the same path.
+        route = routes[(attempt - 1) % len(routes)]
+        push_args = extra_args
         if lease_branch:
-            subprocess.run(
+            lf = subprocess.run(
                 ["git", "fetch", f"https://github.com/{head_fork}.git",
                  f"refs/heads/{lease_branch}:refs/remotes/m2m-lease/{lease_branch}"],
-                cwd=cwd, capture_output=True, text=True,
+                cwd=cwd, capture_output=True, text=True, timeout=120,
             )
+            if lf.returncode != 0:
+                ts_print(f"[push] lease re-fetch failed ({lf.stderr.strip()[:200]}) "
+                         f"— falling back to plain --force", flush=True)
+                push_args = tuple(
+                    ("--force" if a.startswith("--force-with-lease=") else a)
+                    for a in extra_args)
         subprocess.run(["git", "remote", "remove", push_remote],
                        cwd=cwd, capture_output=True, text=True)
-        subprocess.run(["git", "remote", "add", push_remote, proxy_url],
+        subprocess.run(["git", "remote", "add", push_remote, route],
                        cwd=cwd, capture_output=True, text=True)
         r = subprocess.run(
             ["git", "-c", "http.https://github.com/.extraheader=",
-             "push", *extra_args, push_remote, refspec],
-            cwd=cwd, capture_output=True, text=True,
+             "push", *push_args, push_remote, refspec],
+            cwd=cwd, capture_output=True, text=True, timeout=900,
         )
         subprocess.run(["git", "remote", "remove", push_remote],
                        cwd=cwd, capture_output=True, text=True)
@@ -223,12 +316,40 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
             return
         last_error = r.stderr.strip() or "(no stderr)"
         ts_print(
-            f"[push] git push attempt {attempt}/5 FAILED "
+            f"[push] git push attempt {attempt}/{attempts} FAILED "
             f"(exit {r.returncode}):\n{last_error}",
             flush=True,
         )
-        if attempt < 5:
-            time.sleep(10 * attempt)
+        if re.search(r"\b413\b", last_error):
+            # HTTP 413 = the proxy rejected the request body outright —
+            # deterministic, so retrying through the same path cannot help.
+            # Drop the offending route from the rotation (kept when it is
+            # the only route, preserving the retry-with-backoff behavior
+            # for single-route hosts) and try the remaining ones.
+            if len(routes) > 1:
+                routes = ([u for u in routes if u != route]
+                          or [f"https://x-access-token:{token}"
+                              f"@github.com/{head_fork}.git"])
+                ts_print(f"[push] 413: dropped a proxy route from rotation "
+                         f"({len(routes)} route(s) left)", flush=True)
+            # The resident jobs' results pushes already go DIRECT to
+            # github.com successfully (a token-in-URL is not matched by the
+            # runner's url.*.insteadOf rewrite, so it bypasses the proxy).
+            direct_url = (f"https://x-access-token:{token}"
+                          f"@github.com/{head_fork}.git")
+            dr = subprocess.run(
+                ["git", "-c", "http.https://github.com/.extraheader=",
+                 "push", *push_args, direct_url, refspec],
+                cwd=cwd, capture_output=True, text=True, timeout=900,
+            )
+            if dr.returncode == 0:
+                ts_print("[push] proxy rejected the pack (HTTP 413); "
+                         "direct github.com push succeeded", flush=True)
+                return
+            ts_print(f"[push] direct github.com push also failed: "
+                     f"{dr.stderr.strip()[-400:]}", flush=True)
+        if attempt < attempts:
+            time.sleep(min(15 * attempt, 60))
 
     raise subprocess.CalledProcessError(128, ["git", "push", "..."],
                                         output="", stderr=last_error)
@@ -342,19 +463,22 @@ def _close_old_main2main_prs(github_repo: str, current_pr_number: str) -> None:
 
 def _update_baseline_ref(ascend_path: Path, head_fork: str,
                          source_branch: str) -> None:
-    """Push the current vllm-ascend HEAD to refs/heads/main2main_baseline.
+    """Push the current vllm-ascend HEAD to the baseline ref.
 
-    The baseline ref marks "the vllm-ascend state corresponding to the last
-    vllm commit that passed e2e".  Next day's run starts from this ref to
-    do incremental adaptation instead of re-adapting from upstream/main.
+    The baseline ref (refs/heads/main2main_baseline, overridable via
+    MAIN2MAIN_BASELINE_REF for validation runs) marks "the vllm-ascend
+    state corresponding to the last vllm commit that passed e2e".  Next
+    day's run starts from this ref to do incremental adaptation instead of
+    re-adapting from upstream/main.
     """
     if not head_fork:
         ts_print("[push] No HEAD_FORK configured, skipping baseline ref update")
         return
+    baseline_ref = os.getenv("MAIN2MAIN_BASELINE_REF", "main2main_baseline")
     _push_via_proxy(ascend_path, head_fork,
-                    f"{source_branch}:refs/heads/main2main_baseline",
+                    f"{source_branch}:refs/heads/{baseline_ref}",
                     "--force")
-    ts_print(f"[push] Updated main2main_baseline -> {source_branch}")
+    ts_print(f"[push] Updated {baseline_ref} -> {source_branch}")
 
 
 def _delete_old_main2main_branches(ascend_path: Path, head_fork: str,
@@ -400,18 +524,24 @@ def _add_labels(github_repo: str, pr_number: str, labels: list[str]) -> None:
     # nil body → 422 "Invalid request" (PRs then miss the `ready-all` label and
     # vllm-ascend's ci-gate fails with "Selected tests are required" —
     # PR #14376).
-    result = subprocess.run(
-        ["gh", "api", "--method", "POST",
-         "-H", "Accept: application/vnd.github+json",
-         "--input", "-",
-         f"/repos/{github_repo}/issues/{pr_number}/labels"],
-        input=json.dumps(labels),  # ["ready-all"]
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        ts_print(f"[push] Warning: Failed to add labels {labels}: {result.stderr.strip()}")
-    else:
-        ts_print(f"[push] Labels added: {labels}")
+    last_err = ""
+    for attempt in range(1, 4):
+        result = subprocess.run(
+            ["gh", "api", "--method", "POST",
+             "-H", "Accept: application/vnd.github+json",
+             "--input", "-",
+             f"/repos/{github_repo}/issues/{pr_number}/labels"],
+            input=json.dumps(labels),  # ["ready-all"]
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            ts_print(f"[push] Labels added: {labels}")
+            return
+        last_err = result.stderr.strip()
+        ts_print(f"[push] Label add attempt {attempt}/3 FAILED: {last_err}")
+        if attempt < 3:
+            time.sleep(15 * attempt)
+    ts_print(f"[push] Warning: Failed to add labels {labels}: {last_err}")
 
 
 def push_and_create_pr(
@@ -623,11 +753,28 @@ def push_and_create_pr(
         _close_old_main2main_prs(github_repo, pr_number)
 
         # ---- update baseline ref for next day's incremental run ----
-        # The branch we just pushed contains the cumulative adaptation
+        # The branch we just pushed contains the accumulated adaptation
         # state; mark it as the baseline so tomorrow's run can rebase on
-        # top instead of starting from upstream/main.
+        # top instead of starting from upstream/main.  Must not be lost to
+        # a transient failure silently: without it the next run falls back
+        # to fresh mode and the incremental adaptation state is gone.
         if branch:
-            _update_baseline_ref(ascend_path, head_fork, branch)
+            baseline_ok = False
+            for attempt in range(1, 4):
+                try:
+                    _update_baseline_ref(ascend_path, head_fork, branch)
+                    baseline_ok = True
+                    break
+                except Exception as exc:
+                    ts_print(f"[push] baseline ref update attempt "
+                             f"{attempt}/3 FAILED: {exc}", flush=True)
+                    if attempt < 3:
+                        time.sleep(30 * attempt)
+            if not baseline_ok:
+                ts_print("::error::[push] baseline ref NOT updated — the "
+                         "next run will adapt from upstream/main (fresh "
+                         "mode) instead of the accumulated baseline",
+                         flush=True)
 
         # ---- delete old main2main_auto_* timestamped branches ----
         keep_n = int(os.getenv("MAIN2MAIN_KEEP_BRANCHES", "3"))

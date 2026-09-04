@@ -1,4 +1,5 @@
 
+import hashlib
 import json
 import os
 import re
@@ -18,11 +19,11 @@ from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
-from main2main_flow.scripts.utils.run_tests import run_tests
+from main2main_flow.scripts.utils.run_tests import run_tests, build_test_errors_detail
 from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
 from main2main_flow.scripts.utils.utils import (
-    UpgradeCompleted, UpgradeFailed,
+    UpgradeCompleted, UpgradeFailed, UpgradePartial,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
@@ -34,10 +35,6 @@ from main2main_flow.scripts.utils.utils import (
 _TRACKING_FILES_FOR_DESC: frozenset[str] = frozenset({
     ".github/vllm-main-verified.commit",
 })
-
-# Regression-e2e attempts inside the final quality gate once static checks
-# (format/mypy/UT) are green.  Same budget as a per-step e2e round.
-_GATE_E2E_ATTEMPTS = 3
 
 
 def _extract_diff_files(patch_text: str,
@@ -123,46 +120,6 @@ def _resolve_test_cases() -> list[str] | None:
     return result or None
 
 
-_ERROR_SIGNATURES = re.compile(
-    r"Traceback \(most recent call last\)|Traceback:"
-    r"|EngineCore failed|exited unexpectedly"
-    r"|\[UC\]\[E\]|\[ERROR\]|\[TIMEOUT\]"
-    r"|\b(?:ValueError|RuntimeError|TypeError|KeyError|AttributeError|"
-    r"AssertionError|ImportError|ValidationError|IndexError|"
-    r"OverflowError|OSError)\b"
-)
-
-
-def _extract_error_excerpt(log_text: str, max_chars: int = 4000) -> str | None:
-    """Extract windows around error signatures from a test log.
-
-    A test that hangs after a crash (e.g. a server died but the test keeps
-    polling for readiness) buries the real traceback under minutes of log
-    noise, so cutting the tail loses the cause.  Search the whole log for
-    error signatures and return the surrounding context instead.
-    """
-    matches = list(_ERROR_SIGNATURES.finditer(log_text))
-    if not matches:
-        return None
-    parts: list[str] = []
-    total = 0
-    prev_end = -1
-    for m in matches:
-        start = max(0, m.start() - 200)
-        end = min(len(log_text), m.end() + 800)
-        if start <= prev_end:
-            continue
-        piece = log_text[start:end]
-        if total + len(piece) > max_chars:
-            parts.append(f"... (truncated, {len(matches) - len(parts)} more matches)")
-            break
-        line_no = log_text.count("\n", 0, m.start()) + 1
-        parts.append(f"...[log line {line_no}]\n{piece}")
-        total += len(piece)
-        prev_end = end
-    return "\n\n---\n\n".join(parts) if parts else None
-
-
 def _resolve_test_timeouts() -> dict[str, int] | None:
     """Per-test timeout overrides from test_policy.json's "timeouts" map.
 
@@ -184,20 +141,6 @@ def _resolve_test_timeouts() -> dict[str, int] | None:
         if isinstance(k, str) and isinstance(v, int) and v > 0:
             out[k] = v
     return out or None
-
-
-def _pre_ci_attempt_budget() -> int:
-    """Adapter attempts per step for pre_ci (format/mypy/UT) convergence.
-
-    Independent of the E2E retry budget (3, see process_steps): large
-    upstream refactors need more static-fix rounds than a fixed 3 — run
-    33406597604's step-7 (8bdc70ec KV-cache refactor, ~30 files) had
-    converged 53->22->9 UT failures when the old limit cut it off.
-    """
-    try:
-        return max(1, int(os.getenv("MAIN2MAIN_PRE_CI_ATTEMPTS", "5")))
-    except ValueError:
-        return 5
 
 
 def _has_source_changes(changed_files: list[str]) -> bool:
@@ -289,6 +232,27 @@ def _revert_e2e_test_edits(ascend_path: str) -> list[str]:
                            cwd=ascend_path, capture_output=True, text=True)
         reverted.append(path)
     return reverted
+
+
+# Prepended to the fix-mode error logs when a fix attempt reproduced the
+# exact diff the previous e2e round already failed (run 33406387872 round 3:
+# the adapter burned a 45-min e2e round on a byte-identical diff).  The
+# adapter reads error_logs entries as files, so this lands as its first
+# input file.
+ZERO_PROGRESS_FIX_WARNING = """\
+[fatal-warning] Fix round {round}: the working-tree diff is byte-identical to
+the diff the previous e2e round already tested and failed (sha {sha}).
+
+Re-running identical code can only reproduce the identical result. If you
+believe the failures are environment flakes, you MUST provide per-failure
+evidence quoted from the round logs showing each failure is environmental.
+Otherwise you must change the adapter code so at least one failing test is
+actually fixed.
+
+A second fix attempt with an unchanged diff will fail the step immediately.
+
+--- e2e failure details follow ---
+"""
 
 
 class Main2MainState(BaseModel):
@@ -456,16 +420,27 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             self.has_no_commit()
             return
         self.process_steps()
-        # Final quality gate runs regardless of step outcomes (as long as at
-        # least one step succeeded): format + mypy + UT must always execute so
-        # lint issues never leak into the PR (run 174 pushed an E501 line
-        # because the gate only ran on the all-steps-passed path).
-        # Failures enter adapter-fix mode (max 3 rounds).  The regression e2e
-        # that follows static green is non-blocking: it retries up to
-        # _GATE_E2E_ATTEMPTS times, and if all fail the PR is still created
-        # (with a ::warning::) — PR CI is the real arbiter for runtime.
+        # Final quality gate runs whenever at least one step succeeded
+        # (current_step > 0), including partial runs: format + mypy + UT
+        # must always execute so lint issues never leak into the PR (run
+        # 174 pushed an E501 line because the gate only ran on the
+        # all-steps-passed path).  Failures enter adapter-fix mode.
         gate_passed = True
         if self.state.current_step > 0:
+            # Re-verify against the LAST VERIFIED vllm commit, not the
+            # target.  A step that exhausted its retries was reverted, but
+            # the vllm checkout was left on that step's commit — running
+            # the gate there pairs the committed (older-shape) adaptation
+            # with vllm changes it never adapted to, failing spuriously
+            # (2026-09-03 run 33638863120: step-21 exhausted, gate then
+            # died on a mamba get_mamba_groups shape the 20 committed
+            # steps never saw).  On the all-steps-completed path
+            # last_verified_commit == the target, so this is a no-op.
+            if self.state.last_verified_commit:
+                run_git(self.state.vllm_path, "checkout",
+                        self.state.last_verified_commit)
+                ts_print(f"[run] gate against last verified vllm "
+                         f"{self.state.last_verified_commit[:12]}")
             gate_passed = self._final_quality_gate()
             if not gate_passed:
                 self.state.final_status = UpgradeFailed
@@ -776,23 +751,62 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
     def process_steps(self):
         ascend_path = self.state.vllm_ascend_path
+        # No-op fix-loop detection: the diff sha the last e2e round actually
+        # tested, and whether we already warned about an unchanged fix.
+        last_tested_diff_sha = ""
+        noop_fix_retried = False
         while self.state.current_step < self.state.total_steps:
             step = self.state.steps[self.state.current_step]
             step_id = step["id"]
 
             if not self._ai_analysis():
-                # Adaptation could not pass pre_ci + critic within the pre_ci
-                # attempt budget (see _pre_ci_attempt_budget).  KEEP the
-                # adapter's best-effort working tree: the final quality gate
-                # runs the same static checks and continues from this progress
-                # instead of re-deriving it from scratch on a reverted tree
-                # (run 33406597604: step-7 hit the old 3-attempt limit with 9
-                # residual UT failures; the gate then re-climbed the whole
-                # refactor and ran out of ITS budget 2 failures short).
+                # Adaptation could not pass pre_ci + critic after 3 attempts.
+                # Discard the broken working-tree changes and fall through to
+                # generate_final_post / push with whatever passed in prior steps.
                 ts_print(f"[process_steps] {step_id}: ai_analysis exhausted retries, "
-                         f"carrying working tree into the final quality gate")
-                self.state.final_status = UpgradeFailed
+                         f"reverting to last committed state")
+                self._revert_working_tree(f"step {step_id} ai_analysis exhausted")
+                # Partial success: steps before this one passed pre_ci +
+                # e2e and stay committed — the final gate (against the last
+                # verified vllm) decides whether that partial adaptation is
+                # shippable as a PR instead of discarding it wholesale.
+                self.state.final_status = UpgradePartial
                 return
+
+            # A fix round (retry_count > 0) whose diff is byte-identical to
+            # the one the previous e2e round already failed can only
+            # reproduce the same result.  First occurrence: warn the adapter
+            # (env-flake claims now need per-failure evidence) and re-analyze
+            # WITHOUT burning another e2e round.  Second occurrence: no
+            # progress is possible — fail the step.
+            if self.state.retry_count > 0:
+                diff_sha = self._working_tree_diff_sha(ascend_path)
+                if diff_sha and diff_sha == last_tested_diff_sha:
+                    if noop_fix_retried:
+                        ts_print(f"[process_steps] {step_id}: fix attempt made "
+                                 f"no diff change again ({diff_sha[:12]}) — "
+                                 f"same code cannot fix the same e2e failures, "
+                                 f"giving up")
+                        self._revert_working_tree(
+                            f"step {step_id} no-op fix loop")
+                        self.state.final_status = UpgradePartial
+                        return
+                    step_dir = WORKSPACE_DIR / STEPS_DIR / step["id"]
+                    warn_path = step_dir / "zero-progress-fix-warning.txt"
+                    warn_path.parent.mkdir(parents=True, exist_ok=True)
+                    warn_path.write_text(
+                        ZERO_PROGRESS_FIX_WARNING.format(
+                            round=self.state.retry_count, sha=diff_sha[:12]),
+                        encoding="utf-8")
+                    self.state.test_errors = [str(warn_path)] + list(
+                        self.state.test_errors)
+                    noop_fix_retried = True
+                    ts_print(f"[process_steps] {step_id}: fix attempt changed "
+                             f"nothing (diff {diff_sha[:12]} already tested "
+                             f"and failed) — re-analyzing with a warning, "
+                             f"no e2e")
+                    continue
+                noop_fix_retried = False
 
             # Adapter analyzed the step and confirmed no vllm-ascend code
             # change needed → skip the per-step e2e round (only on the first
@@ -814,6 +828,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self.state.last_step_e2e_passed = False  # final gate must run regression
                 continue
 
+            last_tested_diff_sha = self._working_tree_diff_sha(ascend_path)
             test_pass = self._run_e2e_test()
             if test_pass:
                 # The step needed >=1 E2E fix round (retry_count >= 1): the
@@ -841,10 +856,25 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     ts_print(f"[process_steps] {step_id}: e2e exhausted retries, "
                              f"reverting to last committed state")
                     self._revert_working_tree(f"step {step_id} e2e exhausted")
-                    self.state.final_status = UpgradeFailed
+                    self.state.final_status = UpgradePartial
                     return
                 continue
         self.state.final_status = UpgradeCompleted
+
+    def _working_tree_diff_sha(self, ascend_path: str) -> str:
+        """Stable sha256 of the working-tree diff vs HEAD ("" when git fails).
+
+        Same basis as _capture_step_patch (git add -N + git diff HEAD) and as
+        the reviewer's "Diff is unchanged since my last review" check, so an
+        unchanged sha means the adapter truly reproduced the same diff.
+        """
+        try:
+            subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                           capture_output=True, check=True)
+            diff = run_git(ascend_path, "diff", "HEAD")
+        except (subprocess.CalledProcessError, OSError):
+            return ""
+        return hashlib.sha256(diff.encode("utf-8", "replace")).hexdigest()
 
     def _capture_step_patch(self, ascend_path: str, step_dir: Path,
                             step_id: str) -> None:
@@ -881,12 +911,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                        cwd=self.state.vllm_ascend_path, capture_output=True)
 
     def _final_quality_gate(self) -> bool:
-        """Run format + mypy + UT on final diff; fix and re-check on failure.
+        """Run format + mypy on final diff; fix + re-run e2e on failure.
 
-        Returns True if the static checks pass (possibly after fix rounds).
-        The regression e2e that follows is non-blocking: after its own
-        retries it can only emit a warning, never fail the gate — static
-        green is the PR-worthiness bar.
+        Returns True if quality gate passes (possibly after fixes), False if
+        3 fix rounds exhausted without passing.
         """
         ascend_path = self.state.vllm_ascend_path
         vllm_path = self.state.vllm_path
@@ -917,18 +945,16 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     ts_print(f"[final_quality_gate] fix attempt {attempt}: passed "
                              f"(last step e2e={'passed' if self.state.last_step_e2e_passed else 'skipped/failed'}), "
                              f"running regression e2e")
-                    if not self._run_regression_e2e_with_retries():
-                        # Static checks (format/mypy/UT) are green — that is
-                        # the PR-worthiness bar.  A failing regression e2e
-                        # must not block the PR (run 33406597604: two residual
-                        # failures were pure mechanical noise while the gate
-                        # had nothing left to fix): PR CI re-verifies the code
-                        # and the failure detail stays in the workspace for
-                        # review.  Keep the tree, warn, and proceed.
-                        print(f"::warning title=main2main quality gate::"
-                              f"regression e2e failed after "
-                              f"{_GATE_E2E_ATTEMPTS} attempts with format/mypy/"
-                              f"UT green — creating PR anyway")
+                    if not self._run_e2e_test_for_final_gate():
+                        # Revert the regression-inducing fix so it doesn't get
+                        # pushed (KEEP_BRANCH mode does `git add -A` + amend),
+                        # then continue the fix loop with remaining rounds.
+                        # The gate will re-run format+mypy on the reverted tree.
+                        ts_print(f"[final_quality_gate] e2e regression - "
+                                 f"reverting, continuing to next round")
+                        self._revert_working_tree("gate e2e regression")
+                        error_logs = [str(Path(gate_dir) / "quality_gate.json")]
+                        continue
                 if attempt > 1:
                     # A fix round succeeded — record the failure knowledge
                     # (version guards, test isolation, etc.) so future runs
@@ -1074,21 +1100,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ts_print(f"\n[final_quality_gate] regression e2e: {'PASSED' if test_passed else 'FAILED'}")
         return test_passed
 
-    def _run_regression_e2e_with_retries(self) -> bool:
-        """Regression e2e with its own retry budget (_GATE_E2E_ATTEMPTS).
-
-        Bare re-runs (no adapter fix between them): the tree already passed
-        static review, so there is nothing to re-fix — retries only absorb
-        flakes.  Non-blocking by policy: the caller proceeds to the PR with
-        a warning when all attempts fail.
-        """
-        for e2e_try in range(1, _GATE_E2E_ATTEMPTS + 1):
-            if self._run_e2e_test_for_final_gate():
-                return True
-            ts_print(f"[final_quality_gate] regression e2e FAILED "
-                     f"(try {e2e_try}/{_GATE_E2E_ATTEMPTS})")
-        return False
-
     def _ai_analysis(self) -> bool:
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
@@ -1212,8 +1223,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         # Budget applies to the pre_ci (format/mypy/UT) fix loop only — the
         # per-step E2E retry budget (3) in process_steps is unchanged.
-        pre_ci_budget = _pre_ci_attempt_budget()
-        for attempt in range(1, pre_ci_budget + 1):
+        for attempt in range(1, 4):
             role = "adapter-fix" if error_logs else "adapter"
             if role == "adapter-fix":
                 # Targeted upstream diff (runtime paths only) — the full
@@ -1336,7 +1346,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 break
 
         if not pre_ci_passed:
-            ts_print(f"[ai_analysis] {step_id}: FAILED after {pre_ci_budget} attempts "
+            ts_print(f"[ai_analysis] {step_id}: FAILED after 3 attempts "
                      f"(pre_ci never passed) — skipping e2e")
             self.state.test_errors = error_logs if error_logs else []
             return False
@@ -1451,71 +1461,16 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         self.state.last_step_e2e_passed = test_passed
 
         if not test_passed:
-            # Collect per-test error details for fix mode: for each failed
-            # test, read its -summary.json (structured code_bugs/env_flakes)
-            # and the tail of its .log (raw traceback).  Both are inlined
-            # so the agent sees the error directly without extra file ops.
-            test_errors_detail = tests_dir / f"round-{self.state.retry_count}-test-errors.txt"
-            detail_parts = []
-            for test_name, tr in result.get("suite_results", {}).items():
-                if tr.get("ci_result") == "passed":
-                    continue
-                # env_flake_pass tests are ALSO included: their logs often
-                # carry the real root cause that the classifier smoothed over
-                # (e.g. torch_npu npugraph FX compile crash "too many values
-                # to unpack (expected 20)" classified as Engine-core-init
-                # failure — run 31952700363).  Without the excerpt the adapter
-                # cannot tell a true env issue from a real bug and burns fix
-                # rounds guessing.
-                parts = [f"=== {test_name} ==="]
-                # Log content FIRST — the excerpt carries the actual failure.
-                # A hang after a crash buries the traceback under
-                # READY/polling noise (plain tail cut loses the cause), and an
-                # empty structured summary (timeout-killed tests have no pytest
-                # output) misled the adapter into dismissing real bugs as
-                # "resource kill" (run 31376860112: disaggregated_encoder's
-                # eps=0.0 ValueError sat in the excerpt, but the empty
-                # [summary] above it won).  Excerpt first, tail as fallback,
-                # timeout note only when neither yields anything.
-                lp = Path(tr.get("log_path", ""))
-                log_text = ""
-                if lp.exists():
-                    try:
-                        log_text = lp.read_text(encoding='utf-8', errors='replace')
-                    except Exception:
-                        parts.append("[log]\n(could not read)")
-                if log_text:
-                    excerpt = _extract_error_excerpt(log_text)
-                    if excerpt:
-                        parts.append(f"[log excerpt]\n{excerpt}")
-                    else:
-                        parts.append(f"[log tail]\n...\n{log_text[-3000:]}")
-                if not log_text and tr.get("run_suite_exit_code") == -9:
-                    parts.append("[NOTE] process was killed by the suite timeout "
-                                 "(exit -9) and its log is empty — likely a hang "
-                                 "with no error output")
-                # Structured summary AFTER the log excerpt — secondary.  A
-                # timeout-killed test has an empty summary (no pytest output);
-                # flag it so the agent does not dismiss the excerpt's real
-                # failure as a "resource kill" again.
-                sp = Path(tr.get("summary_path", ""))
-                if sp.exists():
-                    try:
-                        summary_text = sp.read_text(encoding='utf-8')[:4000]
-                    except Exception:
-                        summary_text = "(could not read)"
-                    if '"code_bugs": []' in summary_text.replace(" ", ""):
-                        summary_text += ("\n[NOTE] structured summary is empty — the test was "
-                                         "killed by the suite timeout (no pytest output). "
-                                         "The [log excerpt] above IS the failure; do not "
-                                         "dismiss it as a resource kill.")
-                    parts.append(f"[summary]\n{summary_text}")
-                detail_parts.append("\n\n".join(parts))
-            if detail_parts:
-                test_errors_detail.write_text("\n\n---\n\n".join(detail_parts), encoding="utf-8")
-                self.state.test_errors = [str(test_errors_detail), summary_log]
-            else:
-                self.state.test_errors = [summary_log]
+            # Fix-mode contract: test_errors = [detail file, result json] so
+            # the adapter's fix round reads the per-test error details
+            # directly (extraction logic lives with the classifiers in
+            # run_tests so both execution paths stay byte-identical).
+            detail_file = build_test_errors_detail(
+                result.get("suite_results", {}), self.state.retry_count,
+                tests_dir, Path(summary_log))
+            self.state.test_errors = (
+                [str(detail_file), summary_log] if detail_file
+                else [summary_log])
 
         return test_passed
 
@@ -2019,7 +1974,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")
 
-        status = "completed" if self.state.final_status == UpgradeCompleted else "failed"
+        if self.state.final_status == UpgradeCompleted:
+            status = "completed"
+        elif self.state.final_status == UpgradePartial:
+            # Steps before the failing one passed pre_ci + e2e and are
+            # shippable — the workflow treats partial like completed (the
+            # PR exists) but the steps numbers tell the real coverage.
+            status = "partial"
+        else:
+            status = "failed"
         status_json = {
             "status": status,
             "steps_completed": self.state.current_step,
@@ -2080,6 +2043,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         if not github_repo:
             ts_print("[push] GITHUB_REPO is empty, cannot create PR.")
             return "SKIP_PUSH"
+        # PR target, overridable separately from GITHUB_REPO (which also
+        # drives the manual-review issue and the chained next run).  The
+        # PR must target a repo sharing history with the head fork —
+        # vllm-project/vllm-ascend in production — while the validation
+        # fork points GITHUB_REPO elsewhere.
+        github_repo = os.getenv("PR_REPO", "") or github_repo
 
         head_fork = os.getenv("HEAD_FORK", "")
         draft = os.getenv("PR_DRAFT", "true").lower() == "true"

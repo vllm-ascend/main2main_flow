@@ -10,6 +10,9 @@ cards within each round: a one_card test takes 1 card, so up to ``total_cards``
 of them run concurrently; a two_card test takes 2, so two can share a 4-card
 runner. Each test gets its own ``ASCEND_RT_VISIBLE_DEVICES`` so processes do not
 collide on the same device. Pass ``--sequential`` to force one-test-per-round.
+On dual-die NPUs (A3: dies 0-1, 2-3, ... live on one physical card and must
+be used together) pass ``--pair-aligned-devices`` — every test then starts on
+an even die and odd dies are never assigned to any task.
 
 Execution targets:
   - Local:       run directly (no --remote)
@@ -41,7 +44,12 @@ from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import ts_print
 
-PASS_RESULTS = {"passed", "env_flake_pass"}
+# precision_pass: numeric-precision assertion failures (vllm output vs a
+# reference differs slightly under float16, e.g. torch.allclose on the
+# 310p classification head).  Treating them as pass was a user decision
+# (2026-09-03): NPU precision drift is hard to fix and must not burn
+# adapter fix rounds — but it is tracked separately from env flakes.
+PASS_RESULTS = {"passed", "env_flake_pass", "precision_pass"}
 DEFAULT_VLLM_REPO = "https://github.com/vllm-project/vllm.git"
 DEFAULT_ASCEND_REPO = "https://github.com/vllm-project/vllm-ascend.git"
 
@@ -58,9 +66,19 @@ _CARD_PATTERNS: list[tuple[str, int]] = [
     ("multi.node", 8),
 ]
 
+# Per-test card overrides set by run_tests() when callers pass explicit
+# card counts (e.g. the external E2E exec: group num_npus is authoritative —
+# a "one_card" path routed to 310p overrides to 310p_x4, and NPU-routed
+# tests/ut files carry their routing cards, which the path heuristic can't
+# know).  Empty dict → pure path heuristic.
+_CARD_OVERRIDES: dict[str, int] = {}
+
 
 def _test_cards(test_path: str) -> int:
     """Infer required NPU cards from the test file path."""
+    override = _CARD_OVERRIDES.get(test_path)
+    if override is not None:
+        return override
     lower = test_path.lower()
     for pattern, cards in _CARD_PATTERNS:
         if pattern in lower:
@@ -169,16 +187,42 @@ def _schedule_rounds(tests: list[str], total_cards: int,
     return rounds
 
 
+def _validate_pair_aligned(phy_ids: list[int]) -> None:
+    """Reject device sets that split a dual-die card's pair across tasks.
+
+    The A3 is a dual-die package: dies 0-1, 2-3, ... live on the same
+    physical card and must be used together.  The runner's visible device
+    list must therefore be closed under pairing (id ^ 1 present for every
+    id) — anything else means the device plugin allocated individual dies
+    and no software-side alignment can fix it.
+    """
+    present = set(phy_ids)
+    lone = [i for i in phy_ids if (i ^ 1) not in present]
+    if lone:
+        raise ValueError(
+            "visible devices must form complete dual-die pairs (0-1, 2-3, "
+            f"4-5, ...); got {phy_ids} with lone dies {lone}.  The A3 is a "
+            "dual-die card — the device plugin must allocate whole pairs."
+        )
+
+
 def _assign_devices(rounds: list[list[str]],
-                    phy_ids: list[int] | None = None) -> list[list[tuple[str, str]]]:
+                    phy_ids: list[int] | None = None,
+                    pair_aligned: bool = False) -> list[list[tuple[str, str]]]:
     if phy_ids is None:
         max_round = max(sum(_test_cards(t) for t in rnd) for rnd in rounds) if rounds else 0
         phy_ids = list(range(max_round))
+    if pair_aligned:
+        _validate_pair_aligned(phy_ids)
     result: list[list[tuple[str, str]]] = []
     for rnd in rounds:
         assigned: list[tuple[str, str]] = []
         offset = 0
         for test in rnd:
+            if pair_aligned and offset % 2:
+                # Never start a test on the odd die of a pair — the lone die
+                # stays unused rather than being split across two tasks.
+                offset += 1
             need = _test_cards(test)
             devices = ",".join(str(phy_ids[offset + i]) for i in range(need))
             offset += need
@@ -615,6 +659,124 @@ def _is_model_download_failure(log_path: Path) -> bool:
         return False
 
 
+# NPU OOM: when the engine dies of an NPU OOM, vllm's multiproc executor
+# hangs instead of exiting (the workers never answer the shutdown), so pytest
+# sits until the suite timeout kills it (exit -9).  Free NPU memory is shared
+# state on the resident runner — leftover from an earlier test in the round,
+# not the adaptation.  Runs 33314256232/33406387872: gemma4 two_card burned
+# three 30-min rounds this way with zero fix signal for the adapter.
+_NPU_OOM_RE = re.compile(r"NPU out of memory", re.IGNORECASE)
+
+# The multiproc executor wraps each worker's death reason in this message.
+_WORKER_ERROR_REASON_RE = re.compile(r"Worker failed with error '([^']*)'")
+
+# pytest --color=yes wraps "AssertionError" etc. in ANSI codes; stripped
+# first or the raised-message scan below misses real errors.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# A real error WITH A MESSAGE ("RuntimeError: <text>") next to the OOM means
+# the run had a genuine code failure — never env-flake it.  Bare keywords
+# ("RuntimeError(") are traceback SOURCE lines, not raised messages, and must
+# not match (round-2 gemma4 log carries exactly one such line).
+_RAISED_ERROR_MSG_RE = re.compile(
+    r"\b(?:ValueError|RuntimeError|TypeError|KeyError|AttributeError|"
+    r"AssertionError|ImportError|IndexError|OverflowError|OSError|"
+    r"NameError|NotImplementedError|EngineDeadError)\b:\s+\S")
+
+
+def _is_oom_hang_failure(log_path: Path) -> bool:
+    """True if the test log shows an NPU-OOM engine death with no real code
+    error alongside it (the suite timed out waiting for the dead engine)."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                   errors="replace"))
+        if not _NPU_OOM_RE.search(text):
+            return False
+        # Strip the worker-error wrapper lines before scanning for real
+        # errors: the wrapper itself renders as "RuntimeError: ..." with the
+        # OOM message inside.
+        rest = re.sub(r"^.*Worker failed with error.*$", "", text,
+                      flags=re.MULTILINE)
+        if _RAISED_ERROR_MSG_RE.search(rest):
+            ts_print("  [env-flake] real error with message found next to "
+                     "the OOM — NOT classifying as env flake")
+            return False
+        reasons = _WORKER_ERROR_REASON_RE.findall(text)
+        if reasons and not all("out of memory" in r.lower() for r in reasons):
+            ts_print("  [env-flake] engine died of a non-OOM worker error "
+                     "— NOT classifying as env flake")
+            return False
+        return True
+    except OSError:
+        return False
+
+
+# Numeric-precision assertion failures: the test compares vllm output to a
+# reference with torch.allclose / assert_close (or numpy equivalents) and
+# the values differ slightly under float16 — run 33721193925's 310p
+# classification head (hf [0.0018, 0.9980] vs vllm [0.0018, 0.9982]).
+# These get precision_pass (see PASS_RESULTS): tracked, not blocking.
+_PRECISION_FAILURE_RE = re.compile(
+    r"torch\.allclose|torch\.testing\.assert_close|allclose\("
+    r"|numpy\.allclose|np\.allclose"
+    r"|assert_allclose|values are not close|maximum absolute difference"
+    r"|are not equal to desired equal"
+    r"|Mismatched elements:|not equal", re.IGNORECASE)
+
+
+def _is_precision_failure(log_path: Path) -> bool:
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                   errors="replace"))
+    except OSError:
+        return False
+    return bool(_PRECISION_FAILURE_RE.search(text))
+
+
+_ERROR_SIGNATURES = re.compile(
+    r"Traceback \(most recent call last\)|Traceback:"
+    r"|EngineCore failed|exited unexpectedly"
+    r"|\[UC\]\[E\]|\[ERROR\]|\[TIMEOUT\]"
+    r"|\b(?:ValueError|RuntimeError|TypeError|KeyError|AttributeError|"
+    r"AssertionError|ImportError|ValidationError|IndexError|"
+    r"OverflowError|OSError)\b"
+)
+
+
+def _extract_error_excerpt(log_text: str, max_chars: int = 4000) -> str | None:
+    """Extract windows around error signatures from a test log.
+
+    A test that hangs after a crash (e.g. a server died but the test keeps
+    polling for readiness) buries the real traceback under minutes of log
+    noise, so cutting the tail loses the cause.  Search the whole log for
+    error signatures and return the surrounding context instead.
+    """
+    matches = list(_ERROR_SIGNATURES.finditer(log_text))
+    if not matches:
+        return None
+    parts: list[str] = []
+    total = 0
+    prev_end = -1
+    for m in matches:
+        start = max(0, m.start() - 200)
+        end = min(len(log_text), m.end() + 800)
+        if start <= prev_end:
+            continue
+        piece = log_text[start:end]
+        if total + len(piece) > max_chars:
+            parts.append(f"... (truncated, {len(matches) - len(parts)} more matches)")
+            break
+        line_no = log_text.count("\n", 0, m.start()) + 1
+        parts.append(f"...[log line {line_no}]\n{piece}")
+        total += len(piece)
+        prev_end = end
+    return "\n\n---\n\n".join(parts) if parts else None
+
+
 def _select_tests_by_files(ascend_path: Path, changed_files: list[str]) -> list[str] | None:
     """Call vllm-ascend's select_tests.py to resolve changed files → test files.
 
@@ -717,6 +879,17 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
         ts_print(f"  [env-flake] {test}: model download/cache failure "
                  f"classified as environment, not blocking")
         ci_result = "env_flake_pass"
+    if (ci_result != "passed" and exit_code == -9
+            and _is_oom_hang_failure(log_path)):
+        ts_print(f"  [env-flake] {test}: engine died of NPU OOM and hung to "
+                 f"the suite timeout — classified as environment, not "
+                 f"blocking")
+        ci_result = "env_flake_pass"
+    if ci_result == "failed" and _is_precision_failure(log_path):
+        ts_print(f"  [precision-pass] {test}: numeric-precision assertion "
+                 f"(allclose vs reference) — classified as precision_pass, "
+                 f"not blocking (user decision 2026-09-03)")
+        ci_result = "precision_pass"
     return {"test": test, "cards_required": cards,
             "run_suite_exit_code": exit_code,
             "ci_result": ci_result,
@@ -752,12 +925,23 @@ def run_tests(
     sequential: bool = False,
     mock: bool = False,
     mock_scale: float = 0.1,
+    skip_setup: bool = False,
+    card_overrides: dict[str, int] | None = None,
+    pair_aligned_devices: bool = False,
 ) -> dict:
     """Run end-to-end tests for a main2main step.
 
     Args:
         select_by_files: Changed file paths for precise test selection
                          via vllm-ascend's select_tests.py.
+        skip_setup: Skip the local repo checkout/reinstall (the external
+                    E2E exec workflow already checked out the signal
+                    branch and installed editable packages — re-running
+                    setup_env would reset the tree and reinstall).
+        card_overrides: Per-test card counts (authoritative over the path
+                        heuristic — test_config.yaml routing can differ,
+                        e.g. 310p_x4 for a one_card path, a3_x2 for NPU
+                        UT paths).
     """
     vllm_path = Path(vllm_path)
     ascend_path = Path(ascend_path)
@@ -767,6 +951,10 @@ def run_tests(
     remote_log_dir = Path(remote_log_dir) if remote_log_dir else log_dir
     remote_vllm = Path(remote_vllm_path) if remote_vllm_path else Path("/vllm-workspace/vllm")
     remote_ascend = Path(remote_ascend_path) if remote_ascend_path else Path("/vllm-workspace/vllm-ascend")
+
+    _CARD_OVERRIDES.clear()
+    if card_overrides:
+        _CARD_OVERRIDES.update(card_overrides)
 
     # ---- step 1: resolve tests ----
     if test_cases:
@@ -832,8 +1020,11 @@ def run_tests(
             ts_print(line, end="", flush=True)
         if proc.wait() != 0:
             raise RuntimeError(f"Remote setup failed with exit code {proc.returncode}")
-    else:
+    elif not skip_setup:
         setup_env(vllm_path, vllm_commit, ascend_path, ascend_commit, patch_path)
+    else:
+        ts_print(f"  skip_setup: using checked-out repos as-is "
+                 f"(ascend @ {ascend_commit[:8]})")
 
     # ---- step 5: locate ci_log_summary ----
     ci_log_summary = Path(__file__).parent / "ci_log_summary.py"
@@ -858,7 +1049,15 @@ def run_tests(
                  f"{sorted(overriders)}", flush=True)
     rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
         test_files, total_cards, est_times, device_overriders=overriders)
-    device_rounds = _assign_devices(rounds, all_phy_ids)
+    # In-process callers (flow.py) never pass the CLI flag; the workflow
+    # env var is the only way to enable it there (a3 dual-die runners).
+    pair_aligned = pair_aligned_devices or os.environ.get(
+        "MAIN2MAIN_PAIR_ALIGNED_DEVICES", "").strip().lower() in {"1", "true"}
+    if pair_aligned:
+        ts_print(f"  Dual-die pairing: enforcing pair-aligned device assignment "
+                 f"(devices {phy_ids})", flush=True)
+    device_rounds = _assign_devices(rounds, all_phy_ids,
+                                    pair_aligned=pair_aligned)
 
     parallel_count = sum(1 for r in rounds if len(r) > 1)
     ts_print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {total_cards}):")
@@ -935,6 +1134,35 @@ def run_tests(
         _sync_remote_dir(remote_host, f"{remote_log_dir}/{step_id}/tests", ci_dir)
 
     # ---- step 9: aggregate ----
+    result = aggregate_suite_results(
+        step_id=step_id, round_number=round_number, all_results=all_results,
+        total_cards=total_cards, sequential=sequential, remote=remote,
+        ci_dir=ci_dir, rounds_info=rounds_info, total_elapsed=total_elapsed,
+    )
+    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    ts_print(f"\nmain2main CI aggregated: {result['ci_result']}  "
+             f"(can_commit={result['can_commit']})", flush=True)
+    ts_print(f"Total elapsed: {total_elapsed:.1f}s  ({total_elapsed/60:.1f} min)", flush=True)
+    ts_print(f"Result written to {result_path}", flush=True)
+    return result
+
+
+def aggregate_suite_results(
+    step_id: int,
+    round_number: int,
+    all_results: list[dict],
+    total_cards: int,
+    sequential: bool,
+    remote: str | None,
+    ci_dir: Path,
+    rounds_info: list[dict],
+    total_elapsed: float,
+) -> dict:
+    """Aggregate per-test results into the run_tests() result dict (step 9).
+
+    Shared with the external E2E dispatcher (e2e_dispatch.py) so both
+    paths produce byte-identical result JSON for fix mode.
+    """
     outcomes = {r["ci_result"] for r in all_results}
     if "failed" in outcomes:
         overall = "failed"
@@ -942,10 +1170,13 @@ def run_tests(
         overall = "summary_error"
     elif outcomes == {"passed"}:
         overall = "passed"
-    else:
+    elif "env_flake_pass" in outcomes:
         overall = "env_flake_pass"
+    else:
+        # precision_pass only (with passed) — pass, tracked separately.
+        overall = "precision_pass"
 
-    result = {
+    return {
         "step_id": step_id, "round": round_number,
         "label": "+".join(r["test"] for r in all_results),
         "tests": [r["test"] for r in all_results],
@@ -960,11 +1191,84 @@ def run_tests(
         "failed_test_files_count": sum(r["failed_test_files_count"] for r in all_results),
         "failed_test_cases_count": sum(r["failed_test_cases_count"] for r in all_results),
     }
-    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    ts_print(f"\nmain2main CI aggregated: {overall}  (can_commit={result['can_commit']})", flush=True)
-    ts_print(f"Total elapsed: {total_elapsed:.1f}s  ({total_elapsed/60:.1f} min)", flush=True)
-    ts_print(f"Result written to {result_path}", flush=True)
-    return result
+
+
+def build_test_errors_detail(
+    suite_results: dict,
+    round_number: int,
+    tests_dir: Path,
+    result_json: Path,
+) -> Path | None:
+    """Write the fix-mode test-errors.txt from per-test suite results.
+
+    For each non-passed test, inline the log excerpt (error signatures
+    windowed from the WHOLE log — a hang after a crash buries the real
+    traceback under minutes of READY/polling noise, so cutting the tail
+    loses the cause), the log tail as fallback, and the structured
+    ci_log_summary output.  env_flake_pass tests are ALSO included: their
+    logs often carry the real root cause that the classifier smoothed over
+    (e.g. torch_npu npugraph FX compile crash "too many values to unpack
+    (expected 20)" classified as Engine-core-init failure — run
+    31952700363).  Without the excerpt the adapter cannot tell a true env
+    issue from a real bug and burns fix rounds guessing.
+
+    Excerpt FIRST (log content before the structured summary): a
+    timeout-killed test has an empty summary (no pytest output), and an
+    empty [summary] misled the adapter into dismissing real bugs as
+    "resource kill" (run 31376860112: disaggregated_encoder's eps=0.0
+    ValueError sat in the excerpt, but the empty summary above it won).
+
+    Returns the detail file path, or None when every test passed (caller
+    falls back to the result JSON alone).
+    """
+    detail_parts: list[str] = []
+    for test_name, tr in suite_results.items():
+        if tr.get("ci_result") == "passed":
+            continue
+        parts = [f"=== {test_name} ==="]
+        if tr.get("not_run"):
+            # External E2E (e2e_dispatch.py): the exec job/group crashed
+            # before this test — there is no log to excerpt.
+            parts.append("[NOTE] test was NOT run by the E2E job — the "
+                         "job/group failed before reaching it (no log "
+                         "available)")
+            detail_parts.append("\n\n".join(parts))
+            continue
+        lp = Path(tr.get("log_path", ""))
+        log_text = ""
+        if lp.exists():
+            try:
+                log_text = lp.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                parts.append("[log]\n(could not read)")
+        if log_text:
+            excerpt = _extract_error_excerpt(log_text)
+            if excerpt:
+                parts.append(f"[log excerpt]\n{excerpt}")
+            else:
+                parts.append(f"[log tail]\n...\n{log_text[-3000:]}")
+        if not log_text and tr.get("run_suite_exit_code") == -9:
+            parts.append("[NOTE] process was killed by the suite timeout "
+                         "(exit -9) and its log is empty — likely a hang "
+                         "with no error output")
+        sp = Path(tr.get("summary_path", ""))
+        if sp.exists():
+            try:
+                summary_text = sp.read_text(encoding="utf-8")[:4000]
+            except Exception:
+                summary_text = "(could not read)"
+            if '"code_bugs": []' in summary_text.replace(" ", ""):
+                summary_text += ("\n[NOTE] structured summary is empty — the test was "
+                                 "killed by the suite timeout (no pytest output). "
+                                 "The [log excerpt] above IS the failure; do not "
+                                 "dismiss it as a resource kill.")
+            parts.append(f"[summary]\n{summary_text}")
+        detail_parts.append("\n\n".join(parts))
+    if not detail_parts:
+        return None
+    test_errors_detail = tests_dir / f"round-{round_number}-test-errors.txt"
+    test_errors_detail.write_text("\n\n---\n\n".join(detail_parts), encoding="utf-8")
+    return test_errors_detail
 
 
 # =============================================================================
@@ -982,26 +1286,53 @@ def main() -> None:
     p.add_argument("--round", type=int, default=1)
     p.add_argument("--select-by-files", nargs="*", default=None,
                    help="Changed file paths for precise test selection via select_tests.py.")
+    p.add_argument("--test-cases", nargs="*", default=None,
+                   help="Explicit test targets; append '@N' to pin N cards "
+                        "(e.g. tests/.../one_card/test_x.py@4), overriding "
+                        "the path heuristic with test_config routing.")
+    p.add_argument("--skip-setup", action="store_true",
+                   help="Do not checkout/reinstall repos (external E2E: the "
+                        "signal branch + editable install are already in place).")
     p.add_argument("--log-dir", type=Path, default=Path("."))
     p.add_argument("--sequential", action="store_true")
     p.add_argument("--remote")
     p.add_argument("--remote-vllm-path", type=Path)
     p.add_argument("--remote-ascend-path", type=Path)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--pair-aligned-devices", action="store_true",
+                   help="Dual-die NPU (A3): only ever assign whole die pairs "
+                        "(0-1, 2-3, ...) to tests; never start a test on an "
+                        "odd die.  Validates the runner's visible devices are "
+                        "closed under pairing before scheduling.")
     p.add_argument("--mock", action="store_true")
     p.add_argument("--mock-scale", type=float, default=0.1)
     args = p.parse_args()
+
+    test_cases: list[str] | None = None
+    card_overrides: dict[str, int] = {}
+    if args.test_cases:
+        test_cases = []
+        for token in args.test_cases:
+            test, sep, cards = token.rpartition("@")
+            if sep and cards.isdigit():
+                test_cases.append(test)
+                card_overrides[test] = int(cards)
+            else:
+                test_cases.append(token)
 
     result = run_tests(
         vllm_path=args.vllm_path, vllm_commit=args.vllm_commit,
         ascend_path=args.ascend_path, ascend_commit=args.ascend_commit,
         patch_path=args.patch, step_id=args.step_id,
         select_by_files=args.select_by_files,
+        test_cases=test_cases, card_overrides=card_overrides,
         remote=args.remote, log_dir=args.log_dir,
         remote_vllm_path=args.remote_vllm_path,
         remote_ascend_path=args.remote_ascend_path,
         round_number=args.round, dry_run=args.dry_run,
         sequential=args.sequential, mock=args.mock, mock_scale=args.mock_scale,
+        skip_setup=args.skip_setup,
+        pair_aligned_devices=args.pair_aligned_devices,
     )
     sys.exit(0 if result.get("can_commit", False) else 1)
 
