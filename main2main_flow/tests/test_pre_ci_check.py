@@ -177,3 +177,19 @@ def test_violations_from_junit(tmp_path: Path) -> None:
     # Missing report -> [] (caller falls back to text parsing).
     assert ut_check._violations_from_junit("main", "batch",
                                            tmp_path / "none.xml") == []
+
+
+def test_is_real_error_strips_workflow_error_prefix() -> None:
+    # format.sh prints failing hook lines with ::error:: (runner shows
+    # ##[error]); the prefix made every lint violation invisible and the
+    # check reported OK — run 33784514899 shipped an E402 the upstream
+    # pre-commit caught (2026-09-04).
+    line = ("::error::tests/ut/worker/test_model_runner_v1.py:45:1: "
+            "E402 Module level import not at top of file")
+    assert pre_ci_check._is_real_error(line)
+    line2 = ("##[error]tests/ut/worker/test_model_runner_v1.py:45:1: "
+             "E402 Module level import not at top of file")
+    assert pre_ci_check._is_real_error(line2)
+    # Non-violation lines still filtered.
+    assert not pre_ci_check._is_real_error("- hook id: ruff-check")
+    assert not pre_ci_check._is_real_error("files were modified by this hook")

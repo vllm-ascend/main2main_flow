@@ -222,6 +222,13 @@ def _is_real_error(line: str) -> bool:
     s = line.strip()
     if not s:
         return False
+    # vllm-ascend's format.sh prints failing hook lines with an
+    # "::error::" workflow-command prefix (rendered "##[error]" in the
+    # runner log).  Without stripping it, EVERY lint violation from
+    # format.sh was filtered here and the check reported OK while the
+    # hooks failed — run 33784514899 shipped an E402 the upstream
+    # pre-commit then caught (2026-09-04).
+    s = re.sub(r'^#{1,2}\[error\]\s*|^::error::\s*', '', s)
     # Auto-fix noise
     if "files were modified" in s or "file reformatted" in s or "files reformatted" in s:
         return False
