@@ -15,6 +15,7 @@ Design note:
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -325,6 +326,15 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
         base_env["PYTHONPATH"] = f"{vllm_abs}:{existing}" if existing else vllm_abs
         ts_print(f"\n[pre_ci] mypy: PYTHONPATH includes vllm source: {vllm_abs}")
 
+    # Persistent incremental cache on the runner's bind-mounted ~/.cache
+    # volume: the first run pays the full check, later runs reuse it.
+    # mypy namespaces the cache by target --python-version internally, and
+    # stale entries revalidate by source/dependency hash, so a changed
+    # vllm target or numpy version cannot produce false results.
+    base_env["MYPY_CACHE_DIR"] = str(
+        Path.home() / ".cache" / f"main2main-mypy-a3-16-{platform.machine()}")
+    ts_print(f"[pre_ci] mypy: cache dir {base_env['MYPY_CACHE_DIR']}")
+
     # CI's lint image runs mypy in a clean environment: no vllm package
     # installed (mypy uses PYTHONPATH for vllm source), numpy 1.26.4
     # (constrained by triton-ascend's metadata, installed WITHOUT --no-deps).
@@ -450,13 +460,8 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
                      f"using system mypy")
             # keep venv_dir set so finally cleans up the partial venv dir
 
-    # Clear mypy cache - it may have cached type info from numpy 2.x or
-    # the installed vllm package (target commit).
-    import shutil as _shutil
-    cache = repo / ".mypy_cache"
-    if cache.exists():
-        _shutil.rmtree(cache, ignore_errors=True)
-        ts_print("\n[pre_ci] mypy: cleared .mypy_cache")
+    # The incremental cache lives in MYPY_CACHE_DIR (~/.cache, persistent
+    # volume) instead of the repo — nothing to clear between runs.
 
     # Adapter-edited tests/examples files are type-checked individually:
     # full-repo tests/ mypy fails on mock-pattern noise in THIS runner's
@@ -499,7 +504,7 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
         # Destroy the temporary venv (no need to restore anything - the
         # main environment was never touched).
         if venv_dir and venv_dir.exists():
-            _shutil.rmtree(venv_dir, ignore_errors=True)
+            shutil.rmtree(venv_dir, ignore_errors=True)
             ts_print(f"[pre_ci] mypy: destroyed temporary venv at {venv_dir}")
 
     if not any_failed:

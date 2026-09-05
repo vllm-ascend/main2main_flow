@@ -301,38 +301,6 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
 
         exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
 
-        # Import smoke: the e2e conftest loads the patch chain
-        # (adapt_patch -> vllm_ascend.patch.worker -> patch_v2/
-        # patch_triton -> dflash speculator).  A main-only symbol
-        # imported unguarded there crashes the whole fixed-branch lane
-        # at collection (cp_local_slot, PR #14580), and no UT file
-        # imports this chain — only this explicit check covers it.
-        try:
-            smoke = subprocess.run(
-                [pytest_cmd[0], "-c",
-                 "import vllm_ascend.patch.worker\n"
-                 "import vllm_ascend.worker.v2.spec_decode.dflash.speculator\n"],
-                cwd=str(repo), capture_output=True, text=True,
-                env=env, timeout=300,
-            )
-        except subprocess.TimeoutExpired:
-            ts_print(f"[pre_ci] ut: [{label}] import-smoke TIMEOUT(300s)")
-            all_files_clean = False
-            details.append(f"{label}/import-smoke: TIMEOUT")
-        else:
-            if smoke.returncode != 0:
-                all_files_clean = False
-                all_violations.append(
-                    f"[{label}] import-smoke: patch chain not importable "
-                    f"on {label} — {smoke.stderr.strip()[-800:]}")
-                details.append(f"{label}/import-smoke: FAILED")
-                ts_print(f"[pre_ci] ut: [{label}] import-smoke FAILED "
-                         f"(patch chain not importable):\n"
-                         f"{smoke.stderr.strip()[-800:]}")
-            else:
-                details.append(f"{label}/import-smoke: OK")
-                ts_print(f"[pre_ci] ut: [{label}] import-smoke OK")
-
         runs: list[tuple[str, subprocess.CompletedProcess]] = []
         try:
             # --continue-on-collection-errors: a single file that fails

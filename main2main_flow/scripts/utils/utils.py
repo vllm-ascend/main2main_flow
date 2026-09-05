@@ -137,7 +137,7 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
 # The image's default index (tuna) occasionally 403s aarch64 wheels under
 # load (run 33897770317: numpy 1.26.4 cp312 aarch64) — one retry on aliyun
 # keeps the venv usable instead of degrading to system numpy 2.x, which
-# breaks import-smoke and fails pre_ci for every later attempt.
+# fails pre_ci for every later attempt.
 _PIP_FALLBACK_INDEX = "https://mirrors.aliyun.com/pypi/simple/"
 
 
