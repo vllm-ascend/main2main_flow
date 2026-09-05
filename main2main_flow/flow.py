@@ -1892,14 +1892,19 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             unattributed_items = self._fill_unattributed_analysis(
                 unattributed, cumulative_patch_path)
 
-        # Get the commit date of the target vllm commit for the PR description.
-
-        # Get the commit date of the target vllm commit for the PR description.
-        target = self.state.target_commit or self.state.cur_vllm_commit
+        # The description must describe what was VERIFIED, not what was
+        # attempted: in partial mode the target was never reached (run
+        # 33944487577 shipped a PR titled with the target 7797b602 while the
+        # gate only verified 9ff7041b).  Date the intro by the last verified
+        # commit, falling back to current then target for completed runs
+        # (where all three are the same commit).
+        reached = (self.state.last_verified_commit
+                   or self.state.cur_vllm_commit
+                   or self.state.target_commit)
         commit_date = datetime.now()
-        if target:
+        if reached:
             r = subprocess.run(
-                ["git", "log", "-1", "--format=%ct", target],
+                ["git", "log", "-1", "--format=%ct", reached],
                 cwd=self.state.vllm_path, capture_output=True, text=True,
             )
             if r.returncode == 0 and r.stdout.strip():
@@ -2062,7 +2067,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             patch_path=WORKSPACE_DIR / FINAL_TARGET_PATCH_FILE,
             summary_path=WORKSPACE_DIR / FINAL_SUMMARY_FILE,
             old_commit=self.state.base_commit,
-            new_commit=self.state.target_commit or self.state.cur_vllm_commit,
+            # Title the PR by the verified range end, not the target: in
+            # partial mode the target was attempted but never verified
+            # (run 33944487577).  Same expression as reached_commit in
+            # final_status.json.
+            new_commit=(self.state.last_verified_commit
+                        or self.state.cur_vllm_commit
+                        or self.state.target_commit),
             head_fork=head_fork,
             draft=draft,
             labels=labels,
