@@ -254,6 +254,17 @@ A second fix attempt with an unchanged diff will fail the step immediately.
 --- e2e failure details follow ---
 """
 
+ZERO_PROGRESS_PRE_CI_WARNING = """\
+[fatal-warning] pre_ci fix round {round}: the working-tree diff is byte-identical to
+the tree the previous pre_ci round already tested and failed (sha {sha}).
+
+Re-running identical code can only reproduce the identical format/mypy/UT
+result. Fix the reported violations in the source code — a retry that
+changes nothing will fail the step immediately.
+
+--- pre_ci failure details follow ---
+"""
+
 
 class Main2MainState(BaseModel):
     vllm_path: str = ""
@@ -914,7 +925,21 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         """Run format + mypy on final diff; fix + re-run e2e on failure.
 
         Returns True if quality gate passes (possibly after fixes), False if
-        3 fix rounds exhausted without passing.
+        the budgets are exhausted without passing.
+
+        Two budgets, consumed independently:
+        - 3 adapter-fix rounds for static (format/mypy/UT) failures; the
+          static re-run after the last fix VERIFIES it (a fix that never
+          gets re-checked is indistinguishable from failure — run
+          31691299310's attempt-3 fix was correct and PR CI passed, but the
+          gate had already exhausted).
+        - 4 regression-e2e attempts.  A failure is first retried ONCE on the
+          same tree: a flaky regression must not destroy the gate's fix
+          work via a pointless revert — only a second consecutive failure
+          proves determinism.  Static checks are memoized by working-tree
+          diff sha: after a revert the tree is byte-identical to the one
+          that already passed, so only the e2e re-runs (HEAD never changes
+          during the gate, so the diff sha identifies the tree).
         """
         ascend_path = self.state.vllm_ascend_path
         vllm_path = self.state.vllm_path
@@ -923,99 +948,129 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         gate_dir.mkdir(parents=True, exist_ok=True)
 
         error_logs: list[str] = []
-        # 4 gate runs: attempts 1-3 each feed one adapter fix round; the
-        # 4th run VERIFIES the last fix (a fix that never gets re-checked
-        # is indistinguishable from failure — run 31691299310's attempt-3
-        # fix was correct and PR CI passed, but the gate had already
-        # exhausted).
-        for attempt in range(1, 5):
-            passed, new_error_logs = run_final_quality_gate(
-                ascend_path=ascend_path,
-                vllm_path=vllm_path,
-                log_dir=gate_dir,
-            )
-            if passed:
-                if attempt > 1 or not self.state.last_step_e2e_passed:
-                    # attempt > 1: we fixed something — confirm format/mypy
-                    # edits didn't break functionality.  last_step_e2e_passed
-                    # False: the LAST step skipped its per-step e2e (no-op
-                    # judgment may be wrong) or failed — the cumulative state
-                    # is unvalidated, so the regression e2e is the last
-                    # guarantee before push.
-                    ts_print(f"[final_quality_gate] fix attempt {attempt}: passed "
-                             f"(last step e2e={'passed' if self.state.last_step_e2e_passed else 'skipped/failed'}), "
-                             f"running regression e2e")
-                    if not self._run_e2e_test_for_final_gate():
-                        # Revert the regression-inducing fix so it doesn't get
-                        # pushed (KEEP_BRANCH mode does `git add -A` + amend),
-                        # then continue the fix loop with remaining rounds.
-                        # The gate will re-run format+mypy on the reverted tree.
+        static_passed_sha: str | None = None
+        fixes_applied = False
+        fix_rounds_left = 3
+        # The regression e2e is the last guarantee before push when the
+        # cumulative state is unvalidated: the LAST step skipped its
+        # per-step e2e (no-op judgment may be wrong) or failed.
+        need_regression_e2e = not self.state.last_step_e2e_passed
+        e2e_attempts_left = 4
+
+        while True:
+            tree_sha = self._working_tree_diff_sha(ascend_path)
+            if tree_sha != static_passed_sha:
+                passed, new_error_logs = run_final_quality_gate(
+                    ascend_path=ascend_path,
+                    vllm_path=vllm_path,
+                    log_dir=gate_dir,
+                )
+                if not passed:
+                    error_logs = new_error_logs
+                    if fix_rounds_left == 0:
+                        # Verification run for the last fix — no further
+                        # fix round.
+                        break
+                    fix_rounds_left -= 1
+                    ts_print(f"\n[final_quality_gate] fix attempt "
+                             f"{3 - fix_rounds_left}/3: FAILED -> adapter-fix")
+                    role = "adapter-fix"
+                    ts_print(f"[final_quality_gate] opencode attempt "
+                             f"{3 - fix_rounds_left}, role={role}")
+                    adapt_result = run_opencode_adapter({
+                    "step_id": "final-quality-gate",
+                    "previous_step_id": "",
+                    "previous_step_summary_path": "",
+                    "is_last_step": "true",
+                    "step_dir": str(gate_dir),
+                    "patch_path": "",
+                    "changed_files_path": "",
+                    "ascend_path": ascend_path,
+                    "release_tag": self.state.release_tag,
+                    "vllm_path": vllm_path,
+                    "role": role,
+                    "error_logs": json.dumps(error_logs, ensure_ascii=False),
+                    "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
+                    "mode": role,
+                    # The gate's fix rounds fix UT/test failures (e.g. PIN_MEMORY,
+                    # maybe_calc_kv_scales, deepseek_v4_thinking) — the adapter
+                    # must query vllm-report's lessons (get_adaptation_lessons) to
+                    # fix them in one pass instead of blind retries.
+                    "vllm_report_context": (
+                        "vllm-report MCP server is registered in opencode.jsonc. "
+                        "Call its tools dynamically (see \"vllm-report MCP Tools\" "
+                        "section below).  Call tool_get_adaptation_lessons to find "
+                        "prior lessons matching these failures before fixing."
+                    ),
+                    }, session_id=self.state.session_id)
+                    if adapt_result.session_id:
+                        self.state.session_id = adapt_result.session_id
+                    fixes_applied = True
+                    continue
+            # Re-sha after the run: format.sh auto-fix may have edited
+            # files during the check.  (On a memo hit the recompute is a
+            # no-op — the tree is unchanged by definition.)
+            static_passed_sha = self._working_tree_diff_sha(ascend_path)
+            if fixes_applied:
+                # Gate fixes edited the tree — confirm they didn't break
+                # functionality.
+                need_regression_e2e = True
+
+            if need_regression_e2e:
+                if e2e_attempts_left <= 0:
+                    break
+                e2e_attempts_left -= 1
+                if not self._run_e2e_test_for_final_gate():
+                    if e2e_attempts_left > 0:
+                        # Same-tree retry first: a flaky regression must not
+                        # discard the gate's fix work (a revert here would
+                        # throw away exactly the edits that made static pass).
                         ts_print(f"[final_quality_gate] e2e regression - "
-                                 f"reverting, continuing to next round")
+                                 f"retrying once on the same tree (flake check)")
+                        e2e_attempts_left -= 1
+                        if self._run_e2e_test_for_final_gate():
+                            ts_print(f"[final_quality_gate] same-tree retry "
+                                     f"PASSED — flake absorbed, no revert")
+                            need_regression_e2e = False
+                        else:
+                            ts_print(f"[final_quality_gate] e2e regression is "
+                                     f"deterministic - reverting gate fix "
+                                     f"edits, {e2e_attempts_left} e2e "
+                                     f"attempt(s) left")
+                            self._revert_working_tree("gate e2e regression")
+                            error_logs = [str(Path(gate_dir) / "quality_gate.json")]
+                            continue
+                    else:
+                        ts_print(f"[final_quality_gate] e2e regression with "
+                                 f"no attempts left - reverting")
                         self._revert_working_tree("gate e2e regression")
                         error_logs = [str(Path(gate_dir) / "quality_gate.json")]
                         continue
-                if attempt > 1:
-                    # A fix round succeeded — record the failure knowledge
-                    # (version guards, test isolation, etc.) so future runs
-                    # fix the same gate failure in one pass.
-                    submit_gate_lesson(self.state.vllm_report_path, error_logs)
-                ts_print(f"\n[final_quality_gate] PASSED (attempt {attempt})")
-                # Regenerate the cumulative patch from the CURRENT working
-                # tree so it includes format/mypy fixes made by the gate.
-                # Use `git diff <original_ascend_ref>` (baseline -> working
-                # tree): `git diff HEAD` would only contain uncommitted fixes
-                # (steps are already committed).  Write to a dedicated file;
-                # generate_final_post prefers it over the pre-gate step patch.
-                subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
-                               capture_output=True)
-                gate_patch = run_git(
-                    ascend_path, "diff", self.state.original_ascend_ref)
-                (WORKSPACE_DIR / "gate_final_patch").write_text(
-                    gate_patch, encoding="utf-8")
-                ts_print(f"[final_quality_gate] regenerated gate_final_patch "
-                         f"({len(gate_patch.splitlines())} lines) with gate fixes")
-                return True
+                need_regression_e2e = False
 
-            error_logs = new_error_logs
-            if attempt == 4:
-                # Verification run for the last fix — no further fix round.
-                break
-            ts_print(f"\n[final_quality_gate] fix attempt {attempt}/3: FAILED "
-                     f"-> adapter-fix")
+            if fixes_applied:
+                # A fix round succeeded — record the failure knowledge
+                # (version guards, test isolation, etc.) so future runs
+                # fix the same gate failure in one pass.
+                submit_gate_lesson(self.state.vllm_report_path, error_logs)
+            ts_print("\n[final_quality_gate] PASSED")
+            # Regenerate the cumulative patch from the CURRENT working
+            # tree so it includes format/mypy fixes made by the gate.
+            # Use `git diff <original_ascend_ref>` (baseline -> working
+            # tree): `git diff HEAD` would only contain uncommitted fixes
+            # (steps are already committed).  Write to a dedicated file;
+            # generate_final_post prefers it over the pre-gate step patch.
+            subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                           capture_output=True)
+            gate_patch = run_git(
+                ascend_path, "diff", self.state.original_ascend_ref)
+            (WORKSPACE_DIR / "gate_final_patch").write_text(
+                gate_patch, encoding="utf-8")
+            ts_print(f"[final_quality_gate] regenerated gate_final_patch "
+                     f"({len(gate_patch.splitlines())} lines) with gate fixes")
+            return True
 
-            role = "adapter-fix"
-            ts_print(f"[final_quality_gate] opencode attempt {attempt}, role={role}")
-            adapt_result = run_opencode_adapter({
-                "step_id": "final-quality-gate",
-                "previous_step_id": "",
-                "previous_step_summary_path": "",
-                "is_last_step": "true",
-                "step_dir": str(gate_dir),
-                "patch_path": "",
-                "changed_files_path": "",
-                "ascend_path": ascend_path,
-                "release_tag": self.state.release_tag,
-                "vllm_path": vllm_path,
-                "role": role,
-                "error_logs": json.dumps(error_logs, ensure_ascii=False),
-                "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
-                "mode": role,
-                # The gate's fix rounds fix UT/test failures (e.g. PIN_MEMORY,
-                # maybe_calc_kv_scales, deepseek_v4_thinking) — the adapter
-                # must query vllm-report's lessons (get_adaptation_lessons) to
-                # fix them in one pass instead of blind retries.
-                "vllm_report_context": (
-                    "vllm-report MCP server is registered in opencode.jsonc. "
-                    "Call its tools dynamically (see \"vllm-report MCP Tools\" "
-                    "section below).  Call tool_get_adaptation_lessons to find "
-                    "prior lessons matching these failures before fixing."
-                ),
-            }, session_id=self.state.session_id)
-            if adapt_result.session_id:
-                self.state.session_id = adapt_result.session_id
-
-        ts_print("\n[final_quality_gate] exhausted 3 fix rounds, still failing")
+        ts_print("\n[final_quality_gate] budgets exhausted, still failing")
         # KEEP the adapter's last fixes in the working tree.  Reverting used
         # to discard ALL of them — but the fix loop can resolve most issues
         # (e.g. the PIN_MEMORY / maybe_calc_kv_scales test adaptations that
@@ -1198,6 +1253,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         pre_ci_passed = False
         review_passed = False
+        # Zero-progress guard state for the pre_ci fix loop (mirror of the
+        # e2e loop's guard in process_steps): sha of the tree the last
+        # pre_ci round failed on, and whether an unchanged retry was
+        # already warned about.
+        pre_ci_failed_sha = ""
+        pre_ci_noop_warned = False
 
         # vllm-report MCP tools are called dynamically by the adapter during
         # analysis (not pre-loaded as static context here).  The MCP server
@@ -1282,6 +1343,39 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 error_logs = [str(warn_path)]
                 continue
 
+            # Zero-progress guard (mirror of the e2e guard in process_steps):
+            # a retry that reproduces the exact tree the previous pre_ci
+            # round already failed can only reproduce the same failure.
+            # First identical tree: warn the adapter and re-analyze WITHOUT
+            # burning another full format+mypy+UT round (run 33944487577
+            # step-7 burned 3 full rounds on a thrashing adapter).  Second:
+            # give up.
+            if attempt > 1 and pre_ci_failed_sha:
+                tree_sha = self._working_tree_diff_sha(ascend_path)
+                if tree_sha and tree_sha == pre_ci_failed_sha:
+                    warn_path = step_dir / "zero-progress-pre-ci-warning.txt"
+                    warn_path.parent.mkdir(parents=True, exist_ok=True)
+                    if pre_ci_noop_warned:
+                        ts_print(f"[ai_analysis] {step_id}: pre_ci fix attempt "
+                                 f"made no diff change again ({tree_sha[:12]}) "
+                                 f"— same tree cannot pass the same checks, "
+                                 f"giving up")
+                        error_logs = [str(warn_path)] + list(error_logs)
+                        pre_ci_passed = False
+                        break
+                    warn_path.write_text(
+                        ZERO_PROGRESS_PRE_CI_WARNING.format(
+                            round=attempt, sha=tree_sha[:12]),
+                        encoding="utf-8")
+                    error_logs = [str(warn_path)] + list(error_logs)
+                    pre_ci_noop_warned = True
+                    ts_print(f"[ai_analysis] {step_id}: pre_ci fix attempt "
+                             f"changed nothing (tree {tree_sha[:12]} already "
+                             f"tested and failed) — re-analyzing with a "
+                             f"warning, no pre_ci")
+                    continue
+                pre_ci_noop_warned = False
+
             # pre_ci: mechanical checks (version, format, imports, temp files)
             check_result = run_check(
                 ascend_path, self.state.release_tag, vllm_path=vllm_path)
@@ -1290,6 +1384,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 log_path = step_dir / PRE_CI_CHECK_FILE
                 log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
                 error_logs = [str(log_path)]
+                # Record the failing tree for the zero-progress guard; a new
+                # failing tree restarts the warn cycle.
+                pre_ci_failed_sha = self._working_tree_diff_sha(ascend_path)
+                pre_ci_noop_warned = False
                 failures = []
                 for check in check_result.get("checks", []):
                     if not check["passed"]:

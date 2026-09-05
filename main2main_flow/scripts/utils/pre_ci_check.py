@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import (run_format_sh, run_git,
@@ -701,8 +702,16 @@ def run_check(ascend_path: str | Path, release_tag: str,
     if vllm_path:
         # mypy + CPU-UT gates, single main vllm version.  Both self-skip
         # (skipped=True) when the tool/vllm source is unavailable, and a
-        # skipped check never fails the step.
-        mypy = _check_mypy(repo, vllm_path)
+        # skipped check never fails the step.  Both are read-only on the
+        # working tree and build separate venvs, so run them CONCURRENTLY:
+        # the pre_ci wall clock becomes max(mypy, ut) instead of the sum.
+        # _check_format stays sequential above — its auto-fix hooks mutate
+        # files and must finish before either reads the tree.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_mypy = pool.submit(_check_mypy, repo, vllm_path)
+            fut_ut = pool.submit(_check_ut, repo, vllm_path)
+            mypy = fut_mypy.result()
+            ut = fut_ut.result()
         mypy_ok = len(mypy["violations"]) == 0 or mypy.get("skipped", False)
         checks.append({
             "name": "mypy",
@@ -714,7 +723,6 @@ def run_check(ascend_path: str | Path, release_tag: str,
         if not mypy_ok:
             all_passed = False
 
-        ut = _check_ut(repo, vllm_path)
         ut_ok = len(ut["violations"]) == 0 or ut.get("skipped", False)
         checks.append({
             "name": "ut",

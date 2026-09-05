@@ -112,3 +112,30 @@ def test_is_real_error_strips_workflow_error_prefix() -> None:
     # Non-violation lines still filtered.
     assert not pre_ci_check._is_real_error("- hook id: ruff-check")
     assert not pre_ci_check._is_real_error("files were modified by this hook")
+
+
+def test_run_check_runs_mypy_ut_concurrently(monkeypatch, tmp_path: Path) -> None:
+    # mypy and UT are submitted to a 2-worker pool: a 2-party barrier inside
+    # both fakes passes only if they genuinely overlap — sequential execution
+    # would hang until the barrier breaks (BrokenBarrierError).
+    import threading
+
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    barrier = threading.Barrier(2, timeout=10)
+
+    def fake_mypy(repo_arg, vllm_arg):
+        barrier.wait()
+        return {"violations": [], "detail": "mypy ok"}
+
+    def fake_ut(repo_arg, vllm_arg):
+        barrier.wait()
+        return {"violations": [], "detail": "ut ok"}
+
+    monkeypatch.setattr(pre_ci_check, "_check_mypy", fake_mypy)
+    monkeypatch.setattr(pre_ci_check, "_check_ut", fake_ut)
+    result = pre_ci_check.run_check(repo, "v0.27.1", vllm_path=tmp_path / "vllm")
+    assert result["all_passed"] is True
+    by_name = {c["name"]: c for c in result["checks"]}
+    assert by_name["mypy"]["detail"] == "mypy ok"
+    assert by_name["ut"]["detail"] == "ut ok"
