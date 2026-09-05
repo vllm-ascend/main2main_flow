@@ -8,8 +8,10 @@ import pytest
 
 from main2main_flow.scripts.utils import run_tests as rt
 from main2main_flow.scripts.utils.run_tests import (
+    _apply_device_constraints,
     _assign_devices,
     _is_oom_hang_failure,
+    _pair_complete_pool,
     _run_one_test,
     _test_cards,
     _validate_pair_aligned,
@@ -103,6 +105,53 @@ def test_cards_inferred_from_path():
     assert _test_cards("tests/e2e/pull_request/one_card/test_x.py") == 1
     assert _test_cards("tests/e2e/pull_request/two_card/test_x.py") == 2
     assert _test_cards("tests/e2e/pull_request/four_card/test_x.py") == 4
+
+
+# ---- partial-occupancy degradation (run 33974526604: chips 8-15 occupied) ----
+
+def test_pair_complete_pool_filters_lone_dies():
+    # scattered occupancy leaves a lone die between complete pairs
+    assert _pair_complete_pool([0, 1, 2, 4, 5]) == ([0, 1, 4, 5], [2])
+    assert _pair_complete_pool([0, 1, 2, 3]) == ([0, 1, 2, 3], [])
+
+
+def test_pair_complete_pool_all_lone():
+    assert _pair_complete_pool([0, 2, 4]) == ([], [0, 2, 4])
+
+
+def test_apply_constraints_skips_over_capacity_tests():
+    # one dual-die pair survived (capacity 2): four_card cannot run
+    tests = ["tests/e2e/pull_request/one_card/test_a.py",
+             "tests/e2e/pull_request/four_card/test_b.py"]
+    runnable, skipped = _apply_device_constraints(tests, 2, 0)
+    assert runnable == [tests[0]]
+    assert skipped == [{"test": tests[1], "cards": 4,
+                        "reason": "needs 4 cards, only 2 usable"}]
+
+
+def test_apply_constraints_skips_overriders_when_pool_not_from_zero():
+    # overriders hardcode physical 0..N-1 for their child servers — with the
+    # pool starting at 8 those ids point at occupied chips
+    tests = ["tests/e2e/pull_request/two_card/test_disaggregated_encoder.py",
+             "tests/e2e/pull_request/one_card/test_a.py"]
+    overriders = {tests[0]}
+    runnable, skipped = _apply_device_constraints(tests, 2, 8, overriders)
+    assert runnable == [tests[1]]
+    assert skipped[0]["test"] == tests[0]
+    assert "starts at 8" in skipped[0]["reason"]
+    # pool starting at 0 keeps the overrider
+    runnable, skipped = _apply_device_constraints(tests, 2, 0, overriders)
+    assert runnable == tests
+    assert skipped == []
+
+
+def test_assign_devices_on_filtered_pool():
+    # pool [0,1,4,5] (chips 2-3 busy): fills from the front — one_card takes
+    # die 0, then the parity skip pushes the 2-card test onto pair (4,5)
+    out = _assign_devices(_make_round(1, 2), [0, 1, 4, 5], pair_aligned=True)
+    assert _devices(out[0]) == ["0", "4,5"]
+    out = _assign_devices(_make_round(2), [0, 1, 4, 5], pair_aligned=True)
+    assert _devices(out[0]) == ["0,1"]
 
 
 # ---- NPU-OOM hang → env_flake_pass (runs 33314256232/33406387872) ------------

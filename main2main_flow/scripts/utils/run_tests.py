@@ -206,6 +206,52 @@ def _validate_pair_aligned(phy_ids: list[int]) -> None:
         )
 
 
+def _pair_complete_pool(phy_ids: list[int]) -> tuple[list[int], list[int]]:
+    """Keep only dies whose dual-die partner is also visible.
+
+    Partial HBM occupancy (host-side processes invisible to fuser) can make
+    single dies unusable; the pair-aligned allocator needs a sequence of
+    complete pairs, so lone dies are dropped instead of raising.  Returns
+    (usable_pool, dropped_lone).
+    """
+    present = set(phy_ids)
+    pool = [i for i in phy_ids if (i ^ 1) in present]
+    dropped = [i for i in phy_ids if (i ^ 1) not in present]
+    return pool, dropped
+
+
+def _apply_device_constraints(
+    test_files: list[str], capacity: int, pool_start: int,
+    overriders: set[str] | None = None,
+) -> tuple[list[str], list[dict]]:
+    """Drop tests the usable device pool cannot host.
+
+    Rule 1: a test needing more cards than `capacity` is skipped (e.g. a
+    four_card case when only one dual-die pair survived occupancy filtering).
+    Rule 2: device-overriding tests hardcode physical devices 0..N-1 for
+    their child servers — when the usable pool does not start at physical 0
+    those hardcoded ids point at occupied chips, so the test is skipped.
+    Returns (runnable, skipped_records) with records
+    [{test, cards, reason}] for the result JSON.
+    """
+    overriders = overriders or set()
+    runnable: list[str] = []
+    skipped: list[dict] = []
+    for t in test_files:
+        need = _test_cards(t)
+        if need > capacity:
+            skipped.append({"test": t, "cards": need,
+                            "reason": f"needs {need} cards, "
+                                      f"only {capacity} usable"})
+        elif t in overriders and pool_start != 0:
+            skipped.append({"test": t, "cards": need,
+                            "reason": f"hardcodes physical devices 0..{need - 1} "
+                                      f"but usable pool starts at {pool_start}"})
+        else:
+            runnable.append(t)
+    return runnable, skipped
+
+
 def _assign_devices(rounds: list[list[str]],
                     phy_ids: list[int] | None = None,
                     pair_aligned: bool = False) -> list[list[tuple[str, str]]]:
@@ -1020,6 +1066,31 @@ def run_tests(
         ts_print("Error: could not detect any NPU cards", file=sys.stderr)
         sys.exit(1)
     all_phy_ids = [int(x) for x in phy_ids.split(",")]
+    # In-process callers (flow.py) never pass the CLI flag; the workflow
+    # env var is the only way to enable it there (a3 dual-die runners).
+    # Computed here, before scheduling: pair-aligned filtering may shrink
+    # the usable pool when some dies are occupied (host-side processes are
+    # invisible to fuser — the workflow exports ASCEND_RT_VISIBLE_DEVICES
+    # with the free chips so they never enter this list in the first place;
+    # lone dies from scattered occupancy are dropped below).
+    pair_aligned = pair_aligned_devices or os.environ.get(
+        "MAIN2MAIN_PAIR_ALIGNED_DEVICES", "").strip().lower() in {"1", "true"}
+    usable_pool = all_phy_ids
+    if pair_aligned:
+        usable_pool, dropped_lone = _pair_complete_pool(all_phy_ids)
+        if dropped_lone:
+            ts_print(f"  Dual-die pairing: dropping lone dies {dropped_lone} "
+                     f"(partner die busy/absent); usable pool {usable_pool}",
+                     flush=True)
+        if not usable_pool:
+            ts_print("Error: no complete dual-die pair among visible devices "
+                     f"{all_phy_ids} — occupancy left only lone dies; the "
+                     "runner admin must clean the host", file=sys.stderr)
+            sys.exit(1)
+    capacity = len(usable_pool)
+    if capacity != total_cards:
+        ts_print(f"  Usable {capacity}/{total_cards} cards after occupancy "
+                 f"filtering (pool {usable_pool})", flush=True)
 
     # ---- step 3: sync patch ----
     if patch_path and remote_host:
@@ -1074,24 +1145,28 @@ def run_tests(
     if overriders:
         ts_print(f"Device-overriding tests (own physical 0..N-1, one per round): "
                  f"{sorted(overriders)}", flush=True)
+    test_files, device_skipped = _apply_device_constraints(
+        test_files, capacity, usable_pool[0], overriders)
+    for s in device_skipped:
+        ts_print(f"  [skip] {s['test']}: {s['reason']}", flush=True)
+    if not test_files:
+        ts_print("Error: no test can run on the usable device pool "
+                 f"(capacity {capacity})", file=sys.stderr)
+        sys.exit(1)
     rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
-        test_files, total_cards, est_times, device_overriders=overriders)
-    # In-process callers (flow.py) never pass the CLI flag; the workflow
-    # env var is the only way to enable it there (a3 dual-die runners).
-    pair_aligned = pair_aligned_devices or os.environ.get(
-        "MAIN2MAIN_PAIR_ALIGNED_DEVICES", "").strip().lower() in {"1", "true"}
+        test_files, capacity, est_times, device_overriders=overriders)
     if pair_aligned:
         ts_print(f"  Dual-die pairing: enforcing pair-aligned device assignment "
-                 f"(devices {phy_ids})", flush=True)
-    device_rounds = _assign_devices(rounds, all_phy_ids,
+                 f"(usable pool {usable_pool})", flush=True)
+    device_rounds = _assign_devices(rounds, usable_pool,
                                     pair_aligned=pair_aligned)
 
     parallel_count = sum(1 for r in rounds if len(r) > 1)
-    ts_print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {total_cards}):")
+    ts_print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {capacity}):")
     for i, rnd in enumerate(device_rounds):
         usage = sum(_test_cards(t) for t, _ in rnd)
         mode = "parallel" if len(rnd) > 1 else "serial"
-        ts_print(f"  Round {i+1} ({mode}, using {usage}/{total_cards} cards):")
+        ts_print(f"  Round {i+1} ({mode}, using {usage}/{capacity} cards):")
         for t, d in rnd:
             ts_print(f"    {t}  ({_test_cards(t)}c, devs={d})")
     ts_print(flush=True)
@@ -1147,7 +1222,7 @@ def run_tests(
         all_results.extend(round_results)
         rounds_info.append({"round": round_idx, "tests": [r["test"] for r in round_results],
                             "cards_used": sum(_test_cards(t) for t, _ in rnd),
-                            "total_cards": total_cards, "elapsed_s": round(round_elapsed, 1)})
+                            "total_cards": capacity, "elapsed_s": round(round_elapsed, 1)})
         ts_print(f"  Round {round_idx} elapsed: {round_elapsed:.1f}s", flush=True)
 
         if remote_host:
@@ -1166,6 +1241,8 @@ def run_tests(
         total_cards=total_cards, sequential=sequential, remote=remote,
         ci_dir=ci_dir, rounds_info=rounds_info, total_elapsed=total_elapsed,
     )
+    if device_skipped:
+        result["device_skipped"] = device_skipped
     result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     ts_print(f"\nmain2main CI aggregated: {result['ci_result']}  "
              f"(can_commit={result['can_commit']})", flush=True)
