@@ -110,7 +110,8 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
         ctx["vllm_report_context"] = "(vllm-report unavailable, use grep on vllm source)"
     else:
         ref_names = ["adaptation-patterns.md",
-                     "common-pitfalls.md"]
+                     "common-pitfalls.md",
+                     "upstream-contract-drift.md"]
         # Load code-structure-guide only on the first step (static mapping table)
         if inputs.get("step_id") == "step-1":
             ref_names.append("code-structure-guide.md")
@@ -133,9 +134,16 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
         refs_loaded = ref_names
 
     ctx["reference_content"] = ref_content
-    # Ensure vllm_report_context placeholder is never empty (avoids KeyError
-    # in format_map if flow did not pass it, e.g. CLI/debug invocations).
+    # Ensure placeholders referenced by SKILL.md are never empty (avoids
+    # KeyError in format_map if flow did not pass them, e.g. CLI/debug
+    # invocations).
     ctx.setdefault("vllm_report_context", "(vllm-report unavailable, use grep)")
+    ctx.setdefault("start_commit", "")
+    ctx.setdefault("end_commit", "")
+    # The flow repo root — lets SKILL.md reference
+    # `python -m main2main_flow.scripts.utils.ut_verify` with an absolute,
+    # importable path regardless of the adapter's cwd.
+    ctx.setdefault("flow_repo", str(Path(__file__).resolve().parents[3]))
 
     # Inline error content from error_logs files (if any).
     # error_logs is a JSON array of file paths, e.g. ["/path/a.txt", "/path/b.json"].

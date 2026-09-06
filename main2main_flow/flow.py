@@ -17,7 +17,8 @@ from main2main_flow.scripts.utils.detect_commits import detect
 from main2main_flow.scripts.utils.plan_steps import run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.lessons import (
-    persist_lessons, submit_step_lesson, submit_gate_lesson)
+    persist_lessons, submit_step_lesson, submit_gate_lesson,
+    submit_pre_ci_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
 from main2main_flow.scripts.utils.run_tests import run_tests, build_test_errors_detail
 from main2main_flow.scripts.utils.commit_ref import run_update
@@ -992,6 +993,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     "error_logs": json.dumps(error_logs, ensure_ascii=False),
                     "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
                     "mode": role,
+                    "start_commit": "",
+                    "end_commit": self.state.cur_vllm_commit or "",
                     # The gate's fix rounds fix UT/test failures (e.g. PIN_MEMORY,
                     # maybe_calc_kv_scales, deepseek_v4_thinking) — the adapter
                     # must query vllm-report's lessons (get_adaptation_lessons) to
@@ -1259,6 +1262,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # already warned about.
         pre_ci_failed_sha = ""
         pre_ci_noop_warned = False
+        # Last failing pre_ci result — feeds the pre_ci-recovery lesson.
+        last_failed_check: dict | None = None
 
         # vllm-report MCP tools are called dynamically by the adapter during
         # analysis (not pre-loaded as static context here).  The MCP server
@@ -1314,6 +1319,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 "release_tag": self.state.release_tag,
                 "vllm_path": vllm_path,
                 "role": role,
+                "start_commit": step["start_commit"],
+                "end_commit": step["end_commit"],
                 "error_logs": json.dumps(error_logs, ensure_ascii=False),
                 "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
                 "mode": role,
@@ -1384,6 +1391,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 log_path = step_dir / PRE_CI_CHECK_FILE
                 log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
                 error_logs = [str(log_path)]
+                # The full pytest stdout (complete tracebacks) — the inlined
+                # violations carry only ~900-char excerpts.
+                ut_log = next((c.get("log_path")
+                               for c in check_result.get("checks", [])
+                               if c.get("name") == "ut" and c.get("log_path")),
+                              "")
+                if ut_log and Path(ut_log).exists():
+                    error_logs.append(ut_log)
+                last_failed_check = check_result
                 # Record the failing tree for the zero-progress guard; a new
                 # failing tree restarts the warn cycle.
                 pre_ci_failed_sha = self._working_tree_diff_sha(ascend_path)
@@ -1442,6 +1458,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     ts_print(f"[ai_analysis] {step_id}: critic still has issues after "
                              f"1 fix round — proceeding to e2e anyway")
                 break
+
+        if pre_ci_passed and attempt >= 2 and last_failed_check is not None:
+            # pre_ci recovered after >=1 failed attempt — the fix knowledge
+            # (which contract drifted, which checks) belongs in the lesson KB,
+            # same as e2e/gate recoveries (run 33976675052 step-1 and
+            # run 33944487577 step-7 died on the same family twice).
+            submit_pre_ci_lesson(self.state.vllm_report_path, step_id,
+                                 last_failed_check)
 
         if not pre_ci_passed:
             ts_print(f"[ai_analysis] {step_id}: FAILED after 3 attempts "

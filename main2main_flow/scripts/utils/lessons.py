@@ -221,6 +221,64 @@ def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
                     keywords=keywords, example=example)
 
 
+def submit_pre_ci_lesson(vllm_report_path: str, step_id: str,
+                         check_result: dict) -> None:
+    """Record a lesson when pre_ci recovered after >=1 failed attempt.
+
+    pre_ci failures (format/mypy/UT) killed run 33944487577 step-7 and
+    run 33976675052 step-1 on the SAME upstream-contract family — none of
+    that knowledge was recorded because only e2e/gate recoveries had a
+    lesson path.  Called by flow._ai_analysis when pre_ci passes on
+    attempt >= 2, with the LAST failing check result.
+    """
+    if not vllm_report_path or not check_result:
+        return
+    report_dir = Path(vllm_report_path)
+    checks = [c for c in check_result.get("checks", []) if not c.get("passed")]
+    if not checks:
+        return
+    failed_names = [c["name"] for c in checks]
+    violations: list[str] = []
+    for c in checks:
+        violations.extend(c.get("violations") or [])
+    error_text = "\n".join(violations)[:2000]
+    keywords = _extract_keywords(error_text, "pre_ci failure")
+    # file:line tokens and mypy error codes are the highest-signal keywords
+    # for a pre_ci failure — add them verbatim.
+    for v in violations[:10]:
+        first = v.splitlines()[0].strip() if v else ""
+        if first and first not in keywords:
+            keywords.append(first[:120])
+        if len(keywords) >= 6:
+            break
+    title = f"{step_id}: pre_ci fix needed ({', '.join(failed_names)})"
+    symptom = (f"pre_ci failed on {', '.join(failed_names)} with "
+               f"{len(violations)} violation(s); recovered on a later "
+               f"attempt. First violations: "
+               + " | ".join(v.splitlines()[0][:120] for v in violations[:3]))
+    root_cause = (
+        "The initial adaptation passed analysis but failed mechanical "
+        "checks (format/mypy/UT) — usually an upstream contract drift "
+        "whose call sites/tests were not all updated, or a format/mypy "
+        "rule violated while editing. See the violation lines.")
+    fix_guidance = [
+        "Classify first: <=3 violations = fix the exact file:line; a "
+        "family (>3 violations in one subsystem) = an upstream contract "
+        "change — read reference/upstream-contract-drift.md and fix the "
+        "whole family (grep ALL call sites, vllm_ascend AND tests/ut)",
+        "Verify with the closed loop: run the failing UT files via "
+        "ut_verify (venv_python from pre_ci_check.json) instead of "
+        "editing blind",
+        "mypy last: contract-aligned code makes most mypy errors vanish "
+        "on their own",
+    ]
+    example = error_text[:400]
+    _submit_via_mcp(report_dir, title=title, symptom=symptom,
+                    root_cause=root_cause, fix_guidance=fix_guidance,
+                    tags=["pre-ci-fix", "auto-submitted"],
+                    keywords=keywords, example=example)
+
+
 def _resolve_push_targets(report_dir: Path) -> list[str]:
     """Push targets for the vllm-report clone, honoring the runner's own
     github rewrite (``url.*.insteadOf``): embed the token in the REWRITTEN

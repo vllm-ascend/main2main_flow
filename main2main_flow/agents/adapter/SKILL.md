@@ -28,23 +28,29 @@ these rules to stay on the critical path:
    in a single call: `grep -n "X" file; grep -n "Y" file; ls dir`. Each
    bash call has fixed overhead (issue + output processing); 3 greps in
    one command is ~1/3 the cost of 3 separate calls.
-5. **Verify at edit time, not in a verification loop.** Keep every line
-   ≤120 chars AS YOU WRITE IT; never run py_compile/mypy/ruff (banned —
-   see Rules). The push-time gate re-runs format + mypy once and feeds
-   exact violations back — don't prove there are none, just don't leave
-   obvious ones.
+5. **Keep every line ≤120 chars AS YOU WRITE IT; never run
+   py_compile/mypy/ruff (banned — see Rules).** The push-time gate
+   re-runs format + mypy once and feeds exact violations back. UT is
+   DIFFERENT: in fix mode you MUST run the failing UT files with
+   `ut_verify` (see fix mode below) and iterate until they pass —
+   editing blind across 3 rounds is what kills steps.
 6. **MCP context is the map — don't re-discover it — BUT only when it
    covers the commit.** If `get_adaptation_guide(sha)` returned a guide,
    follow it directly — grep only for CALL SITES and sibling overrides
    (checklist 9-10). If it returned empty ("commit not covered"), the
    guide is useless — analyze the upstream diff yourself (grep + read +
    reason). The MCP gap is the signal to explore.
-7. **One pass per file.** Read a file, understand it, edit all needed
-   spots, verify once, move on. Do NOT return to an already-edited file
-   unless a later discovery proves your edit wrong.
-8. **In fix mode, fix ONLY what the error says.** Fix the exact line the
-   traceback / violation names — the adaptation is done, you are fixing
-   one failure.
+7. **One pass per file while exploring.** Read a file, understand it,
+   edit all needed spots, move on. In FIX mode the opposite is expected:
+   iterate on the same file as the verify loop reveals what is still
+   wrong — convergence, not one-pass.
+8. **In fix mode, match the fix to the failure shape.** A single
+   violation → fix the exact line it names. A FAMILY (>3 violations in
+   one subsystem, or one error repeated across files) → that is an
+   upstream contract change: grep ALL call sites of the changed symbol
+   (in vllm_ascend AND tests/ut) and fix them together — see
+   `reference/upstream-contract-drift.md`. Line-by-line whack-a-mole
+   across a family never converges within the round budget.
 
 
 ## Repositories
@@ -84,7 +90,10 @@ these rules to stay on the critical path:
   remains (PR #14517: the call site was guarded but the module-level
   `BatchReqState` import broke the whole v0.27.1 lane — ImportError + a
   third positional arg to `init_workspace_manager`).
-- Static analysis only — do not import vllm/vllm-ascend, run tests, launch models, or require NPU/GPU
+- Execution is allowed ONLY through the UT verify loop (`ut_verify`, fix
+  mode below): pure CPU, mocked npu-smi, no model load. Never launch
+  models/servers, never require NPU/GPU, never import vllm/vllm-ascend
+  directly in a REPL
 - Use `rg` for symbol search (installed) — one call covers what a loop of `grep` calls would take; batch related lookups into a single invocation
 - Reference docs (`adaptation-patterns.md`, `common-pitfalls.md`,
   `code-structure-guide.md`) are **index-first**: each starts with a `## Index`
@@ -93,7 +102,10 @@ these rules to stay on the critical path:
   whole reference file. Content you already read in this session stays in your
   context — do not re-read it in later attempts or after resume
 - **DO NOT run mypy, ruff, pre-commit, py_compile, or any linter/checker/compiler command.** Ever. During adaptation, only read code and edit files.
-- Never read raw CI logs — use inlined error content above
+- Never read raw CI logs — use inlined error content above. EXCEPTION: the
+  full UT log (path in `pre_ci_check.json` → `checks` → `ut` → `log_path`)
+  MAY be grepped/section-read when a violation's excerpt was truncated —
+  that log exists precisely for you
 - Do NOT treat ModuleNotFoundError or missing NPU/GPU from local commands as adaptation failures
 - **NEVER modify anything under tests/e2e/ — E2E test cases (assertions, golden values, parametrizations) are frozen.** Edits there are automatically reverted and the attempt is voided; adapt the `vllm_ascend/` source instead. (`tests/ut/` MAY be adapted per the UT rules below.)
 
@@ -114,7 +126,8 @@ a fix pattern (generic versions of the failures in run 31581543851, PR
 2. **Mock-contract drift** — signal: `TypeError: unexpected keyword
    argument`, or a mock result wrapping an AttributeError (e.g. a Future).
    Fix: sync the mock with the upstream definition by GREPPING the
-   upstream signature/attribute — do NOT run the test to discover it.
+   upstream signature/attribute, then CONFIRM with `ut_verify` on the
+   failing file.
 3. **Version-guarded symbol resolution** — signal: a stub/empty
    implementation surfaces as `KeyError`/`AttributeError` at the first
    real use. Under `vllm_version_is` a name has one definition per branch;
@@ -122,9 +135,9 @@ a fix pattern (generic versions of the failures in run 31581543851, PR
    grep ALL `def <name>(` and resolve the ACTUAL implementation (often
    the private method the stub delegates to).
 4. **Adapt source and tests together** — when the adaptation changes a
-   contract, update the test mocks in the same pass. Verify statically
-   (grep the attribute-access chain of the bare object) instead of
-   running tests — running is banned and each run costs a full e2e round.
+   contract, update the test mocks in the same pass. Then run the failing
+   files with `ut_verify` (seconds, CPU-only) — do not wait for pre_ci to
+   discover what you can prove yourself now.
 
 ## Cumulative Step Model
 
@@ -263,10 +276,38 @@ See `reference/adaptation-patterns.md` §1b.
 ### fix mode
 
 The working tree already contains the failed adaptation — do NOT start from
-scratch. Fix ONLY what the error says (Efficiency rule 8).
+scratch. Match the fix to the failure shape (Efficiency rule 8): single
+violation = the exact line; family = the whole subsystem.
 
-**Pre-CI failures**: open `pre_ci_check.json` → `violations` carry exact
-file:line:col:CODE. Fix those specific lines.
+**Pre-CI failures** (format/mypy/UT — from `pre_ci_check.json`):
+
+1. **MUST call `get_adaptation_lessons(keywords=["<violation text>"])`
+   BEFORE fixing** (same rule as E2E below) — a prior run may have already
+   fixed this exact failure. (If the MCP call fails, log and continue.)
+2. **Classify** — open `pre_ci_check.json` → `violations`. ≤3 violations:
+   mechanical, fix the exact file:line:col:CODE they name. A family (>3 in
+   one subsystem, or one attribute/method name repeated): upstream contract
+   drift — read `reference/upstream-contract-drift.md` FIRST and fix the
+   whole family (grep ALL call sites, vllm_ascend AND tests/ut). For UT
+   violations whose excerpt is truncated, grep the full log at the
+   `log_path` given in the same JSON.
+3. **VERIFY LOOP (mandatory for UT failures)** — after editing, run the
+   failing files yourself:
+   ```bash
+   cd {flow_repo} && python3 -m main2main_flow.scripts.utils.ut_verify \
+     --repo {ascend_path} --vllm {vllm_path} \
+     [--python <venv_python from pre_ci_check.json>] \
+     tests/ut/path/to/test_failing.py [more files...]
+   ```
+   It reproduces the pre_ci environment (pure CPU, mocked npu-smi) and
+   prints full `--tb=long` tracebacks. Iterate: fix → re-run → observe.
+   Up to ~4 iterations; stop early if the failure set stops shrinking and
+   re-analyze instead (a wrong theory, not a wrong edit).
+4. **Do not end the attempt with known-failing UT.** The next round only
+   re-runs pre_ci — walking in with failures you could have run yourself
+   burns a whole round for information ut_verify gives in seconds.
+   mypy/format violations stay mechanical-only (no linter runs); fix them
+   from the exact violation lines.
 
 **E2E test failures**: open `round-N-result.json` → if `code_bugs_count` > 0,
 open failed tests from `suite_results[test_name]`. Read both `-summary.json`
@@ -361,6 +402,8 @@ during adaptation to query deeper information not in the injected impact map.
    get_module_info(repo, module_name), get_development_workflows().
 4. In fix mode, why did a test fail? → search_analysis(keywords=[...]),
    get_commit_arch_delta(repo="vllm", sha=<end_commit>).
+   In fix mode for PRE-CI failures → get_adaptation_lessons FIRST with the
+   violation text (same rule as E2E fix mode).
 ```
 
 **CRITICAL**: Call MCP tools FIRST, before any grep. The tools return

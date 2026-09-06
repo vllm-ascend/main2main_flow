@@ -22,14 +22,20 @@ Key mechanisms:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import pip_install_with_fallback, ts_print
+from main2main_flow.scripts.utils.utils import (
+    WORKSPACE_DIR,
+    pip_install_with_fallback,
+    ts_print,
+)
 
 _BALANCE_TAG_BODY_TEST = "test_schedule_body_matches_pinned_release_tag"
 
@@ -135,6 +141,133 @@ def _failure_excerpt(clean: str, failure_line: str, max_chars: int = 900) -> str
     return excerpt or ""
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+UT_FULL_LOG_NAME = "ut_full.log"
+UT_VERIFY_LOG_NAME = "ut_verify_last.log"
+_UT_VENV_ENV = "MAIN2MAIN_UT_VENV"
+_UT_VENV_MARKER = "m2m_meta.json"
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def _ut_base_dir() -> Path:
+    """Home of the persistent UT venv and its full-run logs."""
+    env = os.environ.get(_UT_VENV_ENV, "")
+    return Path(env) if env else WORKSPACE_DIR / "ut_venv"
+
+
+def _ensure_ut_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
+    """Create-or-reuse the persistent UT venv; return (venv_dir, venv_python).
+
+    The venv lives across pre_ci attempts and steps (the runner is
+    ephemeral, so no end-of-run cleanup is needed).  Reuse requires
+    bin/python to exist AND the numpy spec recorded in the marker to
+    match what the current triton-ascend metadata asks for.  Any
+    failure falls back to the system pytest (returns (None, "")).
+    """
+    venv_dir = _ut_base_dir()
+    venv_python = venv_dir / "bin" / "python"
+    if venv_python.exists():
+        try:
+            meta = json.loads((venv_dir / _UT_VENV_MARKER).read_text(
+                encoding="utf-8"))
+            if meta.get("numpy_spec") == target_numpy_spec:
+                ts_print(f"[pre_ci] ut: reusing persistent venv at {venv_dir}")
+                return venv_dir, str(venv_python)
+            ts_print(f"[pre_ci] ut: persistent venv numpy spec mismatch "
+                     f"({meta.get('numpy_spec')!r} != "
+                     f"{target_numpy_spec!r}) — recreating")
+        except Exception:
+            ts_print("[pre_ci] ut: persistent venv marker unreadable "
+                     "— recreating")
+        shutil.rmtree(venv_dir, ignore_errors=True)
+
+    ts_print(f"[pre_ci] ut: creating persistent venv at {venv_dir} "
+             f"(numpy{target_numpy_spec} from triton-ascend)")
+    try:
+        venv_dir.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(
+            [sys.executable, "-m", "venv", str(venv_dir),
+             "--system-site-packages"],
+            capture_output=True, text=True, timeout=180,
+        )
+        if r.returncode != 0:
+            ts_print("[pre_ci] ut: WARNING venv creation FAILED — "
+                     "falling back to system pytest")
+            return None, ""
+        if target_numpy_spec:
+            try:
+                r2 = pip_install_with_fallback(
+                    venv_python, ["-q", f"numpy{target_numpy_spec}"])
+            except subprocess.TimeoutExpired:
+                ts_print("[pre_ci] ut: WARNING numpy install TIMED OUT — "
+                         "falling back to system pytest")
+                r2 = None
+            if r2 is not None and r2.returncode != 0:
+                ts_print("[pre_ci] ut: WARNING numpy install FAILED "
+                         f"({r2.stderr.strip()[:200]}) — falling back "
+                         "to system pytest")
+                return None, ""
+        (venv_dir / _UT_VENV_MARKER).write_text(
+            json.dumps({"numpy_spec": target_numpy_spec}),
+            encoding="utf-8")
+        return venv_dir, str(venv_python)
+    except subprocess.TimeoutExpired:
+        ts_print("[pre_ci] ut: WARNING venv creation TIMED OUT (180s) — "
+                 "falling back to system pytest")
+        return None, ""
+
+
+def _make_fake_npu_smi() -> Path:
+    """Fake npu-smi (exit 1) so tests/ut/conftest.py takes the mock path
+    even on an NPU runner — otherwise CPU UT cases hit real NPU ops."""
+    fake_bin_dir = Path(tempfile.mkdtemp(prefix="ut_fake_bin_"))
+    npu_smi_fake = fake_bin_dir / "npu-smi"
+    try:
+        npu_smi_fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        npu_smi_fake.chmod(0o755)
+    except OSError:
+        pass
+    return fake_bin_dir
+
+
+def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict:
+    """Env replicating CI's CPU-UT lane: pure CPU, mocked NPU, offline hub.
+
+    Shared by check_ut (pre_ci gate) and ut_verify (adapter verify loop)
+    so both exercise the identical execution surface.  The flow repo root
+    is appended to PYTHONPATH so the ut_namespace plugin resolves even
+    when the caller's environment doesn't carry it.
+    """
+    env = os.environ.copy()
+    ascend_abs = str(repo.resolve())
+    vllm_abs = str(Path(vllm_path).resolve())
+    flow_root = str(Path(__file__).resolve().parents[3])
+    existing = env.get("PYTHONPATH", "")
+    parts = [ascend_abs, vllm_abs]
+    if existing:
+        parts.append(existing)
+    parts.append(flow_root)
+    env["PYTHONPATH"] = ":".join(parts)
+    env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+    env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    # Match CI: offline mode so get_model_file / hf_hub_download
+    # fails immediately (385s→0.5s for test_maybe_update_config_
+    # non_directory_raises) instead of retrying network timeouts.
+    env["HF_HUB_OFFLINE"] = "1"
+    env["VLLM_USE_MODELSCOPE"] = "True"
+    env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
+    # Hide NPU so platform detection sees pure CPU — matches
+    # PR CI cpu-0.  fake npu-smi still mocks conftest, but
+    # torch_npu's runtime sees no visible devices.
+    env["ASCEND_RT_VISIBLE_DEVICES"] = ""
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+    return env
+
+
 def check_ut(repo: Path, vllm_path: str | Path | None = None,
              timeout_s: int = 1800) -> dict:
     """Run the CPU-UT batch, aligned with CI's single-process execution.
@@ -159,18 +292,19 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     Returns dict with ``violations`` (failing test node IDs) and
     ``detail``.  Empty violations + non-skipped → pass.
     """
-    import tempfile
     import importlib.metadata as _md
 
     cpu_files = _collect_cpu_ut_files(repo)
     if not cpu_files:
         ts_print("\n[pre_ci] ut: SKIPPED — tests/ut not found or no CPU tests")
-        return {"violations": [], "detail": "tests/ut not found", "skipped": True}
+        return {"violations": [], "detail": "tests/ut not found", "skipped": True,
+                "log_path": "", "venv_python": ""}
 
     pytest_bin = shutil.which("pytest")
     if not pytest_bin:
         ts_print("\n[pre_ci] ut: SKIPPED — pytest not installed")
-        return {"violations": [], "detail": "pytest not installed", "skipped": True}
+        return {"violations": [], "detail": "pytest not installed", "skipped": True,
+                "log_path": "", "venv_python": ""}
 
     ts_print(f"\n[pre_ci] ut: collected {len(cpu_files)} CPU test files "
              f"(per-file isolation, NPU-convention a2/ and a3_2/ excluded)")
@@ -194,93 +328,46 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     except Exception as e:
         ts_print(f"[pre_ci] ut: failed to read triton-ascend numpy constraint ({e})")
 
-    # Create venv with --system-site-packages, install numpy constraint.
-    venv_dir: Path | None = None
-    pytest_cmd = [pytest_bin]
-    try:
-        venv_dir = Path(tempfile.mkdtemp(prefix="ut_venv_"))
-        ts_print(f"[pre_ci] ut: creating venv at {venv_dir} "
-                 f"(numpy{target_numpy_spec} from triton-ascend)")
-        r = subprocess.run(
-            [sys.executable, "-m", "venv", str(venv_dir), "--system-site-packages"],
-            capture_output=True, text=True, timeout=180,
-        )
-        if r.returncode != 0:
-            ts_print("[pre_ci] ut: WARNING venv creation FAILED — "
-                     "falling back to system pytest")
-            venv_dir = None
-        else:
-            venv_python = venv_dir / "bin" / "python"
-            if target_numpy_spec:
-                try:
-                    r2 = pip_install_with_fallback(
-                        venv_python, ["-q", f"numpy{target_numpy_spec}"])
-                except subprocess.TimeoutExpired:
-                    ts_print("[pre_ci] ut: WARNING numpy install TIMED OUT — "
-                             "falling back to system pytest")
-                    r2 = None
-                if r2 is not None and r2.returncode != 0:
-                    ts_print("[pre_ci] ut: WARNING numpy install FAILED "
-                             f"({r2.stderr.strip()[:200]}) — falling back "
-                             "to system pytest")
-                    venv_dir = None
-            if venv_dir is not None:
-                pytest_cmd = [str(venv_python), "-m", "pytest"]
-                ts_print(f"[pre_ci] ut: using venv pytest via "
-                         f"{venv_python} -m pytest")
-    except subprocess.TimeoutExpired:
-        ts_print("[pre_ci] ut: WARNING venv creation TIMED OUT (180s) — "
-                 "falling back to system pytest")
-        venv_dir = None
+    # Persistent venv (created once, reused across attempts and steps) with
+    # --system-site-packages + the numpy constraint.
+    venv_dir, venv_python = _ensure_ut_venv(target_numpy_spec)
+    pytest_cmd = [str(venv_python), "-m", "pytest"] if venv_dir else [pytest_bin]
+    if venv_dir:
+        ts_print(f"[pre_ci] ut: using venv pytest via {venv_python} -m pytest")
 
-    # Fake npu-smi (exit 1) so tests/ut/conftest.py takes the mock path even
-    # on an NPU runner — otherwise CPU UT cases hit real NPU ops.
-    fake_bin_dir = Path(tempfile.mkdtemp(prefix="ut_fake_bin_"))
-    npu_smi_fake = fake_bin_dir / "npu-smi"
-    try:
-        npu_smi_fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        npu_smi_fake.chmod(0o755)
-    except OSError:
-        pass
+    # Full pytest stdout is persisted here so the adapter (fix mode) can
+    # grep complete tracebacks when a violation's excerpt was truncated.
+    log_path = (venv_dir or WORKSPACE_DIR) / UT_FULL_LOG_NAME
+
+    fake_bin_dir = _make_fake_npu_smi()
 
     all_violations: list[str] = []
     all_files_clean = True
     details: list[str] = []
-    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
     failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
 
     try:
         if not vllm_path:
             ts_print("[pre_ci] ut: no vllm path configured, skipping")
-            return {"violations": [], "detail": "no vllm path", "skipped": True}
+            return {"violations": [], "detail": "no vllm path", "skipped": True,
+                    "log_path": "", "venv_python": ""}
         label = "main"
-        vpath_abs = Path(vllm_path)
 
-        env = os.environ.copy()
-        ascend_abs = str(repo.resolve())
-        vllm_abs = str(vpath_abs.resolve())
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = (
-            f"{ascend_abs}:{vllm_abs}:{existing}" if existing
-            else f"{ascend_abs}:{vllm_abs}")
-        env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
-        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        # Match CI: offline mode so get_model_file / hf_hub_download
-        # fails immediately (385s→0.5s for test_maybe_update_config_
-        # non_directory_raises) instead of retrying network timeouts.
-        env["HF_HUB_OFFLINE"] = "1"
-        env["VLLM_USE_MODELSCOPE"] = "True"
-        env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
-        # Hide NPU so platform detection sees pure CPU — matches
-        # PR CI cpu-0.  fake npu-smi still mocks conftest, but
-        # torch_npu's runtime sees no visible devices.
-        env["ASCEND_RT_VISIBLE_DEVICES"] = ""
-        env.pop("CUDA_VISIBLE_DEVICES", None)
+        env = _build_ut_env(repo, vllm_path, fake_bin_dir)
         ts_print(f"[pre_ci] ut: [{label}] pure-CPU env "
                  f"(ASCEND_RT_VISIBLE_DEVICES='')")
 
         ts_print(f"\n[pre_ci] ut: === batch [{label}] "
-                 f"PYTHONPATH={ascend_abs}:{vllm_abs} ===")
+                 f"PYTHONPATH={env['PYTHONPATH']} ===")
+
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "# pre_ci UT full log\n"
+            f"# pytest cmd: {' '.join(pytest_cmd)}\n"
+            f"# repo: {repo.resolve()}\n"
+            f"# vllm: {Path(vllm_path).resolve()}\n"
+            f"# PYTHONPATH: {env['PYTHONPATH']}\n",
+            encoding="utf-8")
 
         # Files known to pollute the shared process get their own
         # subprocess.  Verified on the A2 env: test_batch_invariant.py
@@ -340,7 +427,10 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 all_files_clean = False
 
         for name, rr in runs:
-            clean = ansi_re.sub("", rr.stdout + rr.stderr)
+            clean = strip_ansi(rr.stdout + rr.stderr)
+            with log_path.open("a", encoding="utf-8") as lf:
+                lf.write(f"\n===== run: {name} (exit={rr.returncode}) =====\n")
+                lf.write(clean)
             seen: set[str] = set()
             for line in clean.splitlines():
                 m = failed_re.search(line.strip())
@@ -368,7 +458,9 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean")
             return {"violations": [],
                     "detail": f"UT clean ({len(cpu_files)} files, "
-                              f"single-process batch)"}
+                              f"single-process batch)",
+                    "log_path": str(log_path),
+                    "venv_python": str(venv_python) if venv_dir else ""}
         ts_print(f"\n[pre_ci] ut: {len(all_violations)} failure(s):")
         for v in all_violations[:20]:
             ts_print(f"  {v}")
@@ -376,9 +468,11 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             ts_print(f"  ... and {len(all_violations) - 20} more")
         return {"violations": all_violations,
                 "detail": f"{len(all_violations)} UT failure(s): "
-                          + "; ".join(details)}
+                          + "; ".join(details),
+                "log_path": str(log_path),
+                "venv_python": str(venv_python) if venv_dir else ""}
     finally:
-        if venv_dir and venv_dir.exists():
-            shutil.rmtree(venv_dir, ignore_errors=True)
+        # The venv persists across attempts/steps (recreated only on numpy
+        # spec mismatch) — only the throwaway fake-bin dir is deleted here.
         if fake_bin_dir.exists():
             shutil.rmtree(fake_bin_dir, ignore_errors=True)

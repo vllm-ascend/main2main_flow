@@ -730,6 +730,11 @@ def run_check(ascend_path: str | Path, release_tag: str,
             "detail": ut.get("detail", ""),
             "violations": ut.get("violations", []),
             "skipped": ut.get("skipped", False),
+            # Full-log path + persistent venv python — the fix-mode adapter
+            # greps the log for complete tracebacks and reuses the venv to
+            # re-run the failing files (ut_verify).
+            "log_path": ut.get("log_path", ""),
+            "venv_python": ut.get("venv_python", ""),
         })
         if not ut_ok:
             all_passed = False
