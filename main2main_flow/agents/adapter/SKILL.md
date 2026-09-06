@@ -31,9 +31,12 @@ these rules to stay on the critical path:
 5. **Keep every line ≤120 chars AS YOU WRITE IT; never run
    py_compile/mypy/ruff (banned — see Rules).** The push-time gate
    re-runs format + mypy once and feeds exact violations back. UT is
-   DIFFERENT: in fix mode you MUST run the failing UT files with
-   `ut_verify` (see fix mode below) and iterate until they pass —
-   editing blind across 3 rounds is what kills steps.
+   DIFFERENT: `ut_verify` is ALLOWED and encouraged in every mode —
+   in fix mode you MUST run the failing UT files with `ut_verify`
+   (see fix mode below) and iterate until they pass; in adaptation,
+   after a multi-file or contract-level edit, run the edited modules'
+   UT files ONCE before ending the attempt (same command) — editing
+   blind is what turns one attempt into three rounds.
 6. **MCP context is the map — don't re-discover it — BUT only when it
    covers the commit.** If `get_adaptation_guide(sha)` returned a guide,
    follow it directly — grep only for CALL SITES and sibling overrides
@@ -91,7 +94,8 @@ these rules to stay on the critical path:
   `BatchReqState` import broke the whole v0.27.1 lane — ImportError + a
   third positional arg to `init_workspace_manager`).
 - Execution is allowed ONLY through the UT verify loop (`ut_verify`, fix
-  mode below): pure CPU, mocked npu-smi, no model load. Never launch
+  mode below — and sanctioned in adaptation mode after multi-file edits):
+  pure CPU, mocked npu-smi, no model load. Never launch
   models/servers, never require NPU/GPU, never import vllm/vllm-ascend
   directly in a REPL
 - Use `rg` for symbol search (installed) — one call covers what a loop of `grep` calls would take; batch related lookups into a single invocation
@@ -101,7 +105,7 @@ these rules to stay on the critical path:
   whose trigger matches your change — e.g. `sed -n 'A,Bp' <file>`. Never read a
   whole reference file. Content you already read in this session stays in your
   context — do not re-read it in later attempts or after resume
-- **DO NOT run mypy, ruff, pre-commit, py_compile, or any linter/checker/compiler command.** Ever. During adaptation, only read code and edit files.
+- **DO NOT run mypy, ruff, pre-commit, py_compile, or any linter/checker/compiler command.** Ever. The ONLY executable verification is `ut_verify` (see rule 5).
 - Never read raw CI logs — use inlined error content above. EXCEPTION: the
   full UT log (path in `pre_ci_check.json` → `checks` → `ut` → `log_path`)
   MAY be grepped/section-read when a violation's excerpt was truncated —

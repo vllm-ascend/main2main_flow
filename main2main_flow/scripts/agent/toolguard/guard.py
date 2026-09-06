@@ -27,9 +27,11 @@ BLOCKED_PY_MODULES = frozenset({
     "black", "isort",
 })
 GUARD_MSG = (
-    "BLOCKED by main2main_flow: running tests/checks is forbidden during "
-    "adaptation (SKILL.md Rules). Static analysis only — read code and edit "
-    "files. Do not retry this command."
+    "BLOCKED by main2main_flow: direct test/lint commands are forbidden "
+    "(they burn 5-15min each and kill the session). Use the sanctioned "
+    "verifier instead: python3 -m main2main_flow.scripts.utils.ut_verify "
+    "(CPU-only, mocked npu-smi, seconds per file — see SKILL.md). "
+    "Do not retry this command."
 )
 GUARD_DIR = Path(tempfile.gettempdir()) / "m2m-adapt-tool-guard"
 

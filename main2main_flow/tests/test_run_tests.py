@@ -2,6 +2,8 @@
 classification."""
 from __future__ import annotations
 
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -329,6 +331,104 @@ def test_aggregate_precision_pass_can_commit(tmp_path: Path) -> None:
     assert r["ci_result"] == "precision_pass"
     assert r["can_commit"] is True
     assert r["requires_fix"] is False
+
+# ---- run 34018086282: timeout-kill with no observed failure → env_flake ------
+# deepseek_pruning round-0 was killed at the 3600s suite timeout (exit=-9)
+# with zero failed cases and no error in its log — an environment stall, not
+# an adaptation bug — yet it was classified "failed" and burned 2 adapter
+# fix rounds (~2.5h).
+
+def test_no_observed_failure_clean_log(tmp_path: Path):
+    log = _write_log(tmp_path, "INFO engine started\ntest_a PASSED\n")
+    assert rt._no_observed_failure({"failed_test_cases": 0,
+                                    "failed_test_files": []}, log)
+
+
+def test_no_observed_failure_summary_has_failures(tmp_path: Path):
+    log = _write_log(tmp_path, "something\n")
+    assert not rt._no_observed_failure({"failed_test_cases": ["c1", "c2"],
+                                        "failed_test_files": []}, log)
+    assert not rt._no_observed_failure({"failed_test_cases_count": 2,
+                                        "failed_test_files_count": 0}, log)
+
+
+def test_no_observed_failure_missing_log(tmp_path: Path):
+    assert not rt._no_observed_failure({"failed_test_cases": [],
+                                        "failed_test_files": 0},
+                                       tmp_path / "absent.log")
+
+
+def test_no_observed_failure_raised_error_in_log(tmp_path: Path):
+    log = _write_log(tmp_path, "Traceback:\nRuntimeError: engine died\n")
+    assert not rt._no_observed_failure({"failed_test_cases": [],
+                                        "failed_test_files": []}, log)
+
+
+def test_no_observed_failure_worker_wrapper_stripped(tmp_path: Path):
+    # OOM text only appears inside a "Worker failed with error" wrapper line
+    # (the executor's aggregate message); stripping those must not un-hide a
+    # genuine raise, but a wrapper-only log means nothing actually failed.
+    wrapper_only = _write_log(tmp_path, OOM_WORKER_LINE + "\n", "w.log")
+    assert rt._no_observed_failure({"failed_test_cases": 0,
+                                    "failed_test_files": 0}, wrapper_only)
+    real = _write_log(tmp_path, OOM_WORKER_LINE +
+                      "\nValueError: bad config\n", "r.log")
+    assert not rt._no_observed_failure({"failed_test_cases": [],
+                                        "failed_test_files": 0}, real)
+
+
+def test_run_one_test_timeout_kill_no_failure_becomes_env_flake(
+        monkeypatch, tmp_path: Path):
+    # deepseek_pruning shape: SIGKILLed at the suite timeout, summary shows
+    # zero failures, log shows no error — environment stall, not adaptation.
+    log = _write_log(tmp_path, "INFO adding tasks\n", "pruning.log")
+    summary = _write_log(tmp_path, "", "pruning-summary.json")
+    monkeypatch.setattr(rt, "_run_to_log", lambda *a, **k: -9)
+    monkeypatch.setattr(rt, "_run_summary",
+                        lambda *a, **k: {"summary": {"code_bugs": [],
+                                                     "env_flakes": []},
+                                         "summary_error": None})
+    result = _run_one_test(
+        ["pytest"], log, summary,
+        "tests/e2e/pull_request/two_card/test_pruning.py", "0,1",
+        tmp_path / "ci", tmp_path, 0, 1, {},
+        is_remote=False, is_mock=False)
+    assert result["ci_result"] == "env_flake_pass"
+
+
+# ---- run 34018086282: hang early-kill (MAIN2MAIN_HANG_QUIET_S) ---------------
+# gemma4's memory-wait hang streamed nothing for hours while the suite
+# timeout sat at 3600s — three e2e rounds each paid the full hour (~3h).
+
+def test_run_to_log_hang_quiet_kill(tmp_path: Path, monkeypatch):
+    # subprocess prints one line, then goes silent: quiet-kill must fire
+    # well before the (never-reached) 3600s deadline.
+    monkeypatch.setenv("MAIN2MAIN_HANG_QUIET_S", "2")
+    log = tmp_path / "hang.log"
+    cmd = [sys.executable, "-c",
+           "print('started', flush=True); import time; time.sleep(300)"]
+    t0 = time.monotonic()
+    code = rt._run_to_log(cmd, tmp_path, log, {}, timeout_s=3600)
+    elapsed = time.monotonic() - t0
+    assert code == -9
+    assert elapsed < 30
+    assert "started" in log.read_text()
+
+
+def test_run_to_log_active_output_not_killed(tmp_path: Path, monkeypatch):
+    # output arriving more often than the quiet window keeps it alive
+    monkeypatch.setenv("MAIN2MAIN_HANG_QUIET_S", "2")
+    log = tmp_path / "alive.log"
+    cmd = [sys.executable, "-c",
+           "import time\n"
+           "for _ in range(5):\n"
+           "    print('tick', flush=True)\n"
+           "    time.sleep(1)\n"
+           "print('done', flush=True)"]
+    code = rt._run_to_log(cmd, tmp_path, log, {}, timeout_s=60)
+    assert code == 0
+    assert "done" in log.read_text()
+
 
 # ---- run 34010715527: pair-aligned scheduling overflow ----------------------
 # _schedule_rounds packed rounds by raw card count while _assign_devices

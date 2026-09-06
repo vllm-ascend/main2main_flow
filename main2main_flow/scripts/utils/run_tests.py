@@ -573,6 +573,13 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
     if timeout_s is None:
         timeout_s = int(os.environ.get("MAIN2MAIN_TEST_TIMEOUT", "1800"))
     deadline = time.monotonic() + timeout_s
+    # Hang early-kill: a suite that streams nothing for this long is hung
+    # (OOM-dead executor waiting on shutdown, NPU-memory wait loop) — kill
+    # it now instead of burning the full suite timeout.  run 34018086282:
+    # gemma4's memory-wait hang consumed the full 3600s in each of three
+    # e2e rounds (~3h wasted).  0 disables.
+    hang_quiet_s = int(os.environ.get("MAIN2MAIN_HANG_QUIET_S", "900"))
+    last_output = time.monotonic()
 
     with log_path.open("w", encoding="utf-8") as f:
         lines_queue: queue.Queue[str | None] = queue.Queue()
@@ -602,9 +609,21 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
                             proc.kill()
                         killed = True
                         continue
+                    if hang_quiet_s and now - last_output > hang_quiet_s:
+                        ts_print(f"\n  [HANG] no output for {hang_quiet_s}s "
+                                 f"(likely engine/executor hang), killing "
+                                 f"process group before the {timeout_s}s "
+                                 f"suite timeout", flush=True)
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            proc.kill()
+                        killed = True
+                        continue
                     continue
                 if line is None:
                     break
+                last_output = time.monotonic()
                 f.write(line)
                 ts_print(line, end="", flush=True)
         finally:
@@ -802,6 +821,32 @@ _NPU_MEMORY_PRESSURE_RE = re.compile(
     r"Failed to get enough NPU memory", re.IGNORECASE)
 
 
+def _no_observed_failure(summary: dict | None, log_path: Path) -> bool:
+    """True if a signal-killed suite shows no observed test failure.
+
+    A suite killed by our timeout (exit<0) never completed.  With zero
+    failed cases/files in the summary and no raised error message in the
+    log there is no failure evidence at all — the kill is environment, not
+    adaptation (run 34018086282: deepseek_pruning killed at 3600s while
+    hung on a flaky wait was classified failed and burned two adapter-fix
+    rounds; gemma4, killed identically, was env_flake via its OOM
+    signature — the two must not diverge).  Worker-error wrapper lines are
+    stripped first: they re-render an OOM worker death as
+    "RuntimeError: ..." without being a code bug."""
+    if _count(summary, "failed_test_cases") or _count(summary, "failed_test_files"):
+        return False
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                  errors="replace"))
+    except OSError:
+        return False
+    rest = re.sub(r"^.*Worker failed with error.*$", "", text,
+                  flags=re.MULTILINE)
+    return not _RAISED_ERROR_MSG_RE.search(rest)
+
+
 def _is_npu_memory_pressure(log_path: Path) -> bool:
     try:
         if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
@@ -969,6 +1014,12 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
         ts_print(f"  [env-flake] {test}: harness NPU memory check failed "
                  f"(co-located suite contention) — classified as "
                  f"environment, not blocking")
+        ci_result = "env_flake_pass"
+    if (ci_result == "failed" and exit_code is not None and exit_code < 0
+            and _no_observed_failure(s, log_path)):
+        ts_print(f"  [env-flake] {test}: suite killed by timeout/signal with "
+                 f"no observed failure — classified as environment, not "
+                 f"blocking")
         ci_result = "env_flake_pass"
     return {"test": test, "cards_required": cards,
             "run_suite_exit_code": exit_code,

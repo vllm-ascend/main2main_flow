@@ -20,7 +20,11 @@ from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson,
     submit_pre_ci_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
-from main2main_flow.scripts.utils.run_tests import run_tests, build_test_errors_detail
+from main2main_flow.scripts.utils.run_tests import (
+    PASS_RESULTS,
+    build_test_errors_detail,
+    run_tests,
+)
 from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
 from main2main_flow.scripts.utils.utils import (
@@ -767,6 +771,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # tested, and whether we already warned about an unchanged fix.
         last_tested_diff_sha = ""
         noop_fix_retried = False
+        # e2e stop-loss: blocking suite set of the previous e2e round.  An
+        # identical set after a fix round means the adapter's change did not
+        # move the outcome — another 1-2h e2e execution is pure waste
+        # (run 34018086282: three e2e rounds on the same whisper OOM, ~7h).
+        last_e2e_blocking: list[str] | None = None
+        self._last_e2e_blocking: list[str] | None = None
         while self.state.current_step < self.state.total_steps:
             step = self.state.steps[self.state.current_step]
             step_id = step["id"]
@@ -838,10 +848,24 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self.state.retry_count = 0
                 self.state.last_verified_commit = self.state.cur_vllm_commit
                 self.state.last_step_e2e_passed = False  # final gate must run regression
+                last_e2e_blocking = None
                 continue
 
             last_tested_diff_sha = self._working_tree_diff_sha(ascend_path)
             test_pass = self._run_e2e_test()
+            if not test_pass and (last_e2e_blocking is not None
+                                  and self._last_e2e_blocking
+                                  and self._last_e2e_blocking == last_e2e_blocking):
+                ts_print(f"[process_steps] {step_id}: e2e blocking set "
+                         f"unchanged after a fix round ({len(self._last_e2e_blocking)} "
+                         f"suite(s): {', '.join(self._last_e2e_blocking[:3])}) — "
+                         f"fix not converging, stop-loss before burning "
+                         f"another e2e round")
+                self._revert_working_tree(
+                    f"step {step_id} e2e stop-loss (unchanged blocking set)")
+                self.state.final_status = UpgradePartial
+                return
+            last_e2e_blocking = list(self._last_e2e_blocking or [])
             if test_pass:
                 # The step needed >=1 E2E fix round (retry_count >= 1): the
                 # first adaptation wasn't right — record it as a lesson so
@@ -858,6 +882,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self.state.current_step += 1
                 self.state.retry_count = 0
                 self.state.last_verified_commit = self.state.cur_vllm_commit
+                last_e2e_blocking = None
                 continue
             else:
                 self.state.retry_count += 1
@@ -1538,6 +1563,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         step = self.state.steps[self.state.current_step]
         step_id = step["id"]
         ts_print(f"run_e2e_test: {step_id} round={self.state.retry_count}")
+        self._last_e2e_blocking: list[str] | None = None
 
         if os.getenv("SKIP_E2E_TEST", "false").lower() == "true":
             ts_print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
@@ -1593,6 +1619,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             self.state.test_errors = (
                 [str(detail_file), summary_log] if detail_file
                 else [summary_log])
+            suites = result.get("suite_results") or []
+            if isinstance(suites, dict):
+                suites = list(suites.values())
+            self._last_e2e_blocking = sorted(
+                r.get("test", "") for r in suites
+                if isinstance(r, dict) and r.get("ci_result") not in PASS_RESULTS
+                and r.get("test"))
+        else:
+            self._last_e2e_blocking = None
 
         return test_passed
 

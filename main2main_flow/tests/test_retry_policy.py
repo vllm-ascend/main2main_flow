@@ -54,6 +54,56 @@ def test_e2e_exhaustion_reverts_partial(monkeypatch):
     assert f.state.final_status == flow_mod.UpgradePartial
 
 
+def _e2e_with_blockings(f, blockings):
+    """Fake _run_e2e_test that records the blocking suite set per round."""
+    calls: list[int] = []
+
+    def fake():
+        idx = min(len(calls), len(blockings) - 1)
+        f._last_e2e_blocking = sorted(blockings[idx])
+        calls.append(1)
+        return False
+
+    return fake, calls
+
+
+def test_e2e_stop_loss_identical_blocking_set(monkeypatch):
+    # run 34018086282: a fix round that reproduces the exact same blocking
+    # suite set cannot converge — stop-loss reverts immediately instead of
+    # burning another 1-2h e2e round (whisper OOM: 3 e2e rounds, ~7h step).
+    f = _make_flow()
+    monkeypatch.setattr(f, "_ai_analysis", lambda: True)
+    monkeypatch.setattr(f, "_working_tree_diff_sha", lambda path: "")
+    fake, calls = _e2e_with_blockings(f, [{"t_whisper"}, {"t_whisper"}])
+    monkeypatch.setattr(f, "_run_e2e_test", fake)
+    reverts = []
+    monkeypatch.setattr(f, "_revert_working_tree",
+                        lambda reason: reverts.append(reason))
+    f.process_steps()
+    assert len(calls) == 2  # the third e2e round never launched
+    assert reverts == ["step step-1 e2e stop-loss (unchanged blocking set)"]
+    assert f.state.final_status == flow_mod.UpgradePartial
+    assert f.state.current_step == 0
+
+
+def test_e2e_no_stop_loss_when_blocking_set_changes(monkeypatch):
+    # A fix round that MOVES the outcome (different suites blocking) still
+    # gets the full retry budget — deepseek_pruning passed on round 3 only
+    # because its fix rounds kept changing the picture.
+    f = _make_flow()
+    monkeypatch.setattr(f, "_ai_analysis", lambda: True)
+    monkeypatch.setattr(f, "_working_tree_diff_sha", lambda path: "")
+    fake, calls = _e2e_with_blockings(f, [{"t_a"}, {"t_b"}, {"t_c"}])
+    monkeypatch.setattr(f, "_run_e2e_test", fake)
+    reverts = []
+    monkeypatch.setattr(f, "_revert_working_tree",
+                        lambda reason: reverts.append(reason))
+    f.process_steps()
+    assert len(calls) == 3  # full budget consumed
+    assert reverts == ["step step-1 e2e exhausted"]
+    assert f.state.final_status == flow_mod.UpgradePartial
+
+
 def test_budgets_are_hardcoded(monkeypatch):
     # cf109e5 reversals: the env-tunable pre_ci budget and the non-blocking
     # gate e2e retry helper must not exist anymore.
