@@ -67,12 +67,23 @@ def _collect_cpu_ut_files(repo: Path) -> list[str]:
             import yaml
             docs = list(yaml.safe_load_all(
                 config_path.read_text(encoding="utf-8")))
-            modules = docs[0] or []
-            meta = docs[1] if len(docs) >= 2 and docs[1] else {}
-            for module in modules:
-                for s in module.get("skip_tests", []):
-                    skip_tests.add(str(s).rstrip("/"))
-            for pattern_str in ((meta or {}).get("runner_mapping", {}) or {}):
+            # Two formats in the wild: OLD = doc0 list-of-module-dicts +
+            # doc1 meta dict; NEW (upstream main) = ONE dict doc with
+            # top-level skip_tests / runner_mapping / estimated_times.
+            meta: dict = {}
+            for doc in docs:
+                if isinstance(doc, list):
+                    for module in doc:
+                        if isinstance(module, dict):
+                            for s in module.get("skip_tests", []) or []:
+                                skip_tests.add(str(s).rstrip("/"))
+                elif isinstance(doc, dict):
+                    if "runner_mapping" in doc:
+                        meta = doc
+                    for s in doc.get("skip_tests", []) or []:
+                        if isinstance(s, str):
+                            skip_tests.add(s.rstrip("/"))
+            for pattern_str in (meta.get("runner_mapping", {}) or {}):
                 if pattern_str.startswith("tests/ut"):
                     npu_patterns.append(re.compile(pattern_str))
             if npu_patterns:
@@ -157,6 +168,32 @@ def _ut_base_dir() -> Path:
     """Home of the persistent UT venv and its full-run logs."""
     env = os.environ.get(_UT_VENV_ENV, "")
     return Path(env) if env else WORKSPACE_DIR / "ut_venv"
+
+
+def _triton_numpy_spec() -> str:
+    """numpy constraint from triton-ascend metadata (pins the UT venv).
+
+    "" when triton-ascend is absent/unparseable — the venv then has no
+    numpy pin beyond --system-site-packages.
+    """
+    import importlib.metadata as _md
+    try:
+        from packaging.requirements import Requirement
+        reqs = _md.requires("triton-ascend") or []
+        for req in reqs:
+            if "extra" in req.lower():
+                continue
+            try:
+                r = Requirement(req)
+            except Exception:
+                continue
+            if r.name.lower() == "numpy":
+                return ",".join(
+                    f"{s.operator}{s.version}" for s in r.specifier)
+    except Exception as e:
+        ts_print(f"[pre_ci] ut: failed to read triton-ascend numpy "
+                 f"constraint ({e})")
+    return ""
 
 
 def _ensure_ut_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
@@ -291,8 +328,6 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None) -> dict:
     Returns dict with ``violations`` (failing test node IDs) and
     ``detail``.  Empty violations + non-skipped → pass.
     """
-    import importlib.metadata as _md
-
     cpu_files = _collect_cpu_ut_files(repo)
     if not cpu_files:
         ts_print("\n[pre_ci] ut: SKIPPED — tests/ut not found or no CPU tests")
@@ -308,23 +343,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None) -> dict:
              f"(per-file isolation, NPU-convention a2/ and a3_2/ excluded)")
 
     # Read numpy constraint from triton-ascend metadata (mirror _check_mypy).
-    target_numpy_spec = ""
-    try:
-        from packaging.requirements import Requirement
-        reqs = _md.requires("triton-ascend") or []
-        for req in reqs:
-            if "extra" in req.lower():
-                continue
-            try:
-                r = Requirement(req)
-            except Exception:
-                continue
-            if r.name.lower() == "numpy":
-                target_numpy_spec = ",".join(
-                    f"{s.operator}{s.version}" for s in r.specifier)
-                break
-    except Exception as e:
-        ts_print(f"[pre_ci] ut: failed to read triton-ascend numpy constraint ({e})")
+    target_numpy_spec = _triton_numpy_spec()
 
     # Persistent venv (created once, reused across attempts and steps) with
     # --system-site-packages + the numpy constraint.

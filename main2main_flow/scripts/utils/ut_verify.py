@@ -15,17 +15,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from main2main_flow.scripts.agent.toolguard.guard import GUARD_DIR
 from main2main_flow.scripts.utils.ut_check import (
     UT_VERIFY_LOG_NAME,
     _UT_VENV_MARKER,
     _build_ut_env,
+    _ensure_ut_venv,
     _make_fake_npu_smi,
+    _triton_numpy_spec,
     _ut_base_dir,
     strip_ansi,
 )
@@ -33,29 +37,58 @@ from main2main_flow.scripts.utils.utils import ts_print
 
 _TAIL_LINES = 200
 
+_BLOCKER_MARKER = "BLOCKED by main2main_flow"
 
-def _resolve_pytest_cmd(explicit_python: str) -> list[str]:
+
+def _failed_if_guard_blocked(code: int, out: str) -> int:
+    """Blockers exit 0 by design (so the adapter doesn't retry them); if
+    that output leaked into THIS run, the pass would be fake — force it to
+    a failure (run 34046694076: exit=0 (0s) with zero tests executed)."""
+    if code == 0 and _BLOCKER_MARKER in out:
+        ts_print("[ut_verify] tool-guard blocker output leaked into the "
+                 "pytest run — reporting failure, not a pass")
+        return 1
+    return code
+
+
+def _resolve_pytest_cmd(explicit_python: str) -> list[str] | None:
     if explicit_python:
         p = Path(explicit_python)
         if p.exists():
             return [str(p), "-m", "pytest"]
         ts_print(f"[ut_verify] WARNING --python {explicit_python} does not "
-                 "exist — falling back to system pytest")
+                 "exist — falling back to the persistent venv")
     venv_python = _ut_base_dir() / "bin" / "python"
     if venv_python.exists():
         # Same source of truth as ut_check._ensure_ut_venv: a venv without
         # a readable marker was left behind by a failed creation (e.g.
-        # numpy install failure) and must NOT be adopted — run ut_check
-        # to reconcile it, system pytest keeps this verify loop usable.
+        # numpy install failure) and must NOT be adopted.
         try:
             json.loads((_ut_base_dir() / _UT_VENV_MARKER).read_text(
                 encoding="utf-8"))
             return [str(venv_python), "-m", "pytest"]
         except Exception:
             ts_print("[ut_verify] WARNING persistent venv has no valid "
-                     "marker (stale/incomplete) — falling back to system "
-                     "pytest")
-    return [shutil.which("pytest") or "pytest"]
+                     "marker (stale/incomplete) — recreating it")
+    # Adapter sessions run under the tool guard: PATH's `pytest` is the
+    # exit-0 BLOCKER there (run 34046694076: ut_verify "passed" with zero
+    # tests three times before the adapter gave up on verification).
+    # Build the same venv pre_ci uses instead; only a REAL system pytest
+    # (outside GUARD_DIR) is acceptable as fallback.
+    _, venv_py = _ensure_ut_venv(_triton_numpy_spec())
+    if venv_py:
+        return [venv_py, "-m", "pytest"]
+    guard_abs = os.path.abspath(str(GUARD_DIR))
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d or os.path.abspath(d) == guard_abs:
+            continue
+        cand = Path(d) / "pytest"
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return [str(cand)]
+    ts_print("[ut_verify] ERROR no usable pytest: the tool guard shadows "
+             "the system pytest and the persistent venv is unavailable — "
+             "pass --python <venv_python from pre_ci_check.json>")
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -87,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     pytest_cmd = _resolve_pytest_cmd(args.python)
+    if pytest_cmd is None:
+        return 2
     fake_bin_dir = _make_fake_npu_smi()
     try:
         env = _build_ut_env(repo, args.vllm, fake_bin_dir)
@@ -107,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             out = strip_ansi(rr.stdout + rr.stderr)
             code = rr.returncode
+
+        code = _failed_if_guard_blocked(code, out)
 
         log_path = _ut_base_dir() / UT_VERIFY_LOG_NAME
         log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -13,10 +13,56 @@ def test_resolve_pytest_cmd_prefers_explicit_python(tmp_path):
     assert ut_verify._resolve_pytest_cmd(str(py)) == [str(py), "-m", "pytest"]
 
 
-def test_resolve_pytest_cmd_falls_back_to_system(monkeypatch, tmp_path):
+def test_resolve_pytest_cmd_builds_venv_when_missing(monkeypatch, tmp_path):
+    # Fresh adapter session: no persistent venv yet (pre_ci hasn't run) —
+    # ut_verify must build it exactly like pre_ci does, NOT trust `which
+    # pytest` (the tool guard's exit-0 blocker is first on PATH).
     monkeypatch.setattr(ut_verify, "_ut_base_dir", lambda: tmp_path / "nope")
+    monkeypatch.setattr(ut_verify, "_triton_numpy_spec", lambda: "==1.26.4")
+    monkeypatch.setattr(ut_verify, "_ensure_ut_venv",
+                        lambda spec: (tmp_path / "v", str(tmp_path / "v" / "bin" / "python")))
     cmd = ut_verify._resolve_pytest_cmd("")
-    assert len(cmd) == 1 and "pytest" in cmd[0]  # system pytest fallback
+    assert cmd == [str(tmp_path / "v" / "bin" / "python"), "-m", "pytest"]
+
+
+def test_resolve_pytest_cmd_skips_guard_dir_and_returns_none(
+        monkeypatch, tmp_path):
+    # Total failure: venv unavailable AND the only PATH pytest is the
+    # guard's blocker — must return None (hard error), never the blocker.
+    monkeypatch.setattr(ut_verify, "_ut_base_dir", lambda: tmp_path / "nope")
+    monkeypatch.setattr(ut_verify, "_triton_numpy_spec", lambda: "")
+    monkeypatch.setattr(ut_verify, "_ensure_ut_venv", lambda spec: (None, ""))
+    guard_bin = tmp_path / "guard"
+    guard_bin.mkdir()
+    (guard_bin / "pytest").write_text("#!/bin/sh\nexit 0\n")
+    (guard_bin / "pytest").chmod(0o755)
+    monkeypatch.setenv("PATH", str(guard_bin))
+    monkeypatch.setattr(ut_verify, "GUARD_DIR", guard_bin)
+    assert ut_verify._resolve_pytest_cmd("") is None
+
+
+def test_resolve_pytest_cmd_uses_real_system_pytest(monkeypatch, tmp_path):
+    monkeypatch.setattr(ut_verify, "_ut_base_dir", lambda: tmp_path / "nope")
+    monkeypatch.setattr(ut_verify, "_triton_numpy_spec", lambda: "")
+    monkeypatch.setattr(ut_verify, "_ensure_ut_venv", lambda spec: (None, ""))
+    real_bin = tmp_path / "real"
+    real_bin.mkdir()
+    (real_bin / "pytest").write_text("#!/bin/sh\nexit 0\n")
+    (real_bin / "pytest").chmod(0o755)
+    monkeypatch.setenv("PATH", str(real_bin))
+    cmd = ut_verify._resolve_pytest_cmd("")
+    assert cmd == [str(real_bin / "pytest")]
+
+
+def test_blocked_leak_is_reported_as_failure():
+    # The blockers exit 0 by design; if the blocker output leaks into a
+    # ut_verify run the exit code must not read as a pass (run 34046694076:
+    # `[ut_verify] exit=0 (0s)` with zero tests executed).
+    out = ("BLOCKED by main2main_flow: direct test/lint commands are "
+           "forbidden\n")
+    assert ut_verify._failed_if_guard_blocked(0, out) == 1
+    assert ut_verify._failed_if_guard_blocked(0, "3 passed\n") == 0
+    assert ut_verify._failed_if_guard_blocked(3, "x") == 3
 
 
 def test_main_rejects_missing_test_file(tmp_path, capsys):

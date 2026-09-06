@@ -111,15 +111,18 @@ def _load_estimated_times(ascend_path: Path) -> dict[str, int]:
         return {}
     try:
         import yaml
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
+        docs = list(yaml.safe_load_all(
+            config_path.read_text(encoding="utf-8")))
     except Exception:
         return {}
-    raw = config.get("estimated_times", {}) if isinstance(config, dict) else {}
+    # OLD format: meta is the 2nd doc; NEW (upstream main): single doc with
+    # everything at top level.  Merge estimated_times from every dict doc.
     times: dict[str, int] = {}
-    for k, v in raw.items():
-        if isinstance(v, (int, float)):
-            times[k] = int(v)
+    for doc in docs:
+        raw = doc.get("estimated_times", {}) if isinstance(doc, dict) else {}
+        for k, v in (raw or {}).items():
+            if isinstance(v, (int, float)):
+                times[k] = int(v)
     return times
 
 
