@@ -33,7 +33,13 @@ _AGENT_DIR = Path(__file__).parent.parent.parent / "agents"
 # MAIN2MAIN_ADAPTER_TIMEOUT_MINUTES=10 to keep the loop testable — a killed
 # session resumes with the short continue prompt, so an under-budget test
 # run still exercises the real path.
-_TIMEOUT_MINUTES = int(os.environ.get("MAIN2MAIN_ADAPTER_TIMEOUT_MINUTES", "60"))
+# Hard per-session wall cap (user requirement 2026-09-06: every adapt/fix
+# session must finish within 20min).  attempt-1 of run 34018086282 burned
+# 80min: 60min total-timeout kill + a continue-prompt retry treated as a
+# hard failure (rc=-9).  A total-timeout kill is now FINAL — partial edits
+# stay, pre_ci scores them, and the flow's fix rounds continue converging
+# in ≤20min steps.
+_TIMEOUT_MINUTES = int(os.environ.get("MAIN2MAIN_ADAPTER_TIMEOUT_MINUTES", "20"))
 _STALE_SECONDS = 300
 # No JSONL progress event (step_start/tool_use/text/step_finish) for this
 # long → kill.  The stdout-based stale check misses sessions that stream
@@ -259,6 +265,15 @@ def run_opencode_adapter(inputs: dict[str, Any],
         if sid:
             new_session_id = sid
             session_id = sid  # retries also use the same session
+
+        # A session-budget kill is final: the retry loop must not re-enter
+        # (that is how a "60min cap" became an 80min attempt-1 in run
+        # 34018086282 — the kill's rc=-9 was retried as a hard failure).
+        if reason == "total_timeout":
+            ts_print(f"\n[opencode] SESSION BUDGET exhausted "
+                     f"({_TIMEOUT_MINUTES}min) — stopping; partial edits "
+                     f"are kept for pre_ci / the next fix round", flush=True)
+            break
 
         # Treat opencode exit != 0 or zero JSON events as a hard failure,
         # not a "no-op" (prevents silent false-success when the agent

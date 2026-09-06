@@ -568,10 +568,14 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
                             close_fds=True, start_new_session=True)
     assert proc.stdout is not None
 
-    # Per-suite timeout (env-configurable, default 30 min); test_policy.json
-    # "timeouts" can override it per test.
+    # Per-suite timeout: 20min (user requirement 2026-09-06).  With the 900s
+    # hang-quiet kill below, no single suite can hold an e2e round for an
+    # hour (run 34018086282: a 3600s timeout let a memory-wait hang burn the
+    # full hour in each of three rounds).  A suite legitimately needing
+    # longer surfaces as a non-blocking timeout-kill (no observed failure)
+    # instead of stalling the run; test_policy.json "timeouts" can override.
     if timeout_s is None:
-        timeout_s = int(os.environ.get("MAIN2MAIN_TEST_TIMEOUT", "1800"))
+        timeout_s = int(os.environ.get("MAIN2MAIN_TEST_TIMEOUT", "1200"))
     deadline = time.monotonic() + timeout_s
     # Hang early-kill: a suite that streams nothing for this long is hung
     # (OOM-dead executor waiting on shutdown, NPU-memory wait loop) — kill
