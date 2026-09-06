@@ -13,7 +13,6 @@
     "tests/e2e/pull_request/four_card/test_pipeline_parallel.py"
   ],
   "blocklist": [
-    "tests/e2e/pull_request/two_card/test_gemma4.py",
     "tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py",
     "tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py",
     "tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py",

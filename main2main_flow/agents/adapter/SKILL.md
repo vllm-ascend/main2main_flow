@@ -54,12 +54,15 @@ these rules to stay on the critical path:
    (in vllm_ascend AND tests/ut) and fix them together — see
    `reference/upstream-contract-drift.md`. Line-by-line whack-a-mole
    across a family never converges within the round budget.
-9. **Hard 20-minute session budget.** The runner kills this session at
-   20 minutes and KEEPS whatever is already edited — pre_ci scores it and
-   the next fix round continues from there. Plan for it: edit in
-   family-batches (one file, all its sites, next), run `ut_verify` once
-   on the touched tests, and finish with step_summary.md — do not spend
-   the budget polishing prose or re-reading files you already read.
+9. **Finish the session within ~20 minutes by how you work, not by a
+   timer.** A well-run fix session converges in well under 20 minutes:
+   lessons first (`get_adaptation_lessons` — the known failure family and
+   its fix are usually already recorded), one family-batch edit pass
+   (rule 8), one `ut_verify` run on the touched tests, then
+   step_summary.md. What burns the budget is NOT doing too little — it
+   is exploring: re-reading files, single-line edits repeated per
+   violation, linting, or running the full suite. None of that is part
+   of the job; skip it.
 
 
 ## Repositories
