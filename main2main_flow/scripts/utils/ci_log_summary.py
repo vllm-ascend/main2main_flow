@@ -22,7 +22,6 @@ _GHA_GROUP_RE = re.compile(r"^::(?:group|endgroup)::.*$")
 
 _RUN_SUITE_FAILED_RE = re.compile(r"\[\d+/\d+\]\s+FAILED\s+\(exit\s+code\s+\d+\)\s+(tests/\S+)")
 
-_PYTEST_FAILURE_HEADER_RE = re.compile(r"^_+\s+test_\S+.*_+$")
 _PYTEST_FAILURES_BANNER_RE = re.compile(r"^=+\s+FAILURES\s+=+$")
 _PYTEST_SUMMARY_BANNER_RE = re.compile(r"^=+\s+short test summary info\s+=+$", re.IGNORECASE)
 _PYTEST_SUMMARY_FAILED_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)")

@@ -37,6 +37,38 @@ def test_guard_blocks_direct_mypy():
     assert "BLOCKED" in r.stdout
 
 
+def _run_python_wrapper(*args: str) -> subprocess.CompletedProcess:
+    ensure_tool_guard()
+    return subprocess.run(
+        [sys.executable, str(GUARD_DIR / "python"), *args],
+        capture_output=True, text=True, cwd=_REPO_ROOT, timeout=60)
+
+
+def test_guard_blocks_glued_m_flag():
+    # `python -mpytest` is valid CPython — argv[1]=="-m" checks miss it.
+    r = _run_python_wrapper("-mpytest", "--version")
+    assert "BLOCKED" in r.stdout
+    assert r.returncode == 0
+
+
+def test_guard_blocks_isolation_flag_form():
+    # `python -I -m pytest`: flags may precede -m.
+    r = _run_python_wrapper("-I", "-m", "pytest", "--version")
+    assert "BLOCKED" in r.stdout
+
+
+def test_guard_blocks_py_c_invocation():
+    # `python -c "import pytest; ..."` runs the suite without -m at all.
+    r = _run_python_wrapper("-c", "import pytest; print('ran')")
+    assert "BLOCKED" in r.stdout
+
+
+def test_guard_passes_plain_python_through():
+    r = _run_python_wrapper("-c", "print('hello')")
+    assert "BLOCKED" not in r.stdout
+    assert "hello" in r.stdout
+
+
 def test_guard_message_redirects_to_ut_verify():
     assert "ut_verify" in GUARD_MSG
 

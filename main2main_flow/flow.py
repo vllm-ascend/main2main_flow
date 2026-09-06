@@ -194,7 +194,7 @@ def _build_upstream_fix_diff(vllm_path: str, start_commit: str, end_commit: str,
     """
     pathspec = []
     for p in _UPSTREAM_DIFF_KEEP:
-        pathspec.append(p if p.endswith("/") else p)
+        pathspec.append(p)
     r = subprocess.run(
         ["git", "diff", f"{start_commit}..{end_commit}", "--", *pathspec],
         cwd=vllm_path, capture_output=True, text=True,
@@ -228,6 +228,16 @@ def _revert_e2e_test_edits(ascend_path: str) -> list[str]:
             continue
         full = Path(ascend_path) / path
         if st == "??":
+            if full.is_dir():
+                shutil.rmtree(full)
+            elif full.is_file() or full.is_symlink():
+                full.unlink()
+        elif "A" in st:
+            # New file already staged (git add / intent-to-add `A ` or
+            # ` A`, incl. `AM`): `git checkout --` returns 0 but LEAVES
+            # the file on disk.  Drop the index entry, then remove it.
+            subprocess.run(["git", "rm", "-f", "--cached", "--", path],
+                           cwd=ascend_path, capture_output=True, text=True)
             if full.is_dir():
                 shutil.rmtree(full)
             elif full.is_file() or full.is_symlink():
@@ -763,7 +773,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         return HasCommit
 
     def has_no_commit(self):
-        ts_print(f"[done] 仓库已同步，无需适配，流程结束。")
+        ts_print("[done] 仓库已同步，无需适配，流程结束。")
 
     def process_steps(self):
         ascend_path = self.state.vllm_ascend_path
@@ -1053,12 +1063,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         # Same-tree retry first: a flaky regression must not
                         # discard the gate's fix work (a revert here would
                         # throw away exactly the edits that made static pass).
-                        ts_print(f"[final_quality_gate] e2e regression - "
-                                 f"retrying once on the same tree (flake check)")
+                        ts_print("[final_quality_gate] e2e regression - "
+                                 "retrying once on the same tree (flake check)")
                         e2e_attempts_left -= 1
                         if self._run_e2e_test_for_final_gate():
-                            ts_print(f"[final_quality_gate] same-tree retry "
-                                     f"PASSED — flake absorbed, no revert")
+                            ts_print("[final_quality_gate] same-tree retry "
+                                     "PASSED — flake absorbed, no revert")
                             need_regression_e2e = False
                         else:
                             ts_print(f"[final_quality_gate] e2e regression is "
@@ -1069,8 +1079,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                             error_logs = [str(Path(gate_dir) / "quality_gate.json")]
                             continue
                     else:
-                        ts_print(f"[final_quality_gate] e2e regression with "
-                                 f"no attempts left - reverting")
+                        ts_print("[final_quality_gate] e2e regression with "
+                                 "no attempts left - reverting")
                         self._revert_working_tree("gate e2e regression")
                         error_logs = [str(Path(gate_dir) / "quality_gate.json")]
                         continue
@@ -1157,7 +1167,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         try:
             result = run_tests(
                 vllm_path=vllm_path,
-                vllm_commit=self.state.cur_vllm_commit,
+                # Match the protective checkout run() just did: the gate
+                # tests the COMMITTED adaptation against the last VERIFIED
+                # vllm commit.  setup_env checks vllm_commit out
+                # unconditionally, so passing cur_vllm_commit here would
+                # silently undo that protection on partial runs (run
+                # 33638863120's failure mode).
+                vllm_commit=self.state.last_verified_commit
+                or self.state.cur_vllm_commit,
                 ascend_path=ascend_path,
                 ascend_commit=self.state.cur_ascend_commit,
                 patch_path=str(patch_path),
@@ -1496,6 +1513,16 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print(f"[ai_analysis] {step_id}: FAILED after 3 attempts "
                      f"(pre_ci never passed) — skipping e2e")
             self.state.test_errors = error_logs if error_logs else []
+            # Reset accidental vllm edits on this exit too — run() checks
+            # out last_verified_commit next and a dirty vllm tree makes
+            # that checkout fail (crashing before final_status.json).
+            reset_r = subprocess.run(
+                ["git", "checkout", "--", "."],
+                cwd=vllm_path, capture_output=True, text=True,
+            )
+            if reset_r.returncode != 0:
+                ts_print(f"[ai_analysis] {step_id}: failed to reset vllm: "
+                         f"{reset_r.stderr.strip()}")
             return False
 
         self.state.test_errors = []
@@ -1566,7 +1593,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         self._last_e2e_blocking: list[str] | None = None
 
         if os.getenv("SKIP_E2E_TEST", "false").lower() == "true":
-            ts_print(f"[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
+            ts_print("[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             return True
 
         changed = [f for f in (self.state.changed_files or []) if f]
@@ -1698,7 +1725,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             release_tag = self.state.release_tag or "0.0.0"
             ts_print(f"\n[generate_final_post] invoking description-fill agent "
                      f"({len(unattributed)} files, release_tag={release_tag})")
-            adapt_result = run_opencode_adapter({
+            run_opencode_adapter({
                 "role": "description-fill",
                 "step_id": "unattributed",
                 "step_dir": str(fill_dir),
@@ -1791,7 +1818,9 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         upstream_links.append(f"[{m.group(1)[:8]}]({m.group(2)})")
                     else:
                         sha = dl.split(":", 1)[1].strip()
-                        if sha:
+                        # Same guard as the plain-SHA parser below: only a
+                        # real sha becomes a link ("(unknown ...)" must not).
+                        if re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
                             upstream_links.append(f"[{sha[:8]}]({commit_url}/{sha})")
                     continue
                 if collecting and parts and dline.startswith(("  ", "\t")):
@@ -1840,7 +1869,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print("[generate_final_post] No step commits to squash (branch at baseline)")
 
         if self.state.current_step == 0:
-            ts_print(f"[generate_final_post] fail to upgrade, no step success")
+            ts_print("[generate_final_post] fail to upgrade, no step success")
             (WORKSPACE_DIR / FINAL_SUMMARY_FILE).write_text(
                 "main2main adaptation failed — no steps completed.\n", encoding="utf-8"
             )
@@ -2186,7 +2215,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         last_guide_path = step_dir / EACH_STEP_CODE_STRUCTURE_GUIDE_FILE
         if last_guide_path.exists():
             shutil.copy2(last_guide_path, WORKSPACE_DIR / FINAL_CODE_STRUCTURE_GUIDE_FILE)
-            ts_print(f"[generate_final_post] Copied code-structure-guide to workspace.")
+            ts_print("[generate_final_post] Copied code-structure-guide to workspace.")
 
         if os.getenv("MAIN2MAIN_KEEP_BRANCH", "false").lower() != "true":
             vllm_path = self.state.vllm_path

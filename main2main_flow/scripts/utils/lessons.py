@@ -184,6 +184,23 @@ def submit_step_lesson(vllm_report_path: str, step_id: str) -> None:
                     keywords=keywords, example=example)
 
 
+def _read_log_entry(entry: str, limit: int = 200_000) -> str:
+    """Resolve one error_logs entry to error text.
+
+    Entries are either inline error text or paths to log files (the gate
+    callers pass [str(quality_gate.json)] etc.).  A path string contains no
+    "FAILED"/"ERROR" markers and poisons keyword extraction — existing files
+    are read (capped) so filters see the real errors.
+    """
+    p = Path(entry)
+    try:
+        if p.is_file():
+            return p.read_text(encoding="utf-8", errors="replace")[:limit]
+    except OSError:
+        pass
+    return entry
+
+
 def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
     """Record a lesson when the final quality gate needed a fix round.
 
@@ -196,8 +213,9 @@ def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
     if not vllm_report_path or not error_logs:
         return
     report_dir = Path(vllm_report_path)
-    failed = [l for l in error_logs if "FAILED" in l or "ERROR" in l]
-    error_text = "\n".join(error_logs)
+    logs = [_read_log_entry(entry) for entry in error_logs]
+    failed = [t for t in logs if "FAILED" in t or "ERROR" in t]
+    error_text = "\n".join(logs)
     keywords = _extract_keywords(error_text, "final quality gate failure")
     title = (f"final-gate: fix needed "
              f"({len(failed) or len(error_logs)} failure(s))")

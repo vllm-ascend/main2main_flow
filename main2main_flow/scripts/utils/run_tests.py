@@ -93,6 +93,11 @@ def _test_cards(test_path: str) -> int:
 # Default estimated time for tests not listed in test_config.yaml.
 _DEFAULT_ESTIMATED_SECONDS = 600
 
+# After a timeout/hang SIGKILL, how long to wait for the stdout pipe to
+# close before force-breaking the read loop (an escaped grandchild can
+# hold the pipe open forever).
+_KILL_GRACE_S = 15
+
 
 def _load_estimated_times(ascend_path: Path) -> dict[str, int]:
     """Load ``estimated_times`` from vllm-ascend's test_config.yaml.
@@ -126,6 +131,23 @@ def _lookup_time(test: str, times: dict[str, int]) -> int:
 _DEVICE_OVERRIDE_PATTERNS = re.compile(
     r"RemoteEPDServer|RemotePDServer|ASCEND_RT_VISIBLE_DEVICES\s*="
 )
+
+
+_LOG_READ_CAP = 50 * 1024 * 1024
+
+
+def _read_text_capped(path: Path, limit: int = _LOG_READ_CAP) -> str:
+    """Read a suite log bounded to ``limit`` bytes (chatty suites can emit
+    hundreds of MB; the failure-tail print and error-excerpt aggregation
+    only ever need the tail)."""
+    size = path.stat().st_size
+    with open(path, "rb") as f:
+        if size > limit:
+            f.seek(size - limit)
+            return ("... [truncated, showing last "
+                    f"{limit // (1024 * 1024)}MB]\n"
+                    + f.read().decode("utf-8", errors="replace"))
+        return f.read().decode("utf-8", errors="replace")
 
 
 def _detect_device_overriders(test_files: list[str],
@@ -602,12 +624,25 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
         reader.start()
 
         killed = False
+        killed_at: float | None = None
         try:
             while True:
                 try:
                     line = lines_queue.get(timeout=1.0)
                 except queue.Empty:
                     now = time.monotonic()
+                    if killed_at is not None:
+                        # The group was already SIGKILLed.  A grandchild that
+                        # escaped the process group (own setsid) can hold the
+                        # stdout pipe open forever — don't spin re-killing,
+                        # force-break after a short grace and reap the direct
+                        # child.
+                        if now - killed_at > _KILL_GRACE_S:
+                            ts_print(f"\n  [HANG] stdout pipe still held "
+                                     f"{_KILL_GRACE_S}s after kill (escaped "
+                                     f"grandchild) — force-break", flush=True)
+                            break
+                        continue
                     if now > deadline:
                         ts_print(f"\n  [TIMEOUT] suite exceeded {timeout_s}s, killing process group",
                                  flush=True)
@@ -616,6 +651,7 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
                         except (ProcessLookupError, PermissionError):
                             proc.kill()
                         killed = True
+                        killed_at = now
                         continue
                     if hang_quiet_s and now - last_output > hang_quiet_s:
                         ts_print(f"\n  [HANG] no output for {hang_quiet_s}s "
@@ -627,6 +663,7 @@ def _run_to_log(command: list[str], cwd: Path, log_path: Path,
                         except (ProcessLookupError, PermissionError):
                             proc.kill()
                         killed = True
+                        killed_at = now
                         continue
                     continue
                 if line is None:
@@ -803,11 +840,16 @@ _PRECISION_FAILURE_RE = re.compile(
     r"|numpy\.allclose|np\.allclose"
     r"|assert_allclose|values are not close|maximum absolute difference"
     r"|are not equal to desired equal"
-    r"|Mismatched elements:|not equal"
+    r"|Mismatched elements:"
     # graph_mode's baseline-vs-compiled logprob assertion (own atol, e.g.
     # diff=0.6324 > decode_atol=0.1378) — same numeric-precision class,
     # a3 soc compiler numerics (run 33897770317).
     r"|Decode logprob mismatch|decode_atol=", re.IGNORECASE)
+# NOTE: no bare "not equal" alternative — every real precision assertion
+# (torch/numpy assert_close family) also emits one of the signatures above,
+# while a bare match classifies any failure whose log happens to contain
+# the words (e.g. "TP size (8) and NPU count (4) ... are not equal") as
+# precision_pass, masking a real blocking failure.
 
 
 def _is_precision_failure(log_path: Path) -> bool:
@@ -963,7 +1005,7 @@ def _build_test_cmd(test: str, devices: str, *,
         duration = int(max(_test_cards(test) * 120, 30) * mock_scale)
         if remote_host:
             return ["ssh", *_SSH_OPTS, remote_host,
-                    f"docker exec {remote_container} sleep {duration}"]
+                    f"docker exec {shlex.quote(remote_container)} sleep {duration}"]
         return ["sleep", str(duration)]
 
     if remote_host:
@@ -1165,18 +1207,20 @@ def run_tests(
             local = Path.cwd() / str(patch_path).lstrip("/")
         if local.exists():
             ts_print(f"=== Syncing patch: {local} -> {remote_container}:{patch_path} ===")
-            _ssh(remote_host, f"docker exec {remote_container} mkdir -p {shlex.quote(str(patch_path.parent))}",
+            _ssh(remote_host, f"docker exec {shlex.quote(remote_container)} mkdir -p {shlex.quote(str(patch_path.parent))}",
                  capture_output=True, text=True, check=True)
             with open(local, "rb") as f:
-                _ssh(remote_host, f"docker exec -i {remote_container} sh -c 'cat > {shlex.quote(str(patch_path))}'",
+                _ssh(remote_host, f"docker exec -i {shlex.quote(remote_container)} sh -c 'cat > {shlex.quote(str(patch_path))}'",
                      stdin=f, capture_output=True, text=False, check=True)
             ts_print("  Patch synced to container successfully")
+        else:
+            sys.exit(f"Error: patch to sync not found locally: {patch_path}")
 
     # ---- step 4: setup repos ----
     if remote_host:
         ts_print("=== Running setup on remote container ===")
         script = _build_setup_script(remote_vllm, vllm_commit, remote_ascend, ascend_commit, patch_path)
-        inner = f"docker exec {remote_container} sh -c {shlex.quote(script)}"
+        inner = f"docker exec {shlex.quote(remote_container)} sh -c {shlex.quote(script)}"
         proc = subprocess.Popen(["ssh", *_SSH_OPTS, remote_host, inner],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         assert proc.stdout is not None
@@ -1240,7 +1284,9 @@ def run_tests(
 
     if dry_run:
         ts_print("[dry-run] Skipping execution.", flush=True)
-        return {}
+        # can_commit=True so the CLI entry exits 0 — a scheduling preview
+        # is not a failure.
+        return {"can_commit": True}
 
     # ---- step 8: execute ----
     t0 = time.monotonic()
@@ -1281,7 +1327,7 @@ def run_tests(
                     printed_failure = True
                     log_path = Path(r['log_path'])
                     if log_path.exists():
-                        log_content = log_path.read_text(encoding="utf-8", errors="replace")
+                        log_content = _read_text_capped(log_path)
                         tail = "\n".join(log_content.splitlines()[-40:])
                         ts_print(f"  [FAILED] log tail ({r['test']}):\n{tail}", flush=True)
 
@@ -1299,7 +1345,7 @@ def run_tests(
 
     total_elapsed = time.monotonic() - t0
     if remote_host:
-        ts_print(f"\n=== Final log sync ===", flush=True)
+        ts_print("\n=== Final log sync ===", flush=True)
         _sync_remote_dir(remote_host, f"{remote_log_dir}/{step_id}/tests", ci_dir)
 
     # ---- step 9: aggregate ----
@@ -1329,11 +1375,7 @@ def aggregate_suite_results(
     rounds_info: list[dict],
     total_elapsed: float,
 ) -> dict:
-    """Aggregate per-test results into the run_tests() result dict (step 9).
-
-    Shared with the external E2E dispatcher (e2e_dispatch.py) so both
-    paths produce byte-identical result JSON for fix mode.
-    """
+    """Aggregate per-test results into the run_tests() result dict (step 9)."""
     outcomes = {r["ci_result"] for r in all_results}
     if "failed" in outcomes:
         overall = "failed"
@@ -1397,19 +1439,11 @@ def build_test_errors_detail(
         if tr.get("ci_result") == "passed":
             continue
         parts = [f"=== {test_name} ==="]
-        if tr.get("not_run"):
-            # External E2E (e2e_dispatch.py): the exec job/group crashed
-            # before this test — there is no log to excerpt.
-            parts.append("[NOTE] test was NOT run by the E2E job — the "
-                         "job/group failed before reaching it (no log "
-                         "available)")
-            detail_parts.append("\n\n".join(parts))
-            continue
         lp = Path(tr.get("log_path", ""))
         log_text = ""
         if lp.exists():
             try:
-                log_text = lp.read_text(encoding="utf-8", errors="replace")
+                log_text = _read_text_capped(lp)
             except Exception:
                 parts.append("[log]\n(could not read)")
         if log_text:

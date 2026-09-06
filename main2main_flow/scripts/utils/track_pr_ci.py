@@ -41,6 +41,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from main2main_flow.scripts.utils.utils import ts_print
+
 REPO = "vllm-project/vllm-ascend"
 PR_TITLE_RE = re.compile(r"adapt to vLLM main\s*\(([0-9a-f]{7,})\)", re.IGNORECASE)
 FAIL_LOG_MAX_CHARS = 8000
@@ -226,6 +228,13 @@ def track(data_dir: Path, days: int = 7) -> dict:
                     prev_record["already_analyzed"] = True
                     records.append(prev_record)
                     continue
+            else:
+                ts_print(f"[track_pr_ci] PR #{pr_number}: CI conclusion changed "
+                         f"({prev_conclusion} -> {new_conclusion}) — re-fetching logs")
+                # checks so far came from skip_log_fetch=True: no
+                # failure_summary.  A record built from them would carry the
+                # new conclusion without the logs to explain it.
+                checks = _get_checks(pr_number)
         else:
             checks = _get_checks(pr_number)
 
@@ -256,10 +265,6 @@ def track(data_dir: Path, days: int = 7) -> dict:
                         encoding="utf-8")
     ts_print(f"[track_pr_ci] wrote {len(records)} PR records to {out_path}")
     return result
-
-
-def ts_print(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def main() -> None:

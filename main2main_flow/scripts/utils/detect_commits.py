@@ -41,7 +41,6 @@ def _extract_from_conf_py(ascend_path: Path) -> dict[str, str | None]:
             sys.exit(1)
         base_commit = commit_match.group(1)
 
-    conf_path = ascend_path / "docs" / "source" / "conf.py"
     # Read release tag from .github/vllm-release-tag.commit (same pattern as
     # base_commit above).  Do NOT regex-parse conf.py - the file's docstring
     # contains a placeholder example "main_vllm_tag": "<tag>" that the regex
@@ -76,7 +75,8 @@ def detect(
 ) -> dict:
     """Run drift detection and write <workspace>/detect.json.
 
-    Returns the detect result dict.
+    Returns (result, has_commit) — result is the detect dict, has_commit is
+    True when base_commit != target_commit (i.e. there is an upgrade to do).
     """
     conf = _extract_from_conf_py(ascend_path)
     target = target_commit if target_commit else _get_repo_head(vllm_path)

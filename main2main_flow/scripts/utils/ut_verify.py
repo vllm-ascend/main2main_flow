@@ -14,6 +14,7 @@ itself never calls it.  Exit code mirrors pytest's.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from main2main_flow.scripts.utils.ut_check import (
     UT_VERIFY_LOG_NAME,
+    _UT_VENV_MARKER,
     _build_ut_env,
     _make_fake_npu_smi,
     _ut_base_dir,
@@ -41,7 +43,18 @@ def _resolve_pytest_cmd(explicit_python: str) -> list[str]:
                  "exist — falling back to system pytest")
     venv_python = _ut_base_dir() / "bin" / "python"
     if venv_python.exists():
-        return [str(venv_python), "-m", "pytest"]
+        # Same source of truth as ut_check._ensure_ut_venv: a venv without
+        # a readable marker was left behind by a failed creation (e.g.
+        # numpy install failure) and must NOT be adopted — run ut_check
+        # to reconcile it, system pytest keeps this verify loop usable.
+        try:
+            json.loads((_ut_base_dir() / _UT_VENV_MARKER).read_text(
+                encoding="utf-8"))
+            return [str(venv_python), "-m", "pytest"]
+        except Exception:
+            ts_print("[ut_verify] WARNING persistent venv has no valid "
+                     "marker (stale/incomplete) — falling back to system "
+                     "pytest")
     return [shutil.which("pytest") or "pytest"]
 
 

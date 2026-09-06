@@ -268,8 +268,7 @@ def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict
     return env
 
 
-def check_ut(repo: Path, vllm_path: str | Path | None = None,
-             timeout_s: int = 1800) -> dict:
+def check_ut(repo: Path, vllm_path: str | Path | None = None) -> dict:
     """Run the CPU-UT batch, aligned with CI's single-process execution.
 
     Runs the same CPU-routed tests/ut/* files as CI's CPU runner
@@ -300,10 +299,9 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         return {"violations": [], "detail": "tests/ut not found", "skipped": True,
                 "log_path": "", "venv_python": ""}
 
-    pytest_bin = shutil.which("pytest")
-    if not pytest_bin:
-        ts_print("\n[pre_ci] ut: SKIPPED — pytest not installed")
-        return {"violations": [], "detail": "pytest not installed", "skipped": True,
+    if not vllm_path:
+        ts_print("\n[pre_ci] ut: SKIPPED — no vllm path configured")
+        return {"violations": [], "detail": "no vllm path", "skipped": True,
                 "log_path": "", "venv_python": ""}
 
     ts_print(f"\n[pre_ci] ut: collected {len(cpu_files)} CPU test files "
@@ -331,6 +329,14 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     # Persistent venv (created once, reused across attempts and steps) with
     # --system-site-packages + the numpy constraint.
     venv_dir, venv_python = _ensure_ut_venv(target_numpy_spec)
+    # Resolve the system pytest only AFTER the venv: the venv runs pytest
+    # via `python -m pytest` (system-site-packages), so a missing pytest
+    # console script on PATH does not mean UT cannot run.
+    pytest_bin = shutil.which("pytest")
+    if not venv_dir and not pytest_bin:
+        ts_print("\n[pre_ci] ut: SKIPPED — no usable venv and pytest not installed")
+        return {"violations": [], "detail": "pytest not installed", "skipped": True,
+                "log_path": "", "venv_python": ""}
     pytest_cmd = [str(venv_python), "-m", "pytest"] if venv_dir else [pytest_bin]
     if venv_dir:
         ts_print(f"[pre_ci] ut: using venv pytest via {venv_python} -m pytest")
@@ -347,10 +353,6 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
 
     try:
-        if not vllm_path:
-            ts_print("[pre_ci] ut: no vllm path configured, skipping")
-            return {"violations": [], "detail": "no vllm path", "skipped": True,
-                    "log_path": "", "venv_python": ""}
         label = "main"
 
         env = _build_ut_env(repo, vllm_path, fake_bin_dir)

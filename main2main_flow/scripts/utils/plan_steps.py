@@ -230,40 +230,6 @@ def _make_step(index: int, commits: list[dict[str, str]], start: str,
     }
 
 
-def _commit_count_budget() -> int:
-    return max(1, BASE_COMMIT_COUNT_BUDGET)
-
-
-def _list_commits(repo: Path, base: str, target: str) -> list[dict[str, str]]:
-    log_output = run_git(
-        repo, "log", "--reverse", "--format=%H%x1f%s", f"{base}..{target}"
-    )
-    commits: list[dict[str, str]] = []
-    for line in log_output.strip().splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\x1f", 1)
-        commits.append({
-            "sha": parts[0].strip(),
-            "subject": parts[1].strip() if len(parts) > 1 else "",
-        })
-    return commits
-
-
-def _vllm_lines_for_commit(repo: Path, sha: str) -> int:
-    output = run_git(repo, "diff-tree", "--no-commit-id", "-r", "--numstat", sha, "--", ":(top)vllm/")
-    total = 0
-    for line in output.strip().splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 3:
-            added = int(parts[0]) if parts[0] != "-" else 0
-            deleted = int(parts[1]) if parts[1] != "-" else 0
-            total += added + deleted
-    return total
-
-
 def _plan_steps(
     commits: list[dict[str, str]],
     lines_per_commit: dict[str, int],

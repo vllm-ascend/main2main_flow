@@ -14,7 +14,6 @@ Design note:
 """
 from __future__ import annotations
 
-import os
 import platform
 import re
 import shutil
@@ -203,76 +202,13 @@ def _check_format(repo: Path) -> dict:
     # lost (run 33784514899).  Prefix-normalized lines (::error::,
     # ##[error], ANSI) are stripped so the adapter sees clean violations.
     full = output if rc2 == rc and not diff_after2 else output2
-    violations = [re.sub(r'^#{0,2}\[error\]\s*|^::error::\s*', '', l)
-                  for l in full.splitlines() if l.strip()]
+    violations = [re.sub(r'^#{0,2}\[error\]\s*|^::error::\s*', '', ln)
+                  for ln in full.splitlines() if ln.strip()]
     ts_print(f"\n[pre_ci] format: FAILED — {len(violations)} line(s) from "
              f"format.sh output (exit={rc2})")
     return {"violations": violations,
             "detail": f"format.sh FAILED (exit={rc2}) — residual lint errors "
                       f"after auto-fix pass; full output in violations"}
-
-
-def _iter_failed_hooks(output: str):
-    """Yield (hook_name, lines) for each failed hook in pre-commit output."""
-    lines = output.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        # Hook status line: "ruff check.....................................................Failed"
-        if line.endswith("Failed") and "..." in line:
-            hook_name = line.rstrip(".").rstrip()
-            hook_lines: list[str] = []
-            i += 1
-            # Collect lines until next hook or end
-            while i < len(lines):
-                nl = lines[i].strip()
-                # Next hook status line (either Passed or Failed)
-                if nl.endswith("Passed") and "..." in nl:
-                    break
-                if nl.endswith("Failed") and "..." in nl:
-                    break
-                hook_lines.append(lines[i])
-                i += 1
-            yield hook_name, hook_lines
-        else:
-            i += 1
-
-
-def _is_real_error(line: str) -> bool:
-    """Check if a hook output line represents a real (non-auto-fixable) error."""
-    s = line.strip()
-    if not s:
-        return False
-    # vllm-ascend's format.sh prints failing hook lines with an
-    # "::error::" workflow-command prefix (rendered "##[error]" in the
-    # runner log).  Without stripping it, EVERY lint violation from
-    # format.sh was filtered here and the check reported OK while the
-    # hooks failed — run 33784514899 shipped an E402 the upstream
-    # pre-commit then caught (2026-09-04).
-    s = re.sub(r'^#{1,2}\[error\]\s*|^::error::\s*', '', s)
-    # Auto-fix noise
-    if "files were modified" in s or "file reformatted" in s or "files reformatted" in s:
-        return False
-    if "files left unchanged" in s:
-        return False
-    # pre-commit metadata
-    if s.startswith("- hook id:") or s.startswith("- exit code:") or s.startswith("- duration:"):
-        return False
-    # Environment issues
-    if "Please install shellcheck" in s or "Exec format error" in s:
-        return False
-    if "To bypass pre-commit hooks" in s:
-        return False
-    # gitleaks / shell permission issues are infrastructure, not adaptation
-    if "is not executable" in s:
-        return False
-    if "gitleaks" in s.lower():
-        return False
-    # Only report lines that look like actual lint violations:
-    # file.EXT:LINE:COL: CODE or file.EXT:LINE: CODE
-    if not re.match(r'^[\w/.-]+\.\w+:\d+:', s):
-        return False
-    return True
 
 
 def _changed_test_py_files(repo: Path) -> list[str]:
@@ -481,8 +417,9 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
         all_output: list[str] = []
         any_failed = False
 
-        # Single-version validation: mypy resolves symbols against the
-        # target main vllm tree only.
+        # Single VLLM version (main tree only) — but every supported
+        # python version is checked, so adapter edits must satisfy all
+        # three syntax targets, not just the local interpreter's.
         for py_ver in ("3.10", "3.11", "3.12"):
             ts_print(f"[pre_ci] === mypy [main] --python-version {py_ver} "
                      f"output begin ===")

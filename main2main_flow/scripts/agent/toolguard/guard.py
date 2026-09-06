@@ -45,11 +45,22 @@ def _blocker_script() -> str:
 
 def _python_script() -> str:
     blocked = ", ".join(repr(m) for m in sorted(BLOCKED_PY_MODULES))
+    # The argv scan must cover every invocation shape, not just `python -m
+    # mod ...`: glued `python -mpytest` (valid CPython), isolation flags
+    # before -m (`python -I -m pytest`), and `python -c "import pytest; ..."`
+    # all bypassed the original argv[1]/argv[2] check.
     return (f"#!{sys.executable}\n"
             "import os, sys\n"
             f"_BLOCKED = {{{blocked}}}\n"
-            "if len(sys.argv) >= 3 and sys.argv[1] == '-m' "
-            "and sys.argv[2] in _BLOCKED:\n"
+            "_argv = sys.argv[1:]\n"
+            "_hit = any(\n"
+            "    (a == '-m' and i + 1 < len(_argv) and _argv[i + 1] in _BLOCKED)\n"
+            "    or (a.startswith('-m') and a[2:] in _BLOCKED)\n"
+            "    or (a == '-c' and i + 1 < len(_argv)\n"
+            "        and any(b in _argv[i + 1] for b in _BLOCKED))\n"
+            "    for i, a in enumerate(_argv)\n"
+            ")\n"
+            "if _hit:\n"
             f"    print({GUARD_MSG!r}, flush=True)\n"
             "    sys.exit(0)\n"
             "os.execv(sys.executable, [sys.executable] + sys.argv[1:])\n")

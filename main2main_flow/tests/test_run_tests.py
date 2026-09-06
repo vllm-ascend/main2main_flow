@@ -290,6 +290,17 @@ def test_precision_failure_not_detected_for_other_assert(tmp_path: Path) -> None
     assert not rt._is_precision_failure(log)
 
 
+def test_precision_failure_not_detected_for_tp_size_mismatch(tmp_path: Path) -> None:
+    # Config mismatch, not numeric drift: "are not equal" alone (no
+    # allclose/assert_close/mismatch-diff signature) must NOT classify as
+    # precision_pass — that would mask a broken test as trackable-pass.
+    log = tmp_path / "t.log"
+    log.write_text(
+        "E   AssertionError: TP size (8) and NPU count (4) are not equal\n",
+        encoding="utf-8")
+    assert not rt._is_precision_failure(log)
+
+
 def test_precision_failure_detected_for_graph_mode_logprob(tmp_path: Path) -> None:
     # run 33897770317: four_card/test_graph_mode.py aclgraph baseline-vs-
     # compiled decode logprob assertion (own decode_atol) on the a3 soc.

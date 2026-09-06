@@ -248,7 +248,9 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
         if scheme and rest:
             gitcdn_url = (f"{scheme}://x-access-token:{token}@{rest}"
                           f"https://github.com/{head_fork}.git")
-        break
+            break
+        # ssh-form rewrites (no scheme) cannot carry the token in the URL —
+        # keep scanning for an http(s) rewrite instead of stopping here.
     routes = [proxy_url] + ([gitcdn_url] if gitcdn_url else [])
 
     # Negotiation seed: the push pack degenerates to a full tree when the
@@ -303,13 +305,18 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
                        cwd=cwd, capture_output=True, text=True)
         subprocess.run(["git", "remote", "add", push_remote, route],
                        cwd=cwd, capture_output=True, text=True)
-        r = subprocess.run(
-            ["git", "-c", "http.https://github.com/.extraheader=",
-             "push", *push_args, push_remote, refspec],
-            cwd=cwd, capture_output=True, text=True, timeout=900,
-        )
-        subprocess.run(["git", "remote", "remove", push_remote],
-                       cwd=cwd, capture_output=True, text=True)
+        # remote add embeds the PAT in .git/config — the remove below must
+        # run even when the push raises (e.g. TimeoutExpired), or the token
+        # persists in the checkout for the rest of the job.
+        try:
+            r = subprocess.run(
+                ["git", "-c", "http.https://github.com/.extraheader=",
+                 "push", *push_args, push_remote, refspec],
+                cwd=cwd, capture_output=True, text=True, timeout=900,
+            )
+        finally:
+            subprocess.run(["git", "remote", "remove", push_remote],
+                           cwd=cwd, capture_output=True, text=True)
         if r.returncode == 0:
             if r.stdout.strip():
                 ts_print(f"[push] git push stdout:\n{r.stdout.strip()}", flush=True)
@@ -414,8 +421,14 @@ def _push_with_lease(ascend_path: Path, branch: str) -> None:
     attempt so the lease stays fresh.
     """
     head_fork = os.environ.get("HEAD_FORK", "")
+    # Explicit lease form: <remote-side ref>:<local expect ref>.  The bare
+    # single-arg form (--force-with-lease=m2m-lease/<branch>) names a
+    # remote-side ref that does not exist, so git applies NO force and NO
+    # lease protection — the push silently degrades to a protected fast-forward.
     _push_via_proxy(ascend_path, head_fork,
-                    branch, f"--force-with-lease=m2m-lease/{branch}",
+                    branch,
+                    f"--force-with-lease=refs/heads/{branch}"
+                    f":refs/remotes/m2m-lease/{branch}",
                     lease_branch=branch)
 
 
@@ -784,7 +797,7 @@ def push_and_create_pr(
         # Only restore if we created a new branch from a different starting point
         if has_patch:
             run_git(ascend_path, "checkout", current_branch if not is_detached else "HEAD")
-            ts_print(f"[push] Restored original ref.")
+            ts_print("[push] Restored original ref.")
 
     return pr_url
 

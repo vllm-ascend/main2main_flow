@@ -282,7 +282,7 @@ def run_opencode_adapter(inputs: dict[str, Any],
         if rc != 0 or not lines:
             ts_print(f"\n[opencode] HARD FAILURE: exit={rc}, events={len(lines)}", flush=True)
             # Print the command that was run (redact prompt content — it's in log)
-            ts_print(f"[opencode] cmd: opencode run --format json --model {_DEFAULT_MODEL} "
+            ts_print(f"[opencode] cmd: opencode run --format json --model {role_model or _DEFAULT_MODEL} "
                      f"--auto {'--session ' + (session_id or '') if session_id else ''}"
                      f" '<prompt {len(prompt)} chars>'", flush=True)
             if stderr_path and stderr_path.exists():
@@ -378,9 +378,15 @@ def _run_once(
     stderr_fh = stderr_path.open("a", encoding="utf-8") if stderr_path else None
     # opencode >=2.x uses --auto, older versions use --dangerously-skip-permissions
     auto_flag = "--dangerously-skip-permissions"
-    r = subprocess.run(["opencode", "run", "--help"], capture_output=True, text=True)
-    if "--auto" in (r.stdout + r.stderr):
-        auto_flag = "--auto"
+    try:
+        r = subprocess.run(["opencode", "run", "--help"], capture_output=True,
+                           text=True, timeout=30)
+        if "--auto" in (r.stdout + r.stderr):
+            auto_flag = "--auto"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(
+            f"opencode CLI probe failed ({e}) — binary missing or hung; "
+            "cannot start the adapter session") from e
 
     cmd = [
         "opencode", "run",
