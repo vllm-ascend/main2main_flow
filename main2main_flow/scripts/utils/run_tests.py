@@ -155,7 +155,8 @@ def _detect_device_overriders(test_files: list[str],
 
 def _schedule_rounds(tests: list[str], total_cards: int,
                      estimated_times: dict[str, int] | None = None,
-                     device_overriders: set[str] | None = None) -> list[list[str]]:
+                     device_overriders: set[str] | None = None,
+                     pair_aligned: bool = False) -> list[list[str]]:
     # Sort by card count descending, then estimated time descending (longest
     # first — a greedy bin-packing heuristic that shortens makespan).
     times = estimated_times or {}
@@ -166,7 +167,13 @@ def _schedule_rounds(tests: list[str], total_cards: int,
     usage: list[int] = []
     for t in ordered:
         need = _test_cards(t)
-        if need > total_cards:
+        # Dual-die pair alignment: a test starting on an odd die would split
+        # a card's pair, so after an odd-need test the next one jumps to the
+        # next pair — an odd-need test effectively consumes one extra slot
+        # (run 34010715527: a round of exactly [4c,2c,1c,1c] packed to 8
+        # overflowed an 8-die pool on the trailing alignment bump).
+        cost = need + (need & 1) if pair_aligned else need
+        if cost > total_cards:
             raise ValueError(f"Test '{t}' requires {need} cards but only {total_cards} available")
         if t in overriders:
             # Device-overriding tests each start their own round (they all
@@ -174,16 +181,16 @@ def _schedule_rounds(tests: list[str], total_cards: int,
             # one of them).  As the round's first test it gets 0..N-1, which
             # matches its hardcoded range; other tests fill the cards after.
             rounds.append([t])
-            usage.append(need)
+            usage.append(cost)
             continue
         for i in range(len(rounds)):
-            if usage[i] + need <= total_cards:
+            if usage[i] + cost <= total_cards:
                 rounds[i].append(t)
-                usage[i] += need
+                usage[i] += cost
                 break
         else:
             rounds.append([t])
-            usage.append(need)
+            usage.append(cost)
     return rounds
 
 
@@ -1154,7 +1161,8 @@ def run_tests(
                  f"(capacity {capacity})", file=sys.stderr)
         sys.exit(1)
     rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
-        test_files, capacity, est_times, device_overriders=overriders)
+        test_files, capacity, est_times, device_overriders=overriders,
+        pair_aligned=pair_aligned)
     if pair_aligned:
         ts_print(f"  Dual-die pairing: enforcing pair-aligned device assignment "
                  f"(usable pool {usable_pool})", flush=True)

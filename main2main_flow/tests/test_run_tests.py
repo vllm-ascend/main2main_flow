@@ -13,6 +13,7 @@ from main2main_flow.scripts.utils.run_tests import (
     _is_oom_hang_failure,
     _pair_complete_pool,
     _run_one_test,
+    _schedule_rounds,
     _test_cards,
     _validate_pair_aligned,
 )
@@ -24,6 +25,15 @@ def _make_round(*counts):
     }
     return [[f"tests/e2e/pull_request/{slugs[c]}/test_{i}.py"
              for i, c in enumerate(counts)]]
+
+
+def _make_tests(*counts):
+    """Flat test list with unique paths encoding the given card counts."""
+    slugs = {
+        1: "one_card", 2: "two_card", 4: "four_card", 8: "eight_card",
+    }
+    return [f"tests/e2e/pull_request/{slugs[c]}/test_{i}.py"
+            for i, c in enumerate(counts)]
 
 
 def _devices(rnd):
@@ -319,3 +329,37 @@ def test_aggregate_precision_pass_can_commit(tmp_path: Path) -> None:
     assert r["ci_result"] == "precision_pass"
     assert r["can_commit"] is True
     assert r["requires_fix"] is False
+
+# ---- run 34010715527: pair-aligned scheduling overflow ----------------------
+# _schedule_rounds packed rounds by raw card count while _assign_devices
+# bumps the offset to the next pair after every odd-need test, so a round of
+# exactly [4c,2c,1c,1c] (8 raw cards) overflowed the 8-die pool on the
+# trailing alignment bump -> IndexError killed the whole flow.
+
+def test_schedule_rounds_pair_aligned_charges_even_costs():
+    tests = _make_tests(4, 2, 1, 1)
+    rounds = _schedule_rounds(tests, 8, pair_aligned=True)
+    for rnd in rounds:
+        cost = sum(_test_cards(t) + _test_cards(t) % 2 for t in rnd)
+        assert cost <= 8
+    # the tight-but-overflowing round must not appear
+    assert [sorted(_test_cards(t) for t in r) for r in rounds] \
+        != [[1, 1, 2, 4]]
+    # raw packing (pair_aligned=False) still produces it — behavior change
+    # is scoped to dual-die runners
+    assert [[sorted(_test_cards(t) for t in r) for r in
+             _schedule_rounds(tests, 8, pair_aligned=False)][0]] \
+        == [[1, 1, 2, 4]]
+
+
+def test_schedule_rounds_assign_end_to_end_pool_offset8():
+    # full run 34010715527 shape: 10 runnable tests on pool [8..15]
+    tests = _make_tests(4, 4, 4, 2, 2, 2, 1, 1, 1, 1)
+    rounds = _schedule_rounds(tests, 8, pair_aligned=True)
+    out = _assign_devices(rounds, [8, 9, 10, 11, 12, 13, 14, 15],
+                          pair_aligned=True)
+    assert len(out) == len(rounds)
+    pool = {"8", "9", "10", "11", "12", "13", "14", "15"}
+    for rnd in out:
+        for _, devs in rnd:
+            assert set(devs.split(",")) <= pool
