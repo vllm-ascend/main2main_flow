@@ -110,8 +110,10 @@ def test_budgets_are_hardcoded(monkeypatch):
     assert not hasattr(flow_mod, "_pre_ci_attempt_budget")
     assert not hasattr(flow_mod, "_GATE_E2E_ATTEMPTS")
     assert not hasattr(flow_mod, "_run_regression_e2e_with_retries")
-    # ai_analysis retries exactly 3 times (hardcoded, no env knob).
-    assert "range(1, 4)" in inspect.getsource(flow_mod.Main2MainFlow._ai_analysis)
+    # ai_analysis retries exactly 5 times (hardcoded, no env knob) —
+    # run 34078835752 converged 34→30→5 UT failures in 3 and reverted one
+    # round short.
+    assert "range(1, 6)" in inspect.getsource(flow_mod.Main2MainFlow._ai_analysis)
     # e2e exhaustion threshold stays at 3 fix rounds.
     src = inspect.getsource(flow_mod.Main2MainFlow.process_steps)
     assert "retry_count >= 3" in src

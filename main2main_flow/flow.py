@@ -18,7 +18,7 @@ from main2main_flow.scripts.utils.plan_steps import run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson,
-    submit_pre_ci_lesson)
+    submit_pre_ci_exhausted_lesson, submit_pre_ci_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
 from main2main_flow.scripts.utils.run_tests import (
     PASS_RESULTS,
@@ -769,7 +769,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             step_id = step["id"]
 
             if not self._ai_analysis():
-                # Adaptation could not pass pre_ci + critic after 3 attempts.
+                # Adaptation could not pass pre_ci + critic after 5 attempts.
                 # Discard the broken working-tree changes and fall through to
                 # generate_final_post / push with whatever passed in prior steps.
                 ts_print(f"[process_steps] {step_id}: ai_analysis exhausted retries, "
@@ -1283,6 +1283,9 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         pre_ci_noop_warned = False
         # Last failing pre_ci result — feeds the pre_ci-recovery lesson.
         last_failed_check: dict | None = None
+        # UT failure count per attempt — the exhaustion lesson's convergence
+        # evidence (run 34078835752: 34→30→5 then revert).
+        ut_failures_per_attempt: list[int] = []
 
         # vllm-report MCP tools are called dynamically by the adapter during
         # analysis (not pre-loaded as static context here).  The MCP server
@@ -1308,7 +1311,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         # Budget applies to the pre_ci (format/mypy/UT) fix loop only — the
         # per-step E2E retry budget (3) in process_steps is unchanged.
-        for attempt in range(1, 4):
+        # 5 attempts: run 34078835752 (deepseek-v4-flash) converged 34→30→5
+        # UT failures in 3 attempts but reverted with 5 left — one round
+        # short; the family needs headroom for a format/mypy regression
+        # round (attempt-2) plus the closing rounds.
+        for attempt in range(1, 6):
             role = "adapter-fix" if error_logs else "adapter"
             if role == "adapter-fix":
                 # Targeted upstream diff (runtime paths only) — the full
@@ -1406,6 +1413,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             check_result = run_check(
                 ascend_path, self.state.release_tag, vllm_path=vllm_path)
             pre_ci_passed = check_result["all_passed"]
+            ut_check = next((c for c in check_result.get("checks", [])
+                             if c.get("name") == "ut"), None)
+            if ut_check and not ut_check.get("skipped", False):
+                ut_failures_per_attempt.append(
+                    len(ut_check.get("violations") or []))
             if not pre_ci_passed:
                 log_path = step_dir / PRE_CI_CHECK_FILE
                 log_path.write_text(json.dumps(check_result, indent=2, ensure_ascii=False))
@@ -1487,8 +1499,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                  last_failed_check)
 
         if not pre_ci_passed:
-            ts_print(f"[ai_analysis] {step_id}: FAILED after 3 attempts "
-                     f"(pre_ci never passed) — skipping e2e")
+            ts_print(f"[ai_analysis] {step_id}: FAILED after {attempt} "
+                     f"attempts (pre_ci never passed) — skipping e2e")
+            # Even a failed run converged partway — record the trajectory
+            # and remaining failures so the next run reuses that evidence
+            # (runs died on the same family twice with no carry-over).
+            submit_pre_ci_exhausted_lesson(
+                self.state.vllm_report_path, step_id, last_failed_check,
+                ut_failures_per_attempt)
             self.state.test_errors = error_logs if error_logs else []
             # Reset accidental vllm edits on this exit too — run() checks
             # out last_verified_commit next and a dirty vllm tree makes

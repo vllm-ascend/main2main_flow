@@ -298,6 +298,74 @@ def submit_pre_ci_lesson(vllm_report_path: str, step_id: str,
                     keywords=keywords, example=example)
 
 
+def submit_pre_ci_exhausted_lesson(vllm_report_path: str, step_id: str,
+                                   check_result: dict | None,
+                                   ut_failures_per_attempt: list[int]) -> None:
+    """Record a lesson when the pre_ci budget ran out WITHOUT recovery.
+
+    Every round re-analyzes the same upstream commit from zero, even when
+    the previous run was one round from passing (run 34078835752: UT
+    failures 34→30→5 in 3 attempts, then revert — the trajectory proves
+    the mapping is RIGHT and the remaining failures are the tail of one
+    family).  Recording the trajectory + remaining failures lets the next
+    run start from that evidence instead of re-deriving it.  Called by
+    flow._ai_analysis right before the exhausted-exit revert.
+    """
+    if not vllm_report_path or not check_result:
+        return
+    report_dir = Path(vllm_report_path)
+    checks = [c for c in check_result.get("checks", []) if not c.get("passed")]
+    if not checks:
+        return
+    failed_names = [c["name"] for c in checks]
+    violations: list[str] = []
+    for c in checks:
+        violations.extend(c.get("violations") or [])
+    error_text = "\n".join(violations)[:2000]
+    keywords = _extract_keywords(error_text, "pre_ci failure")
+    for v in violations[:10]:
+        first = v.splitlines()[0].strip() if v else ""
+        if first and first not in keywords:
+            keywords.append(first[:120])
+        if len(keywords) >= 6:
+            break
+    traj = ("→".join(str(n) for n in ut_failures_per_attempt)
+            if ut_failures_per_attempt else "n/a")
+    # Files still carrying failures are the highest-value reuse pointer.
+    remaining_files = sorted({
+        v.split(":")[0] for v in violations if v and ":" in v
+    })[:5]
+    title = f"{step_id}: pre_ci exhausted — converging, reuse prior progress"
+    symptom = (f"pre_ci never passed ({', '.join(failed_names)}); "
+               f"UT failures per attempt: {traj}; "
+               f"remaining: {len(violations)} violation(s)"
+               + (f" in {', '.join(remaining_files)}" if remaining_files
+                  else ""))
+    root_cause = (
+        "Budget exhausted mid-convergence: the shrinking failure "
+        "trajectory means the contract mapping is correct and only the "
+        "tail of one family is left — usually test-side constructions "
+        "still using the old signature.")
+    fix_guidance = [
+        "This family was CLOSE — the trajectory shrank every attempt. "
+        "Start from the remaining failure list, do NOT re-analyze the "
+        "upstream commit from scratch",
+        "Read the FULL tracebacks in the pre_ci UT log (log_path in "
+        "pre_ci_check.json) and grep the OLD symbol to zero references "
+        "in vllm_ascend AND tests/ut — leftover test-side constructions "
+        "are the usual last failures",
+        "Keep every edited line <=120 chars and mypy-clean WHILE fixing "
+        "UT: a format/mypy regression burns a whole attempt (run "
+        "34078835752 attempt-2: 24 format lines + 4 mypy issues after a "
+        "clean attempt-1)",
+    ]
+    example = error_text[:400]
+    _submit_via_mcp(report_dir, title=title, symptom=symptom,
+                    root_cause=root_cause, fix_guidance=fix_guidance,
+                    tags=["pre-ci-exhausted", "auto-submitted"],
+                    keywords=keywords, example=example)
+
+
 def _resolve_push_targets(report_dir: Path) -> list[str]:
     """Push targets for the vllm-report clone, honoring the runner's own
     github rewrite (``url.*.insteadOf``): embed the token in the REWRITTEN
