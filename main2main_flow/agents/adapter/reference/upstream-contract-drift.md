@@ -16,8 +16,8 @@ the round budget (run 33976675052 step-1: 41 → 8 → 9 UT failures over
 | §3 Build the old→new mapping table | before editing anything | 45-60 |
 | §4 Family grep — source AND tests | you know the removed/renamed symbols | 61-74 |
 | §5 Fix top-down | editing | 75-84 |
-| §6 The verify loop | after each edit batch | 85-103 |
-| §7 Worked example | you want to see the whole playbook applied | 104-120 |
+| §6 Close the loop from evidence | after each edit batch | 85-101 |
+| §7 Worked example | you want to see the whole playbook applied | 102-118 |
 
 ## 1. Recognition signals
 
@@ -82,24 +82,22 @@ too (SKILL.md checklist 9-10).
 Bottom-up (patching each failing test first) churns: every level you fix
 afterwards re-fails the tests above it.
 
-## 6. The verify loop
+## 6. Close the loop from evidence
 
-After each edit batch, run the failing files — seconds, CPU-only:
+You cannot run tests in-session (the guard blocks them) — you close the
+loop by making every failure IMPOSSIBLE to recur, from evidence:
 
-```bash
-cd {flow_repo} && python3 -m main2main_flow.scripts.utils.ut_verify \
-  --repo {ascend_path} --vllm {vllm_path} \
-  tests/ut/python/x/test_a.py tests/ut/python/x/test_b.py
-```
-
-- `--tb=long` gives complete tracebacks (pre_ci only shows ~900-char
-  excerpts). Read them; do not guess.
-- Iterate fix → run → observe, up to ~4 times. Stop early and RE-ANALYZE
-  if the failure set stops shrinking — that means the mapping table (§3)
-  has a wrong row, not that the edits are incomplete.
+- Read the FULL tracebacks in the pre_ci UT log (`log_path` in
+  `pre_ci_check.json` → `checks` → `ut`) — not just the excerpts. Each
+  traceback names one call site; map it to a row in the §3 table.
+- For each old symbol, re-grep after editing until ZERO references
+  remain in BOTH `vllm_ascend/` and `tests/ut/`. Stopping with 2 of 9
+  call sites updated is the #1 reason a family persists across rounds.
+- Stop and RE-ANALYZE (§2) if a traceback doesn't fit your mapping
+  table — that means a row is wrong, not that the edits are incomplete.
 - Do mypy-relevant hygiene (guards, `# type: ignore[import-not-found]`)
-  as you edit, but do not chase residual mypy errors until UT passes —
-  contract-aligned code makes most of them vanish on their own.
+  as you edit, but do not chase residual mypy errors — contract-aligned
+  code makes most of them vanish on their own.
 
 ## 7. Worked example — KV-Cache Layout Refactor (#51718, step vllm 8bdc70ec)
 
@@ -116,5 +114,5 @@ broke. 41 → 8 → 9 failures, budget exhausted.
 Right path by this playbook: §2 read the new `KVCacheTensor`/`MLAAttentionSpec`
 definitions upstream → §3 the 3-row table above → §4 one `rg` per old
 symbol over `vllm_ascend/ tests/ut/` (~9 files total) → §5 definitions,
-then constructors, then call sites, then mocks → §6 one verify run per
-batch. Convergence in 1-2 rounds.
+then constructors, then call sites, then mocks → §6 zero-reference grep
+per old symbol. Convergence in 1-2 rounds.

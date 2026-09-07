@@ -1,10 +1,8 @@
-"""Tool guard: direct test/lint commands are blocked (5-15min each, kills the
-session), but the sanctioned ut_verify entry passes through.
-
-run 34018086282: attempt-1 made 54 blind edits with ZERO verification — the
-guard message said "tests are forbidden" and SKILL.md only sanctioned
-ut_verify in fix mode, so the adapter never discovered the one check it was
-allowed to run.  The block message must now REDIRECT to ut_verify.
+"""Tool guard: ALL in-session test/lint execution is blocked (5-15min each,
+kills the session) — including the former sanctioned ut_verify entry, which
+was removed with the decision that only the flow's pre_ci may execute
+pre_ci tests (run 34046694076: ut_verify "passed" 3× with zero tests under
+the guard's own exit-0 blockers; the adapter must not execute tests at all).
 """
 import subprocess
 import sys
@@ -69,14 +67,26 @@ def test_guard_passes_plain_python_through():
     assert "hello" in r.stdout
 
 
-def test_guard_message_redirects_to_ut_verify():
-    assert "ut_verify" in GUARD_MSG
+def test_guard_message_is_plain_block():
+    # No sanctioned in-session verifier exists anymore — the message must
+    # not point the adapter at any executable entry point.
+    assert "ut_verify" not in GUARD_MSG
 
 
-def test_guard_passes_ut_verify_through():
-    # the sanctioned verifier must reach the real module (argparse --help)
+def test_guard_blocks_ut_verify_module():
+    # `python -m main2main_flow.scripts.utils.ut_verify` must hit the
+    # wrapper's -m check (exact module-name match).
     r = _run_wrapper("main2main_flow.scripts.utils.ut_verify", "--help")
-    combined = r.stdout + r.stderr
-    assert "BLOCKED" not in combined
+    assert "BLOCKED" in r.stdout
     assert r.returncode == 0
-    assert "--repo" in combined
+
+
+def test_guard_blocks_ut_verify_import_via_c():
+    # `python -c "from ... import ut_verify; ..."` is caught by the
+    # substring scan over the -c payload.
+    r = _run_python_wrapper(
+        "-c",
+        "from main2main_flow.scripts.utils import ut_verify; "
+        "ut_verify.main(['--repo', 'x'])")
+    assert "BLOCKED" in r.stdout
+    assert r.returncode == 0

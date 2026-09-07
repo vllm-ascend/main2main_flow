@@ -22,16 +22,19 @@ from pathlib import Path
 BLOCKED_CHECK_CMDS = frozenset({
     "pytest", "mypy", "ruff", "pre-commit", "flake8", "black", "isort",
 })
+# "main2main_flow.scripts.utils.ut_verify" (the former sanctioned verifier)
+# stays blocked: only the flow's pre_ci may execute pre_ci tests — the
+# adapter never runs them, so no in-session entry point exists.
 BLOCKED_PY_MODULES = frozenset({
     "pytest", "mypy", "ruff", "pre_commit", "py_compile", "flake8",
-    "black", "isort",
+    "black", "isort", "ut_verify",
+    "main2main_flow.scripts.utils.ut_verify",
 })
 GUARD_MSG = (
     "BLOCKED by main2main_flow: direct test/lint commands are forbidden "
-    "(they burn 5-15min each and kill the session). Use the sanctioned "
-    "verifier instead: python3 -m main2main_flow.scripts.utils.ut_verify "
-    "(CPU-only, mocked npu-smi, seconds per file — see SKILL.md). "
-    "Do not retry this command."
+    "(they burn 5-15min each and kill the session). Verification runs "
+    "flow-side in pre_ci — fix from the violation lines and the full UT "
+    "log instead. Do not retry this command."
 )
 GUARD_DIR = Path(tempfile.gettempdir()) / "m2m-adapt-tool-guard"
 

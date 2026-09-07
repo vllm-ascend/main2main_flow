@@ -34,9 +34,9 @@ _AGENT_DIR = Path(__file__).parent.parent.parent / "agents"
 # session resumes with the short continue prompt, so an under-budget test
 # run still exercises the real path.
 # The 20min-per-session requirement (user 2026-09-06) is met by how the
-# work is arranged — SKILL rules, KB lessons, and the sanctioned ut_verify
-# closure make a fix session converge well inside 20min — NOT by killing
-# the session at 20min.  This wall cap is only a runaway backstop (60min),
+# work is arranged — SKILL rules and KB lessons make a fix session
+# converge well inside 20min — NOT by killing the session at 20min.
+# This wall cap is only a runaway backstop (60min),
 # and a total-timeout kill is FINAL: no continue-prompt retry loop.
 # attempt-1 of run 34018086282 burned 80min because a 60min kill (rc=-9)
 # was then retried as a hard failure — that retry is what is forbidden.
@@ -147,10 +147,6 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     ctx.setdefault("vllm_report_context", "(vllm-report unavailable, use grep)")
     ctx.setdefault("start_commit", "")
     ctx.setdefault("end_commit", "")
-    # The flow repo root — lets SKILL.md reference
-    # `python -m main2main_flow.scripts.utils.ut_verify` with an absolute,
-    # importable path regardless of the adapter's cwd.
-    ctx.setdefault("flow_repo", str(Path(__file__).resolve().parents[3]))
 
     # Inline error content from error_logs files (if any).
     # error_logs is a JSON array of file paths, e.g. ["/path/a.txt", "/path/b.json"].

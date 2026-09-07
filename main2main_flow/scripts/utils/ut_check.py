@@ -155,7 +155,6 @@ def _failure_excerpt(clean: str, failure_line: str, max_chars: int = 900) -> str
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 UT_FULL_LOG_NAME = "ut_full.log"
-UT_VERIFY_LOG_NAME = "ut_verify_last.log"
 _UT_VENV_ENV = "MAIN2MAIN_UT_VENV"
 _UT_VENV_MARKER = "m2m_meta.json"
 
@@ -274,10 +273,8 @@ def _make_fake_npu_smi() -> Path:
 def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict:
     """Env replicating CI's CPU-UT lane: pure CPU, mocked NPU, offline hub.
 
-    Shared by check_ut (pre_ci gate) and ut_verify (adapter verify loop)
-    so both exercise the identical execution surface.  The flow repo root
-    is appended to PYTHONPATH so the ut_namespace plugin resolves even
-    when the caller's environment doesn't carry it.
+    The flow repo root is appended to PYTHONPATH so the ut_namespace
+    plugin resolves even when the caller's environment doesn't carry it.
     """
     env = os.environ.copy()
     ascend_abs = str(repo.resolve())

@@ -284,9 +284,10 @@ def submit_pre_ci_lesson(vllm_report_path: str, step_id: str,
         "family (>3 violations in one subsystem) = an upstream contract "
         "change — read reference/upstream-contract-drift.md and fix the "
         "whole family (grep ALL call sites, vllm_ascend AND tests/ut)",
-        "Verify with the closed loop: run the failing UT files via "
-        "ut_verify (venv_python from pre_ci_check.json) instead of "
-        "editing blind",
+        "Close the loop from evidence: read the FULL tracebacks in the "
+        "pre_ci UT log (log_path in pre_ci_check.json) and grep every "
+        "old symbol to zero references in vllm_ascend AND tests/ut — "
+        "never edit blind",
         "mypy last: contract-aligned code makes most mypy errors vanish "
         "on their own",
     ]

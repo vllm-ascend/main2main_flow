@@ -34,7 +34,7 @@ def test_submit_pre_ci_lesson_extracts_keywords_and_skips_empty(
     assert "pre-ci-fix" in captured["tags"]
     assert any("upstream-contract-drift.md" in g for g in
                captured["fix_guidance"])
-    assert any("ut_verify" in g for g in captured["fix_guidance"])
+    assert any("log_path" in g for g in captured["fix_guidance"])
 
     # empty failing checks → no submission
     captured.clear()

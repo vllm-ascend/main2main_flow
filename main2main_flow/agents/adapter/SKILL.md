@@ -29,14 +29,12 @@ these rules to stay on the critical path:
    bash call has fixed overhead (issue + output processing); 3 greps in
    one command is ~1/3 the cost of 3 separate calls.
 5. **Keep every line ≤120 chars AS YOU WRITE IT; never run
-   py_compile/mypy/ruff (banned — see Rules).** The push-time gate
-   re-runs format + mypy once and feeds exact violations back. UT is
-   DIFFERENT: `ut_verify` is ALLOWED and encouraged in every mode —
-   in fix mode you MUST run the failing UT files with `ut_verify`
-   (see fix mode below) and iterate until they pass; in adaptation,
-   after a multi-file or contract-level edit, run the edited modules'
-   UT files ONCE before ending the attempt (same command) — editing
-   blind is what turns one attempt into three rounds.
+   py_compile/mypy/ruff/pytest (banned — see Rules).** You have NO
+   in-session verification: format/mypy run once at push time (exact
+   violations fed back via quality_gate.json), UT runs only in the
+   flow's pre_ci. Your verification is AT EDIT TIME — grep the upstream
+   contract, re-read each edit against it, check every call site.
+   Running anything to "see if it works" is what kills the session.
 6. **MCP context is the map — don't re-discover it — BUT only when it
    covers the commit.** If `get_adaptation_guide(sha)` returned a guide,
    follow it directly — grep only for CALL SITES and sibling overrides
@@ -45,8 +43,8 @@ these rules to stay on the critical path:
    reason). The MCP gap is the signal to explore.
 7. **One pass per file while exploring.** Read a file, understand it,
    edit all needed spots, move on. In FIX mode the opposite is expected:
-   iterate on the same file as the verify loop reveals what is still
-   wrong — convergence, not one-pass.
+   return to the same file as each re-analysis of the failure evidence
+   reveals what is still wrong — convergence, not one-pass.
 8. **In fix mode, match the fix to the failure shape.** A single
    violation → fix the exact line it names. A FAMILY (>3 violations in
    one subsystem, or one error repeated across files) → that is an
@@ -58,10 +56,10 @@ these rules to stay on the critical path:
    timer.** A well-run fix session converges in well under 20 minutes:
    lessons first (`get_adaptation_lessons` — the known failure family and
    its fix are usually already recorded), one family-batch edit pass
-   (rule 8), one `ut_verify` run on the touched tests, then
+   (rule 8), a final self-check of the edits against the contract, then
    step_summary.md. What burns the budget is NOT doing too little — it
    is exploring: re-reading files, single-line edits repeated per
-   violation, linting, or running the full suite. None of that is part
+   violation, linting, or trying to run tests. None of that is part
    of the job; skip it.
 
 
@@ -102,11 +100,10 @@ these rules to stay on the critical path:
   remains (PR #14517: the call site was guarded but the module-level
   `BatchReqState` import broke the whole v0.27.1 lane — ImportError + a
   third positional arg to `init_workspace_manager`).
-- Execution is allowed ONLY through the UT verify loop (`ut_verify`, fix
-  mode below — and sanctioned in adaptation mode after multi-file edits):
-  pure CPU, mocked npu-smi, no model load. Never launch
-  models/servers, never require NPU/GPU, never import vllm/vllm-ascend
-  directly in a REPL
+- **No execution at all in this session.** All checks (format, mypy, UT)
+  run flow-side in pre_ci / the push-time gate — the tool guard blocks
+  test and lint commands. Never launch models/servers, never require
+  NPU/GPU, never import vllm/vllm-ascend in a REPL.
 - Use `rg` for symbol search (installed) — one call covers what a loop of `grep` calls would take; batch related lookups into a single invocation
 - Reference docs (`adaptation-patterns.md`, `common-pitfalls.md`,
   `code-structure-guide.md`) are **index-first**: each starts with a `## Index`
@@ -114,7 +111,9 @@ these rules to stay on the critical path:
   whose trigger matches your change — e.g. `sed -n 'A,Bp' <file>`. Never read a
   whole reference file. Content you already read in this session stays in your
   context — do not re-read it in later attempts or after resume
-- **DO NOT run mypy, ruff, pre-commit, py_compile, or any linter/checker/compiler command.** Ever. The ONLY executable verification is `ut_verify` (see rule 5).
+- **DO NOT run mypy, ruff, pre-commit, py_compile, pytest, or any
+  linter/checker/compiler/test command.** Ever. There is NO in-session
+  verification — pre_ci is the sole executor (see rule 5).
 - Never read raw CI logs — use inlined error content above. EXCEPTION: the
   full UT log (path in `pre_ci_check.json` → `checks` → `ut` → `log_path`)
   MAY be grepped/section-read when a violation's excerpt was truncated —
@@ -139,8 +138,8 @@ a fix pattern (generic versions of the failures in run 31581543851, PR
 2. **Mock-contract drift** — signal: `TypeError: unexpected keyword
    argument`, or a mock result wrapping an AttributeError (e.g. a Future).
    Fix: sync the mock with the upstream definition by GREPPING the
-   upstream signature/attribute, then CONFIRM with `ut_verify` on the
-   failing file.
+   upstream signature/attribute, then re-read your edit against that
+   definition to confirm.
 3. **Version-guarded symbol resolution** — signal: a stub/empty
    implementation surfaces as `KeyError`/`AttributeError` at the first
    real use. Under `vllm_version_is` a name has one definition per branch;
@@ -148,9 +147,10 @@ a fix pattern (generic versions of the failures in run 31581543851, PR
    grep ALL `def <name>(` and resolve the ACTUAL implementation (often
    the private method the stub delegates to).
 4. **Adapt source and tests together** — when the adaptation changes a
-   contract, update the test mocks in the same pass. Then run the failing
-   files with `ut_verify` (seconds, CPU-only) — do not wait for pre_ci to
-   discover what you can prove yourself now.
+   contract, update the test mocks in the same pass, then grep every
+   mock against the upstream definition. pre_ci runs the suite — a mock
+   you could have aligned by reading the contract is a whole round
+   wasted if left stale.
 
 ## Cumulative Step Model
 
@@ -304,23 +304,20 @@ violation = the exact line; family = the whole subsystem.
    whole family (grep ALL call sites, vllm_ascend AND tests/ut). For UT
    violations whose excerpt is truncated, grep the full log at the
    `log_path` given in the same JSON.
-3. **VERIFY LOOP (mandatory for UT failures)** — after editing, run the
-   failing files yourself:
-   ```bash
-   cd {flow_repo} && python3 -m main2main_flow.scripts.utils.ut_verify \
-     --repo {ascend_path} --vllm {vllm_path} \
-     [--python <venv_python from pre_ci_check.json>] \
-     tests/ut/path/to/test_failing.py [more files...]
-   ```
-   It reproduces the pre_ci environment (pure CPU, mocked npu-smi) and
-   prints full `--tb=long` tracebacks. Iterate: fix → re-run → observe.
-   Up to ~4 iterations; stop early if the failure set stops shrinking and
-   re-analyze instead (a wrong theory, not a wrong edit).
-4. **Do not end the attempt with known-failing UT.** The next round only
-   re-runs pre_ci — walking in with failures you could have run yourself
-   burns a whole round for information ut_verify gives in seconds.
-   mypy/format violations stay mechanical-only (no linter runs); fix them
-   from the exact violation lines.
+3. **CLOSE THE LOOP FROM EVIDENCE (no test runs — the guard blocks them).**
+   For UT failures: read the FULL traceback in the log at `log_path`
+   (`pre_ci_check.json` → `checks` → `ut`), map each failure to its
+   contract row, and verify EVERY call site in that family is updated —
+   grep the old symbol until zero references remain in `vllm_ascend/`
+   AND `tests/ut/`. Stopping with 2 of 9 call sites updated is the #1
+   reason a family persists across rounds. Re-analyze the upstream
+   definition if the failures don't fit your mapping (a wrong theory,
+   not a wrong edit).
+4. **Do not end the attempt with known-stale edits.** The next round only
+   re-runs pre_ci — walking in with a failure you could have diagnosed
+   from the full log burns a whole round. mypy/format violations stay
+   mechanical-only (no linter runs); fix them from the exact violation
+   lines.
 
 **E2E test failures**: open `round-N-result.json` → if `code_bugs_count` > 0,
 open failed tests from `suite_results[test_name]`. Read both `-summary.json`

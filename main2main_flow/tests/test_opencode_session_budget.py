@@ -3,8 +3,8 @@
 run 34018086282: attempt-1 burned 80min — a 60min total-timeout kill whose
 rc=-9 was then retried as a "hard failure" with a continue prompt, giving a
 second full session.  User requirement 2026-09-06: adapt/fix sessions must
-stay within ~20min — met by SKILL/lessons arrangement and the sanctioned
-ut_verify closure, NOT by a 20min kill.  The wall cap stays at its 60min
+stay within ~20min — met by SKILL/lessons arrangement, NOT by a 20min kill.
+The wall cap stays at its 60min
 runaway-backstop value; what this file pins is that a kill never triggers
 a retry (the mechanism that actually made the system unusable).
 """
