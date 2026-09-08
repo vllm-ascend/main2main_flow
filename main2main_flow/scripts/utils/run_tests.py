@@ -392,6 +392,107 @@ def _detect_cards(run_cmd) -> tuple[int, str]:
 
 
 # =============================================================================
+# NPU pool detection (flow initialize phase, moved out of the workflow)
+# =============================================================================
+
+# An idle chip holds ~3GB driver reserve; a foreign occupier showed ~62GB,
+# so 20GB separates the two with wide margin on both sides.
+NPU_FREE_HBM_MB = 20480
+
+
+class NpuProbeUnavailable(Exception):
+    """npu-smi or its execution channel is unavailable (not an NPU host)."""
+
+
+_NPU_SMI_PCI_RE = re.compile(r"[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-9A-Fa-f]")
+_NPU_SMI_HBM_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+
+
+def _parse_npu_smi(text: str) -> list[tuple[int, int, int]]:
+    """Parse `npu-smi info` into (chip, used_mb, total_mb) rows.
+
+    Only rows carrying a PCI bus address count; the 3rd field is the Phy-ID
+    (what ASCEND_RT_VISIBLE_DEVICES exposes) and the last "used / total" pair
+    on the row is HBM-Usage(MB).  npu-smi drops the space before the slash
+    for 5-digit values ("62265/ 65536"), so the separator regex tolerates both.
+    """
+    rows: list[tuple[int, int, int]] = []
+    for line in text.splitlines():
+        if not _NPU_SMI_PCI_RE.search(line):
+            continue
+        parts = line.split()
+        if len(parts) < 3 or not parts[2].isdigit():
+            continue
+        pairs = _NPU_SMI_HBM_RE.findall(line)
+        if not pairs:
+            continue
+        used, total = (int(v) for v in pairs[-1])
+        if total > 0:
+            rows.append((int(parts[2]), used, total))
+    rows.sort()
+    return rows
+
+
+def detect_free_npu_chips() -> tuple[list[int], int]:
+    """Free NPU chips by HBM usage (< NPU_FREE_HBM_MB in use), via npu-smi.
+
+    Probes where the e2e tests run: inside MAIN2MAIN_REMOTE_CONTAINER over
+    SSH when those env vars are set, otherwise locally.  Returns
+    (free_chip_ids, total_chip_count); raises NpuProbeUnavailable when there
+    is no probe channel, so callers can fall back to the /dev/davinci count.
+    """
+    host = os.getenv("MAIN2MAIN_REMOTE_HOST", "")
+    container = os.getenv("MAIN2MAIN_REMOTE_CONTAINER", "")
+    if host and container:
+        cq = shlex.quote(container)
+
+        def run_cmd(cmd):
+            return _ssh(host, f"docker exec {cq} sh -c {shlex.quote(cmd)}",
+                        capture_output=True, text=True)
+    else:
+        def run_cmd(cmd):
+            return subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
+    if run_cmd("command -v npu-smi").returncode != 0:
+        raise NpuProbeUnavailable("npu-smi not found")
+    result = run_cmd("npu-smi info")
+    if result.returncode != 0:
+        raise NpuProbeUnavailable(f"npu-smi info failed (exit {result.returncode})")
+    rows = _parse_npu_smi(result.stdout)
+    if not rows:
+        raise NpuProbeUnavailable("npu-smi info produced no parsable chip rows")
+    free = [chip for chip, used, _total in rows if used < NPU_FREE_HBM_MB]
+    return free, len(rows)
+
+
+def pin_free_npu_chips() -> None:
+    """Pin ASCEND_RT_VISIBLE_DEVICES to the HBM-free chips (flow initialize).
+
+    run_tests' _detect_cards reads that env as the physical device pool, and
+    every child process (warmup, e2e) inherits the restriction.  Zero free
+    chips is fatal (occupied chips cost 5 env_flakes in run 33944487577);
+    anything undetectable leaves scheduling to the existing fallbacks.
+    """
+    if os.getenv("SKIP_E2E_TEST", "").lower() == "true":
+        return
+    if os.getenv("ASCEND_RT_VISIBLE_DEVICES"):
+        ts_print("[init] ASCEND_RT_VISIBLE_DEVICES preset, keeping it")
+        return
+    try:
+        free, total = detect_free_npu_chips()
+    except NpuProbeUnavailable as exc:
+        ts_print(f"[init] NPU probe skipped: {exc}")
+        return
+    if total and not free:
+        ts_print("Error: all NPU chips are occupied by host-side/other-pod "
+                 "processes; the runner admin must clean the host", file=sys.stderr)
+        raise SystemExit(1)
+    if free:
+        os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(c) for c in free)
+        ts_print(f"[init] pinned ASCEND_RT_VISIBLE_DEVICES="
+                 f"{os.environ['ASCEND_RT_VISIBLE_DEVICES']} ({len(free)}/{total} chips free)")
+
+
+# =============================================================================
 # local env setup
 # =============================================================================
 

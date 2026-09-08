@@ -297,7 +297,7 @@ mypy 与 UT 在 `ThreadPoolExecutor(max_workers=2)` 中**并行执行**。UT 使
 
 `run_tests.py` 把每个 test 文件当作一个独立 suite 并行执行，按卡数贪心 bin-packing（first-fit decreasing），尽量将多个 suite 塞进同一轮次同时运行。每个 suite 分配到独立的设备 ID 范围，通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量隔离。不同轮次串行执行。调度细节：
 
-- **可用卡数探测**：启动时从 `ASCEND_RT_VISIBLE_DEVICES`（逗号列表）或 `/dev/davinci[0-9]*` 设备数量得出，卡数不足时自动降级调度
+- **可用卡数探测**：initialize 阶段 `pin_free_npu_chips()` 用 `npu-smi info` 按 HBM 占用（<20GB 视为空闲）把 `ASCEND_RT_VISIBLE_DEVICES` 钉到空闲 chip 上（远端机器走 SSH+docker 通道探测；全部 chip 被占则 fatal，探测不可用则跳过交给 fallback）；随后从该 env（逗号列表）或 `/dev/davinci[0-9]*` 设备数量得出卡数，卡数不足时自动降级调度
 - **pair-aligned 双 die 配对**（`MAIN2MAIN_PAIR_ALIGNED_DEVICES=1`，a3 机型）：每个 suite 按偶数槽位对齐分配（`need + (need & 1)`），单卡用例也占 2 个槽位，避免跨 die 干扰
 - **设备覆写用例私有轮**：源码中硬编码物理设备的 suite（运行时按 `RemoteEPDServer`/`RemotePDServer`/`ASCEND_RT_VISIBLE_DEVICES =` 模式自动检测，当前命中 `test_disaggregated_encoder.py` 与 `test_deepseek_v3_2_w8a8_pruning.py`）强制独占一轮，不与其他 suite 拼轮
 - **超时兜底**：每个 suite 受 `MAIN2MAIN_TEST_TIMEOUT`（默认 1800s）保护，超时被 kill 的失败归为 env flake 而非代码 bug；另有 `MAIN2MAIN_HANG_QUIET_S` 无输出早杀，防止挂死 suite 拖垮整轮

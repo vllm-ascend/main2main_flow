@@ -23,6 +23,7 @@ from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, reso
 from main2main_flow.scripts.utils.run_tests import (
     PASS_RESULTS,
     build_test_errors_detail,
+    pin_free_npu_chips,
     run_tests,
 )
 from main2main_flow.scripts.utils.commit_ref import run_update
@@ -530,6 +531,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         gitleaks_script = Path(self.state.vllm_ascend_path) / ".github/workflows/scripts/gitleaks.sh"
         if gitleaks_script.exists():
             gitleaks_script.chmod(0o755)
+
+        # NPU pool detection: pin ASCEND_RT_VISIBLE_DEVICES to the HBM-free
+        # chips before anything schedules onto them (moved out of the workflow).
+        pin_free_npu_chips()
 
         # Clone vllm-report knowledge base (shallow) for adapter context.
         # Non-fatal: if clone fails, adapter degrades to grep-based exploration.
