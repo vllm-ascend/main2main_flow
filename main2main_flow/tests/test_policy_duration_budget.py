@@ -13,7 +13,11 @@ User requirement 2026-09-08: revert to the proven 11-case base and add
 tests/e2e/pull_request/one_card/test_gumbel_sampling.py (12 cases) — PR CI
 on vllm-ascend PR 15966 caught a gumbel_sample contract break (upstream
 signature change, test file unadapted) that the 11-case selection could
-not see. The 2026-09-07 expansion to 18 cases is reverted.
+not see. The 2026-09-07 expansion to 18 cases is reverted, but its three
+most representative additions return — one per uncovered dimension, all
+reusing cached models and landing in existing round slack (ngram → spec
+decode, pause_resume → RLHF state machine, hccl_weight_transfer → weight
+sync): 15 cases, still 3 rounds, 10 spare slot-units.
 
 Durations vendored from vllm-ascend .github/workflows/scripts/test_config.yaml
 ``estimated_times`` (maintained by that repo's
@@ -39,9 +43,13 @@ _RECORDED_S = {
     # (PR 15966, 2026-09-08). 110s is the conservative stand-in until the
     # first e2e execution re-records it.
     "tests/e2e/pull_request/one_card/test_gumbel_sampling.py": 110,
+    "tests/e2e/pull_request/one_card/spec_decode/test_ngram.py": 170,
+    "tests/e2e/pull_request/one_card/rlhf/state_transitions/"
+    "test_pause_resume.py": 250,
     "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py": 120,
     "tests/e2e/pull_request/two_card/test_prefix_caching.py": 420,
     "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py": 230,
+    "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py": 130,
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py": 380,
     "tests/e2e/pull_request/four_card/test_graph_mode.py": 480,
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 20,
