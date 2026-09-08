@@ -9,6 +9,12 @@ User requirement 2026-09-07: the selection may grow as long as it still
 packs into at most 3 rounds — the pin below enforces the round cap while
 keeping every single round within the 20min per-round budget.
 
+User requirement 2026-09-08: revert to the proven 11-case base and add
+tests/e2e/pull_request/one_card/test_gumbel_sampling.py (12 cases) — PR CI
+on vllm-ascend PR 15966 caught a gumbel_sample contract break (upstream
+signature change, test file unadapted) that the 11-case selection could
+not see. The 2026-09-07 expansion to 18 cases is reverted.
+
 Durations vendored from vllm-ascend .github/workflows/scripts/test_config.yaml
 ``estimated_times`` (maintained by that repo's
 schedule_update_estimated_times workflow); snapshot taken 2026-09-07.
@@ -27,34 +33,34 @@ _RECORDED_S = {
     "tests/e2e/pull_request/one_card/test_sampler.py": 190,
     "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py": 400,
     "tests/e2e/pull_request/one_card/test_vlm.py": 890,
-    "tests/e2e/pull_request/one_card/spec_decode/test_ngram.py": 170,
-    "tests/e2e/pull_request/one_card/test_attention_fa3.py": 30,
-    "tests/e2e/pull_request/one_card/rlhf/state_transitions/"
-    "test_pause_resume.py": 250,
+    # No upstream e2e record for test_gumbel_sampling.py yet. The UT twin
+    # (tests/ut/sample/a2 in vllm-ascend's test_config.yaml) records 110s;
+    # PR CI observed 11s when every case died on instant TypeErrors
+    # (PR 15966, 2026-09-08). 110s is the conservative stand-in until the
+    # first e2e execution re-records it.
+    "tests/e2e/pull_request/one_card/test_gumbel_sampling.py": 110,
     "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py": 120,
     "tests/e2e/pull_request/two_card/test_prefix_caching.py": 420,
     "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py": 230,
-    "tests/e2e/pull_request/two_card/aclgraph/"
-    "test_aclgraph_capture_replay.py": 20,
-    "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py": 130,
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py": 380,
     "tests/e2e/pull_request/four_card/test_graph_mode.py": 480,
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 20,
     "tests/e2e/pull_request/four_card/test_pipeline_parallel.py": 690,
-    "tests/e2e/pull_request/four_card/rlhf/consistency/"
-    "test_batch_invariant_tp4.py": 210,
-    "tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py":
-        190,
 }
 
 _A3_CARDS = 16
 _BUDGET_S = 1200  # 20min per round
 _MAX_ROUNDS = 3
 
-# disaggregated_encoder's servers hardcode physical devices 0..N-1, so the
-# runtime scheduler gives it a private round; simulate that here (the pin
-# must count the round the same way run_tests will build it).
-_OVERRIDERS = {"tests/e2e/pull_request/two_card/test_disaggregated_encoder.py"}
+# disaggregated_encoder and deepseek_v3_2_w8a8_pruning both hardcode
+# physical devices 0..N-1 in their sources (Remote*Server /
+# ASCEND_RT_VISIBLE_DEVICES assignment), so the runtime scheduler gives
+# each a private round; simulate that here (the pin must count the rounds
+# the same way run_tests will build them).
+_OVERRIDERS = {
+    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py",
+    "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py",
+}
 
 
 def _allowlist() -> list[str]:

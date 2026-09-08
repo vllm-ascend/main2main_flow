@@ -4,20 +4,14 @@
     "tests/e2e/pull_request/one_card/test_sampler.py",
     "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py",
     "tests/e2e/pull_request/one_card/test_vlm.py",
-    "tests/e2e/pull_request/one_card/spec_decode/test_ngram.py",
-    "tests/e2e/pull_request/one_card/test_attention_fa3.py",
-    "tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py",
+    "tests/e2e/pull_request/one_card/test_gumbel_sampling.py",
     "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py",
     "tests/e2e/pull_request/two_card/test_prefix_caching.py",
     "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py",
-    "tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py",
-    "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py",
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py",
     "tests/e2e/pull_request/four_card/test_graph_mode.py",
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py",
-    "tests/e2e/pull_request/four_card/test_pipeline_parallel.py",
-    "tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py",
-    "tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py"
+    "tests/e2e/pull_request/four_card/test_pipeline_parallel.py"
   ],
   "blocklist": [
     "tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py",
