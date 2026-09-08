@@ -117,12 +117,18 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `GH_TOKEN` | GitHub PAT（CI 推送与 PR 创建必需） | — |
 | `PR_LABELS` | PR 标签，逗号分隔（默认 `ready-all`，与 PR CI 全量触发对齐） | `ready-all` |
 | `PR_DRAFT` | 是否创建 draft PR（默认 `true`） | `true` |
-| `MAIN2MAIN_MODEL` | opencode 模型（默认 `deepseek/deepseek-chat`）。按角色覆盖：`MAIN2MAIN_MODEL_ADAPT`、`MAIN2MAIN_MODEL_FIX`、`MAIN2MAIN_MODEL_REVIEW` | `deepseek/deepseek-chat` |
+| `MAIN2MAIN_MODEL` | opencode 模型（代码默认 `deepseek/deepseek-chat`，CI 用 `deepseek/deepseek-v4-flash`）。按角色覆盖：`MAIN2MAIN_MODEL_ADAPT`、`MAIN2MAIN_MODEL_FIX`、`MAIN2MAIN_MODEL_REVIEW` | `deepseek/deepseek-chat` |
 | `MAIN2MAIN_TIMEOUT_MIN` | opencode 总超时分钟（默认 30） | `30` |
 | `MAIN2MAIN_STALE_SEC` | opencode 输出静默超时秒（默认 300） | `300` |
 | `MAIN2MAIN_WORKSPACE` | workspace 根目录（默认 `<repo>/workspace`） | `<repo>/workspace` |
 | `MAIN2MAIN_TEST_CASES` | 空格分隔的测试用例列表 | — |
+| `MAIN2MAIN_LINE_BUDGET` / `MAIN2MAIN_COMMIT_BUDGET` | step 拆分阈值：effective 行数 / 每步 commit 数 | `2000` / `35` |
+| `MAIN2MAIN_TEST_TIMEOUT` | e2e 每 suite 耗时超时兜底（秒），超时 kill 归为 env flake | `1800` |
+| `MAIN2MAIN_PAIR_ALIGNED_DEVICES` | 设为 `1` 开启 a3 双 die 配对调度（suite 按偶数槽位对齐） | `0` |
+| `MAIN2MAIN_HANG_QUIET_S` | e2e 无输出早杀秒数，防止挂死 suite 拖垮整轮 | — |
+| `MAIN2MAIN_UT_VENV` | 持久 CPU-UT venv 目录（跨 attempt/step 复用） | `workspace/ut_venv` |
 | `MAIN2MAIN_KEEP_BRANCH` | 设为 `true` 时跳过 vllm-ascend setup 的 `git reset --hard origin/main`，复用既有分支做增量 | `false` |
+| `MAIN2MAIN_KEEP_BRANCHES` | push 后保留的旧 `main2main_auto_*` 分支数 | `3` |
 | `MAIN2MAIN_RUN_TESTS_REMOTE` | 在远程主机上执行 e2e（`user@host` 或 `env`） | — |
 | `MAIN2MAIN_REMOTE_HOST`、`MAIN2MAIN_REMOTE_CONTAINER` | SSH 主机和容器名，远程 e2e 用 | — |
 | `MAIN2MAIN_UT_SKIP_A2` | 设为 `true` 只跑 CPU-UT，跳过 A2 NPU UT batch | `false` |
@@ -135,12 +141,13 @@ SKIP_AI_ANALYSIS=true kickoff \
 
 整个 Flow 由 `Main2MainFlow` 类（`main2main_flow/flow.py`）驱动，节点顺序为：
 
-`initialize` → `_warmup_mega_moe` → `analyze_commit_and_plan_step` → `process_steps`（循环 `_ai_analysis` + `_run_e2e_test`，最多重试 3 次；全部成功后执行 `_final_quality_gate`）→ `generate_final_post` → `persist_lessons` → `push_to_github`
+`initialize` → `analyze_commit_and_plan_step` → `process_steps`（循环 `_ai_analysis` + `_run_e2e_test`；pre-CI + critic 循环最多 5 次 attempt，e2e 失败最多重试 3 轮）→ `_final_quality_gate`（只要完成 ≥1 步就执行，包括中途失败的 run；先回 `last_verified_commit` 再校验）→ `generate_final_post` → `persist_lessons` → `push_to_github`
 
-流程通过字符串信号传递控制权：`HasCommit`、`HasNoCommit`、`UpgradeCompleted`、`UpgradeFailed`，定义在 `scripts/utils/utils.py`。注意两个提前退出的分支：
+流程通过字符串信号传递控制权：`HasCommit`、`HasNoCommit`、`UpgradeCompleted`、`UpgradeFailed`，定义在 `scripts/utils/utils.py`。注意提前退出的分支：
 
 - `HasNoCommit`：上游没有需要适配的新 commit，直接结束，不创建 PR
 - **0 步完成**：`process_steps` 后若没有任何 step 通过 e2e（`current_step == 0`），不创建 PR（避免提交一个"失败描述 + 损坏 diff"的 PR），只生成 manual review issue
+- **质量门禁失败**：gate 的静态 fix（3 轮）或回归 e2e（4 次）预算耗尽仍不过时，同样不 push，改由 workflow 创建 manual review issue
 
 ![Flow 结构图](images/workflow.png)
 
@@ -202,7 +209,7 @@ vllm-ascend 用 `.github/vllm-main-verified.commit`（fallback 到 `docs/source/
 
 ### Step 3 — `process_steps`（核心循环）
 
-这是整个工作流的核心循环，对每个步骤依次执行 AI 适配和 e2e 测试。每步最多重试 3 次（AI 适配内部也有最多 3 次尝试）。循环体内部调用 `_ai_analysis` 和 `_run_e2e_test`。
+这是整个工作流的核心循环，对每个步骤依次执行 AI 适配和 e2e 测试：AI 适配的 pre-CI + critic 循环最多 5 次 attempt（有零进展提前收敛），e2e 失败最多重试 3 轮（`retry_count >= 3` 收敛为 revert + `UpgradeFailed`，且失败 suite 集合无改善时 stop-loss 提前止损）。循环体内部调用 `_ai_analysis` 和 `_run_e2e_test`。
 
 #### Step 3a — `_ai_analysis`
 
@@ -211,9 +218,9 @@ vllm-ascend 用 `.github/vllm-main-verified.commit`（fallback 到 `docs/source/
 1. `git checkout` vllm 到本步 `end_commit`，确保 AI agent 读取 vllm 源码时看到的是与 upstream patch 对应的版本
 2. 调用 `update_commit_reference.py`：扫描 vllm-ascend 仓库所有被 git 追踪的文件，将文件内容中出现的旧 commit SHA 批量替换为新 SHA（严格 40 位十六进制）。首轮（`retry_count == 0`）执行一次，重试轮次跳过
 
-**AI 适配循环**（最多 3 次 opencode 调用）：
+**AI 适配循环**（最多 5 次 attempt）：
 
-每次循环调用 `opencode run` 启动一个 AI agent，然后执行 pre-CI 校验。pre-CI 通过则退出循环，否则将校验错误日志反馈给下一轮 agent，以 `fix` 模式重新适配，最多 3 次。
+每次循环调用 `opencode run` 启动一个 AI agent，然后执行 pre-CI 校验与 critic review。通过则退出循环，否则将错误日志反馈给下一轮 agent 以 `fix` 模式重新适配。整个 pre-CI + critic 循环共享 5 次 attempt 预算（实测能把 30+ 个违规收敛到个位数，如 run 34078835752 的 34→30→5），并带零进展检测：fix 后 diff 无变化会立即判败，避免无效重试烧穿预算。
 
 **调用方式**：通过 `subprocess.Popen` 启动 `opencode run --format json --auto`，以 JSON 流式输出实时事件。超时控制：总超时默认 30 分钟（`MAIN2MAIN_TIMEOUT_MIN`），输出静默超时默认 5 分钟（`MAIN2MAIN_STALE_SEC`）。session 模式复用：同一 step 的 attempt 2/3 与 stale timeout 重试都复用同一 opencode session，不重发 reference 全文。
 
@@ -234,10 +241,10 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 - **temp_files**：检查工作区是否有 `.patch`、`.log`、`.jsonl`、`vllm_changes.md` 等临时文件
 - **broken_imports**：验证新增的 `from vllm.X import Y` 引用的模块在 vllm 源码树中存在；若在 `vllm_version_is` guard 内，自动补 `# type: ignore[import-not-found]`
 - **format**：跑快速格式检查（`_check_fast_format`），只报非自动修复类错误（ruff E501/F821/F841、codespell 等），过滤 gitleaks/shellcheck 环境噪声
-- **mypy**：`_check_mypy`（仅传入 `vllm_path` 时），单 main vllm 版本，lint 等价隔离 venv，3 个 python 版本各跑一遍
+- **mypy**：`_check_mypy`（仅传入 `vllm_path` 时），单 main vllm 树验证，lint 等价隔离 venv，3 个 python 版本（3.10/3.11/3.12）各跑一遍
 - **ut**：`_check_ut`（仅传入 `vllm_path` 时），单 main vllm 版本的 CPU-UT batch（见 Step 3c 的 UT 说明）
 
-UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行（单 main 版本），让类型/单测回归提前到每一步暴露；push 前的 final quality gate 会在最终累积 diff 上再统一执行一遍（见 Step 3c）。
+mypy 与 UT 在 `ThreadPoolExecutor(max_workers=2)` 中**并行执行**。UT 使用**持久 venv**（`MAIN2MAIN_UT_VENV`，默认 `workspace/ut_venv`），跨 attempt、跨 step 创建或复用（venv 内记录的 numpy spec 与本次从 triton-ascend 读到的 spec 一致才复用，否则重建）；完整 pytest 日志写 `ut_full.log`，`log_path`/`venv_python` 键随 `pre_ci_check.json` 输出。UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行（单 main 版本），让类型/单测回归提前到每一步暴露；push 前的 final quality gate 会在最终累积 diff 上再统一执行一遍（见 Step 3c）。
 
 校验结果写入 `workspace/steps/<step-id>/pre_ci_check.json`（每次尝试覆盖）。
 
@@ -279,14 +286,21 @@ UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行（单 main 版本
 
 #### 测试用例选择
 
-测试用例来源（合并去重）：
+测试用例来源（合并语义：并集去重，blocklist 最终生效）：
 1. `MAIN2MAIN_TEST_CASES` 环境变量（空格分隔）
 2. `main2main_flow/test_policy.json` 的 `allowlist`（总是包含）与 `blocklist`（总是排除）
-3. 若以上都为空，回退到按 `changed_files` 选择相关测试文件
+3. 若合并结果为空，回退到按 `changed_files` 自动选择相关测试文件
+
+当前 allowlist 固定 15 个用例（one_card 5 + spec decode/RLHF 各 1 + two_card 4 + four_card 4），blocklist 4 项（不稳定的超大模型用例与 dspark spec decoding）。用例集由 `tests/test_policy_duration_budget.py` 钉住（makespan pin）：每个用例必须带上游实测时长快照（`_RECORDED_S`，取自 vllm-ascend `test_config.yaml` 的 `estimated_times`），且整个集合满足两个硬约束——贪心调度不超过 **3 轮**、任一单用例时长不超过 **20 分钟**（1200s）。改选集必须同步更新 `_RECORDED_S` 快照并复算 makespan（CI 自动校验）。
 
 #### 测试调度
 
-`run_tests.py` 把每个 test 文件当作一个独立 suite 并行执行，按卡数贪心 bin-packing（first-fit decreasing），尽量将多个 suite 塞进同一轮次同时运行。每个 suite 分配到独立的设备 ID 范围，通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量隔离。不同轮次串行执行。
+`run_tests.py` 把每个 test 文件当作一个独立 suite 并行执行，按卡数贪心 bin-packing（first-fit decreasing），尽量将多个 suite 塞进同一轮次同时运行。每个 suite 分配到独立的设备 ID 范围，通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量隔离。不同轮次串行执行。调度细节：
+
+- **可用卡数探测**：启动时从 `ASCEND_RT_VISIBLE_DEVICES`（逗号列表）或 `/dev/davinci[0-9]*` 设备数量得出，卡数不足时自动降级调度
+- **pair-aligned 双 die 配对**（`MAIN2MAIN_PAIR_ALIGNED_DEVICES=1`，a3 机型）：每个 suite 按偶数槽位对齐分配（`need + (need & 1)`），单卡用例也占 2 个槽位，避免跨 die 干扰
+- **设备覆写用例私有轮**：源码中硬编码物理设备的 suite（运行时按 `RemoteEPDServer`/`RemotePDServer`/`ASCEND_RT_VISIBLE_DEVICES =` 模式自动检测，当前命中 `test_disaggregated_encoder.py` 与 `test_deepseek_v3_2_w8a8_pruning.py`）强制独占一轮，不与其他 suite 拼轮
+- **超时兜底**：每个 suite 受 `MAIN2MAIN_TEST_TIMEOUT`（默认 1800s）保护，超时被 kill 的失败归为 env flake 而非代码 bug；另有 `MAIN2MAIN_HANG_QUIET_S` 无输出早杀，防止挂死 suite 拖垮整轮
 
 每个 suite 的测试结果由 `ci_log_summary.py` 解析日志并分类：
 - `passed`：所有用例通过
@@ -312,6 +326,7 @@ UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行（单 main 版本
 | adapter 判定 no-op（无 vllm-ascend 代码改动，`is_noop=true` 且首轮） | 跳过本步 per-step e2e，直接 commit（verified.commit 推进），`current_step++` |
 | 测试通过 | `current_step++`，`retry_count` 重置为 0，进入下一步 |
 | 测试失败，`retry_count < 3` | `retry_count++`，以 fix 模式重新进入 `_ai_analysis` |
+| e2e stop-loss：fix 后失败 suite 集合与上一轮完全相同（未见收敛） | 直接止损 revert，不再消耗剩余重试轮（`flow.py` 的 `_last_e2e_blocking` 检查） |
 | 测试失败，`retry_count >= 3` | revert 损坏的改动，设置 `final_status = UpgradeFailed`，退出循环进入 `generate_final_post` |
 
 设置 `SKIP_E2E_TEST=true` 时，此方法直接返回 `True`（视为通过）。`_run_e2e_test` 的结果（含 `can_commit`/`ci_result`/逐 suite 摘要）写入 `tests/round-<n>-result.json`。
@@ -320,13 +335,20 @@ UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行（单 main 版本
 
 ### Step 3c — `_final_quality_gate`
 
-`process_steps` 全部步骤成功后、push 前执行的质量门禁，在**最终累计 diff** 上复刻 CI 的三个检查（format / mypy / UT），任何一项不过就进入 adapter fix 模式（最多 3 轮），每轮 fix 后重新确认。
+push 前执行的质量门禁。只要本 run 完成了 ≥1 步就会执行（包括后续步骤失败的中途 run），并且**先重新 checkout 到 `last_verified_commit`**——门禁验证的是"已通过步骤的累积状态"，而不是包含损坏改动的树。在**最终累计 diff** 上复刻 CI 的三个检查（format / mypy / UT）。
+
+两个预算相互独立：
+
+- **静态 fix 预算（3 轮）**：format/mypy/UT 失败进入 adapter fix 模式，每轮 fix 后重新确认（最后一轮的 fix 也会被复验——从未复验的 fix 与失败无法区分，run 31691299310 的教训）。静态检查按工作树 diff sha 记忆化：revert 后树与已通过版本字节一致时不再重跑
+- **回归 e2e 预算（4 次）**：当最后一步没有通过 per-step e2e（no-op 判定可能出错或 e2e 失败）时触发。首次失败先在同一棵树上重试一次（抖动的回归不应直接毁掉 gate 的修复成果，连续两次失败才证明是确定性的）
+
+检查内容与 pre-CI 一致：
 
 - **format**：跑完整 `bash format.sh`
 - **mypy**：`_check_mypy` 用 lint 等价的隔离 venv（`--system-site-packages` + 按 triton-ascend metadata 安装匹配的 numpy），单 **main 树**验证（3 个 python 版本各一遍）
-- **UT**：`_check_ut`（`ut_check.py`）跑 CPU-UT（全部 `tests/ut/*` 中 CPU 路由的用例），**单 main 版本**，每文件独立进程 + 假 npu-smi 注入（PATH 前置一个 `exit 1` 的 npu-smi 脚本，骗过 `tests/ut/conftest.py` 的 mock 检测），venv + 与 CI 一致的依赖，16 进程并行、每文件 300s 超时。A2 NPU UT 是单独 batch（`MAIN2MAIN_UT_SKIP_A2=true` 可跳过）。UT batch 内设置 `HF_HUB_OFFLINE=1` + `VLLM_USE_MODELSCOPE=True`，与 PR CI 的 cpu-0 runner 环境对齐
+- **UT**：`_check_ut`（`ut_check.py`）跑 CPU-UT（全部 `tests/ut/*` 中 CPU 路由的用例），**单 main 版本**，每文件独立进程 + 假 npu-smi 注入（PATH 前置一个 `exit 1` 的 npu-smi 脚本，骗过 `tests/ut/conftest.py` 的 mock 检测），持久 venv 复用（与 pre-CI 共享同一 `ut_venv`），每文件 300s 超时。A2 NPU UT 是单独 batch（`MAIN2MAIN_UT_SKIP_A2=true` 可跳过，`MAIN2MAIN_UT_GATE=0` 可整体去掉 gate 的 UT 检查）。UT batch 内设置 `HF_HUB_OFFLINE=1` + `VLLM_USE_MODELSCOPE=True`，与 PR CI 的 cpu-0 runner 环境对齐
 
-门禁失败进入 fix 模式时，错误详情（含 UT 失败用例的 traceback 摘要）通过 `error_logs` 喂给 adapter，修复后重新跑 e2e 回归确认没有破坏功能。
+门禁失败进入 fix 模式时，错误详情（含 UT 失败用例的 traceback 摘要）通过 `error_logs` 喂给 adapter，静态修复后重新跑 e2e 回归确认没有破坏功能。两个预算耗尽仍不过 → 不 push，由 workflow 创建 manual review issue。
 
 ### Step 4 — `generate_final_post`
 
@@ -344,6 +366,7 @@ UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行（单 main 版本
 push 之前把本 run 的适配经验沉淀回 vllm-report 的 lessons（clone 每次重建，不先写就会丢）：
 
 - 每步若经过 ≥1 轮 e2e fix（`retry_count >= 1`），调用 `submit_step_lesson` 记录该步的失败模式与最终修复
+- gate 静态修复成功后调用 `submit_gate_lesson` 记录门禁失败模式与修复；pre-CI 修复成功调用 `submit_pre_ci_lesson`；pre-CI 预算耗尽调用 `submit_pre_ci_exhausted_lesson`，让下次 run 避开同类死角
 - `persist_lessons` 汇总本 run 全部 lessons，写入 vllm-report `data/vllm-ascend/lessons/<date>.json` 并推送
 
 下次运行时 adapter 通过 `get_adaptation_lessons` 命中这些 lessons，避免重复踩坑。
@@ -352,7 +375,7 @@ push 之前把本 run 的适配经验沉淀回 vllm-report 的 lessons（clone �
 
 ### Step 5 — `push_to_github`
 
-仅在 `PUSH_TO_GITHUB=true` **且至少有 1 步成功**时执行（0 步完成时 `flow.run` 直接跳过 push）。否则打印提示后跳过。
+仅在 `PUSH_TO_GITHUB=true`、至少有 1 步成功、且 final quality gate 通过时执行（0 步完成或 gate 失败时 `flow.run` 直接跳过 push，由 workflow 创建 manual review issue）。否则打印提示后跳过。
 
 **执行流程**：
 
@@ -449,6 +472,7 @@ AI agent 在分析和适配过程中会参考项目内置的参考文档，这�
 | `adapter/reference/adaptation-patterns.md` | adapter | 12 类上游变更模式的适配指引（constructor signature、new attribute、method signature change 等） |
 | `adapter/reference/common-pitfalls.md` | adapter | 常见陷阱与修复（version guard 方向、import-not-found、[valid-type]、hit_length、Triton 参数、triton-ascend kernel 约束等）+ Additional QA-level checks + Fix mode workflow |
 | `adapter/reference/code-structure-guide.md` | adapter | vllm-ascend 子系统静态映射表，仅 step-1 注入，用于代码定位 |
+| `adapter/reference/upstream-contract-drift.md` | adapter | 上游契约漂移（接口改名/删除/变形）的标准适配套路：识别信号、读契约源头、建 old→new 映射、家族 grep、verify 循环（KV-Cache Layout Refactor 案例） |
 | `adapter-qa/SKILL.md` | adapter-qa | 独立 reviewer 任务规范、输出 `review.json` 的 JSON shape |
 | `adapter-qa/reference/review-lessons.md` | adapter-qa | Review 最佳实践 §1-8（带经典案例）+ §9 Pre-Submit Checklist |
 | `description-fill/SKILL.md` | description-fill | 只读分析 role：为 PR 描述中未被 step_summary 归属的文件补齐上游变更分析 |

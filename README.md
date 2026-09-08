@@ -8,10 +8,13 @@ drives that whole loop:
 
 - detect the commit gap, plan it into bite-sized steps (commit impact routed
   via the vllm-report knowledge base over MCP)
-- for every step, run an `opencode` AI agent to adapt the code, then a
-  deterministic pre-CI check and an independent critic review
-- run real NPU e2e tests, retry on failure (up to 3×); no-op steps skip e2e
+- for every step, run an `opencode` AI agent to adapt the code (pre-CI +
+  critic loop, up to 5 attempts), then real NPU e2e tests on a pinned
+  ≤3-round schedule (failure retries up to 3, plus a stop-loss when a fix
+  round leaves the blocking set unchanged); no-op steps skip e2e
 - a push-time quality gate re-runs format + mypy + CPU-UT on the final diff
+  (runs on every run that completed ≥1 step, including partial failures;
+  a gate failure blocks the push)
 - lessons from fix rounds are persisted back to vllm-report for future runs
 - then push a branch and open a PR (label `ready-all` triggers PR CI, whose
   failures are tracked back into vllm-report lessons — the full feedback loop
@@ -93,12 +96,23 @@ kickoff --vllm-path ... --vllm-ascend-path ...
 | `PUSH_TO_GITHUB` | open a PR after success | `false` |
 | `GITHUB_REPO` | PR target, `owner/name` | — |
 | `PR_LABELS` | labels for the created PR | `ready-all` |
-| `MAIN2MAIN_MODEL` | opencode model (per-role: `_ADAPT`/`_FIX`/`_REVIEW`) | `deepseek/deepseek-chat` |
+| `MAIN2MAIN_MODEL` | opencode model (per-role: `_ADAPT`/`_FIX`/`_REVIEW`) | `deepseek/deepseek-chat` (CI: `deepseek/deepseek-v4-flash`) |
 | `MAIN2MAIN_TIMEOUT_MIN` / `MAIN2MAIN_STALE_SEC` | opencode total / idle timeouts | `30` / `300` |
+| `MAIN2MAIN_LINE_BUDGET` / `MAIN2MAIN_COMMIT_BUDGET` | step-splitting caps (effective lines / commits per step) | `2000` / `35` |
+| `MAIN2MAIN_TEST_CASES` | extra e2e cases merged into the policy allowlist (space-separated) | — |
+| `MAIN2MAIN_TEST_TIMEOUT` | per-suite e2e timeout backstop (seconds) | `1800` |
+| `MAIN2MAIN_PAIR_ALIGNED_DEVICES` | pair-aligned scheduling for dual-die chips (a3) | `0` |
+| `MAIN2MAIN_HANG_QUIET_S` | e2e hang early-kill: seconds without log output | — |
 | `MAIN2MAIN_KEEP_BRANCH` | reuse the existing branch instead of resetting to `origin/main` | `false` |
+| `MAIN2MAIN_KEEP_BRANCHES` | old auto branches kept after a new PR | `3` |
 | `MAIN2MAIN_UT_SKIP_A2` | CPU-UT only, skip the A2 NPU UT batch | `false` |
+| `MAIN2MAIN_UT_VENV` | persistent CPU-UT venv dir (reused across attempts) | `workspace/ut_venv` |
+| `MAIN2MAIN_UT_GATE` | set `0` to drop UT from the quality gate | `1` |
+| `MAIN2MAIN_WORKSPACE` | workspace root | `<repo>/workspace` |
 | `MAIN2MAIN_REMOTE_HOST` | SSH host running the NPU container | — |
 | `MAIN2MAIN_REMOTE_CONTAINER` | Docker container name on that host | — |
+| `HEAD_FORK` | fork repo pushes go to (`owner/name`) | `vllm-ascend-ci/vllm-ascend` |
+| `PR_DRAFT` | create the PR as draft | `true` |
 
 ## Outputs
 
@@ -142,7 +156,7 @@ main2main_flow/
 ├── agents/                           # opencode agent SKILL.md + per-role reference
 │   ├── adapter/
 │   │   ├── SKILL.md                  #   adapt + fix prompt
-│   │   └── reference/                #   adaptation-patterns, common-pitfalls, code-structure
+│   │   └── reference/                #   adaptation-patterns, common-pitfalls, code-structure, upstream-contract-drift
 │   ├── adapter-qa/
 │   │   ├── SKILL.md                  #   independent reviewer prompt
 │   │   └── reference/                #   review-lessons.md
@@ -156,10 +170,10 @@ main2main_flow/
         ├── detect_commits.py
         ├── plan_steps.py
         ├── commit_ref.py             #   verified-commit reference replacement
-        ├── pre_ci_check.py           #   per-step checks (version/temp/imports/format)
+        ├── pre_ci_check.py           #   per-step checks (version/temp/imports/format, mypy ∥ UT)
         ├── final_quality_gate.py     #   push-time gate: format + mypy + UT
-        ├── ut_check.py               #   CPU-UT runner (per-file isolation)
-        ├── run_tests.py
+        ├── ut_check.py               #   CPU-UT runner (persistent shared venv, per-file process)
+        ├── run_tests.py              #   e2e scheduler/runner (bin-packing rounds, env-flake classification)
         ├── ci_log_summary.py
         ├── lessons.py                #   lesson submit/persist to vllm-report
         ├── track_pr_ci.py            #   PR CI result tracking (vllm-report step 10)
