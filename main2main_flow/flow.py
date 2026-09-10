@@ -403,7 +403,7 @@ class Main2MainFlow:
 Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
 DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
-        model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-v4-flash")
+        model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-flash")
 
         ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
         qa_log = Path(step_dir) / "opencode_qa.log"
@@ -562,9 +562,19 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # registering vllm-report MCP server.  opencode auto-reads this
             # config file from cwd, so the adapter can call vllm-report's
             # MCP tools (get_adaptation_guide, get_cross_project_mapping,
-            # search_analysis, etc.) on-demand during adaptation.
-            mcp_config = {
+            # search_analysis, etc.) on-demand during adaptation.  The
+            # provider block extends opencode's model catalog with
+            # deepseek-flash — models.dev does not list it yet, so without
+            # this entry `--model deepseek/deepseek-flash` fails to resolve.
+            opencode_config = {
                 "$schema": "https://opencode.ai/config.json",
+                "provider": {
+                    "deepseek": {
+                        "models": {
+                            "deepseek-flash": {}
+                        }
+                    }
+                },
                 "mcp": {
                     "vllm-report": {
                         "type": "local",
@@ -611,7 +621,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             else:
                 global_cfg = {}
             global_cfg.setdefault("mcp", {})
-            global_cfg["mcp"]["vllm-report"] = mcp_config["mcp"]["vllm-report"]
+            global_cfg["mcp"]["vllm-report"] = opencode_config["mcp"]["vllm-report"]
             global_cfg_path.write_text(
                 json.dumps(global_cfg, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
@@ -619,7 +629,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # Project root config (belt-and-suspenders + OPENCODE_CONFIG).
             opencode_config_path = Path(self.state.vllm_ascend_path) / "opencode.json"
             opencode_config_path.write_text(
-                json.dumps(mcp_config, indent=2) + "\n", encoding="utf-8"
+                json.dumps(opencode_config, indent=2) + "\n", encoding="utf-8"
             )
             # Set OPENCODE_CONFIG so opencode definitely reads this file
             # (opencode's custom-config path, highest precedence).

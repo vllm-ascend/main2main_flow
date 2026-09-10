@@ -48,7 +48,7 @@ _STALE_SECONDS = 300
 # (observed 26 min of non-event output in an adapter-qa session).
 _EVENT_STALE_SECONDS = 600
 _MAX_STALE_RETRIES = 3
-_DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-v4-flash")
+_DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-flash")
 
 # Per-file budget for inlining error_logs content into the prompt.  Kept
 # moderate: the prompt is re-processed on every tool call, so unbounded error

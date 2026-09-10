@@ -96,7 +96,7 @@ kickoff --vllm-path ... --vllm-ascend-path ...
 | `PUSH_TO_GITHUB` | open a PR after success | `false` |
 | `GITHUB_REPO` | PR target, `owner/name` | — |
 | `PR_LABELS` | labels for the created PR | `ready-all` |
-| `MAIN2MAIN_MODEL` | opencode model (per-role: `_ADAPT`/`_FIX`/`_REVIEW`) | `deepseek/deepseek-v4-flash` |
+| `MAIN2MAIN_MODEL` | opencode model (per-role: `_ADAPT`/`_FIX`/`_REVIEW`) | `deepseek/deepseek-flash` |
 | `MAIN2MAIN_TIMEOUT_MIN` / `MAIN2MAIN_STALE_SEC` | opencode total / idle timeouts | `30` / `300` |
 | `MAIN2MAIN_LINE_BUDGET` / `MAIN2MAIN_COMMIT_BUDGET` | step-splitting caps (effective lines / commits per step) | `2000` / `35` |
 | `MAIN2MAIN_TEST_CASES` | extra e2e cases merged into the policy allowlist (space-separated) | — |
