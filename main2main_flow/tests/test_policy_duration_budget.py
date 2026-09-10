@@ -19,9 +19,23 @@ reusing cached models and landing in existing round slack (ngram → spec
 decode, pause_resume → RLHF state machine, hccl_weight_transfer → weight
 sync): 15 cases, still 3 rounds, 10 spare slot-units.
 
+User requirement 2026-09-10: model_runner_v2 must be guarded — PR 16159's
+CI run (2026-09-09) broke on exactly the V2 path the selection never saw
+(`NPUModelRunner.execute_model() got an unexpected keyword argument
+'valid_dummy_state_slots'` in worker/v2 and _310p/worker/v2, plus
+`dspark.utils.get_pp_group` moving to pp_utils).  Two swaps, both trading
+the redundant half of a pair for its V2 twin: one_card/test_qwen3_0_6b.py
+→ one_card/model_runner_v2/test_uva.py (same Qwen3-0.6B model, V1 smoke →
+V2 runner), four_card/test_graph_mode.py → four_card/model_runner_v2/
+test_deepseek_v4.py (both four-card graph-bearing; V2 gains MTP/DSPARK/
+W4A8).  test_basic.py itself records 2650s upstream — over the 1200s
+per-case budget, so its nodes are unselectable and these two files are the
+guard.  Still 15 cases, 3 rounds, 10 spare slot-units.
+
 Durations vendored from vllm-ascend .github/workflows/scripts/test_config.yaml
 ``estimated_times`` (maintained by that repo's
-schedule_update_estimated_times workflow); snapshot taken 2026-09-07.
+schedule_update_estimated_times workflow); snapshot taken 2026-09-07,
+uva/deepseek_v4 entries 2026-09-10.
 Re-sync these numbers whenever the allowlist changes or upstream re-records.
 """
 import json
@@ -33,7 +47,6 @@ _POLICY = Path(__file__).parent.parent / "test_policy.json"
 
 # test path -> recorded seconds in vllm-ascend main-repo CI
 _RECORDED_S = {
-    "tests/e2e/pull_request/one_card/test_qwen3_0_6b.py": 220,
     "tests/e2e/pull_request/one_card/test_sampler.py": 190,
     "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py": 400,
     "tests/e2e/pull_request/one_card/test_vlm.py": 890,
@@ -44,6 +57,9 @@ _RECORDED_S = {
     # first e2e execution re-records it.
     "tests/e2e/pull_request/one_card/test_gumbel_sampling.py": 110,
     "tests/e2e/pull_request/one_card/spec_decode/test_ngram.py": 170,
+    # model_runner_v2 entries vendored 2026-09-10 from the same
+    # test_config.yaml estimated_times block.
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py": 80,
     "tests/e2e/pull_request/one_card/rlhf/state_transitions/"
     "test_pause_resume.py": 250,
     "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py": 120,
@@ -51,7 +67,7 @@ _RECORDED_S = {
     "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py": 230,
     "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py": 130,
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py": 380,
-    "tests/e2e/pull_request/four_card/test_graph_mode.py": 480,
+    "tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py": 520,
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 20,
     "tests/e2e/pull_request/four_card/test_pipeline_parallel.py": 690,
 }
