@@ -45,16 +45,39 @@ decode-logprob tolerance again in run 34437651018): it was already swapped
 out of the allowlist, upstream skip-lists it as precision-unstable, and
 the blocklist entry is what actually removes it from the effective
 selection when the union source is upstream's own main2main_tests.json.
-20 cases, 3 rounds
-(690/890/321s), 48/48 slot-units — the cap is now exact, the next case
-added must swap one out.
+That day the selection stood at 20 cases / 48 slot-units.
 
-Durations vendored from vllm-ascend .github/workflows/scripts/test_config.yaml
-``estimated_times`` (maintained by that repo's
-schedule_update_estimated_times workflow); snapshot taken 2026-09-07,
-uva/deepseek_v4 entries 2026-09-10, test_basic node entries 2026-09-10
-(green a2-1 run 34367387684).
-Re-sync these numbers whenever the allowlist changes or upstream re-records.
+User requirement 2026-09-10 (25min, later that day): the whole e2e phase
+must fit 25min.  The stale a2-based estimates were systematically wrong
+for a3-16 (deepseek_v4 est 520s vs 1046-1278s real; vlm est 890s vs 328s
+real), so every duration below was re-measured cold from set A of
+nv-action run 34465652074 (2026-09-10, 16/16 cards free) by diffing
+per-case pytest start/end timestamps.  Two levers, no round-cap change:
+- test_deepseek_v4.py as a whole file is the only boulder (warm 1046s,
+  cold 1278s — over the 25min budget alone).  Its two DSPARK params are
+  redundant twins, so the file enters as ONE node entry,
+  test_dspark_spec_decoding[default_full_and_piecewise-...] (401s): it
+  carries the DSPARK+W4A8+piecewise-cudagraph surface — exactly what the
+  V2 break above (dspark.utils.get_pp_group) lived on.  The V4-MTP node is
+  dropped (test_basic's mtp node guards the MTP mechanism on V2).  Being
+  4c it runs parallel to pipeline_parallel, hidden under its 501s.
+- test_ngram.py (V1 spec decode, 4 V2 spec nodes already guard the
+  mechanism) and test_gumbel_sampling.py (UT-guarded; sampler covers the
+  sampling surface) leave the selection — their 4 slot-units restore the
+  packing slack the dsv4 node split consumed.
+Upstream's own main2main_tests.json union also leaked two strays into the
+run (22 cases → 52 slot-units → an unwanted 4th round of gumbel+uva), so
+one_card/test_qwen3_0_6b.py and two_card/test_qwen3_vl_30b_a3b_instruct.py
+join the blocklist.  18 cases, 44/48 slot-units (4 spare — the next case
+added must swap one out), 3 rounds measured 1048s wall (17.5min).
+
+Durations are NOT the upstream test_config.yaml ``estimated_times`` — those
+are a2-based and proved systematically off for a3-16.  They are cold
+per-case measurements from nv-action run 34465652074 set A (2026-09-10,
+16 cards free); test_basic node entries from the green a2-1 PR-CI run
+34367387684 (2026-09-09, vllm@b2f68583).
+Re-sync these numbers whenever the allowlist changes or a fresh run
+re-measures.
 """
 import json
 from pathlib import Path
@@ -63,45 +86,44 @@ from main2main_flow.scripts.utils import run_tests as rt
 
 _POLICY = Path(__file__).parent.parent / "test_policy.json"
 
-# test path -> recorded seconds in vllm-ascend main-repo CI
+# test path -> recorded seconds.  Cold a3-16 measurements from nv-action
+# run 34465652074 set A (2026-09-10), except the test_basic nodes (green
+# a2-1 PR-CI run 34367387684, 2026-09-09).
 _RECORDED_S = {
-    "tests/e2e/pull_request/one_card/test_sampler.py": 190,
-    "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py": 400,
-    "tests/e2e/pull_request/one_card/test_vlm.py": 890,
-    # No upstream e2e record for test_gumbel_sampling.py yet. The UT twin
-    # (tests/ut/sample/a2 in vllm-ascend's test_config.yaml) records 110s;
-    # PR CI observed 11s when every case died on instant TypeErrors
-    # (PR 15966, 2026-09-08). 110s is the conservative stand-in until the
-    # first e2e execution re-records it.
-    "tests/e2e/pull_request/one_card/test_gumbel_sampling.py": 110,
-    "tests/e2e/pull_request/one_card/spec_decode/test_ngram.py": 170,
-    # model_runner_v2 entries vendored 2026-09-10 from the same
-    # test_config.yaml estimated_times block.
-    "tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py": 80,
+    "tests/e2e/pull_request/one_card/test_sampler.py": 107,
+    "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py": 171,
+    "tests/e2e/pull_request/one_card/test_vlm.py": 328,
+    "tests/e2e/pull_request/one_card/rlhf/state_transitions/"
+    "test_pause_resume.py": 144,
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py": 63,
     # test_basic.py node durations measured from green vllm-ascend a2-1
     # PR-CI run 34367387684 (2026-09-09, vllm@b2f68583): per-case engine
     # init timestamps diffed per parametrized case.  The file-level record
     # (2650s) exceeds the per-case budget, hence node-level selection.
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
-    "test_qwen3_dense_eager_mode": 321,
+    "test_qwen3_dense_eager_mode": 167,
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
-    "test_egale_spec_decoding": 521,
+    "test_egale_spec_decoding": 240,
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
-    "test_dflash_spec_decoding": 398,
+    "test_dflash_spec_decoding": 229,
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
-    "test_mtp_spec_decoding": 293,
+    "test_mtp_spec_decoding": 198,
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
-    "test_qwen3_dense_graph_mode": 573,
-    "tests/e2e/pull_request/one_card/rlhf/state_transitions/"
-    "test_pause_resume.py": 250,
-    "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py": 120,
-    "tests/e2e/pull_request/two_card/test_prefix_caching.py": 420,
-    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py": 230,
-    "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py": 130,
-    "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py": 380,
-    "tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py": 520,
-    "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 20,
-    "tests/e2e/pull_request/four_card/test_pipeline_parallel.py": 690,
+    "test_qwen3_dense_graph_mode": 376,
+    "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py": 93,
+    "tests/e2e/pull_request/two_card/test_prefix_caching.py": 363,
+    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py": 145,
+    "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py": 113,
+    "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py": 352,
+    # One DSPARK node of test_deepseek_v4.py: the two DSPARK params are
+    # redundant twins (full_decode_only vs default_full_and_piecewise), so
+    # only the piecewise one is selected — it carries DSPARK+W4A8+
+    # piecewise-cudagraph, the surface the 09-10 V2 break lived on.
+    "tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py::"
+    "test_dspark_spec_decoding[default_full_and_piecewise-False-1024-"
+    "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test]": 401,
+    "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 31,
+    "tests/e2e/pull_request/four_card/test_pipeline_parallel.py": 501,
 }
 
 _A3_CARDS = 16
