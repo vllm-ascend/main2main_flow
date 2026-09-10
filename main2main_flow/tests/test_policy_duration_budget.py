@@ -28,14 +28,26 @@ the redundant half of a pair for its V2 twin: one_card/test_qwen3_0_6b.py
 → one_card/model_runner_v2/test_uva.py (same Qwen3-0.6B model, V1 smoke →
 V2 runner), four_card/test_graph_mode.py → four_card/model_runner_v2/
 test_deepseek_v4.py (both four-card graph-bearing; V2 gains MTP/DSPARK/
-W4A8).  test_basic.py itself records 2650s upstream — over the 1200s
-per-case budget, so its nodes are unselectable and these two files are the
-guard.  Still 15 cases, 3 rounds, 10 spare slot-units.
+W4A8 — graph_mode is also skipped upstream as precision-unstable).
+
+User requirement 2026-09-10 (same day): test_basic.py must stay — it has
+historically caught the most regressions, so the whole file is selected at
+NODE granularity.  The file records 2650s upstream (over the 1200s
+per-case budget), but its five non-DSPARK nodes measure far under it;
+per-node seconds are taken from the green a2-1 run of vllm-ascend PR-CI
+run 34367387684 (2026-09-09, vllm@b2f68583) by diffing per-case engine
+init timestamps — the five nodes sum to 2106s, consistent with the file
+record (2444s incl. the blocked DSPARK node).  test_basic.py therefore
+enters the allowlist as five ``file::node`` entries; the file-level entry
+stays out and the DSPARK node stays blocked.  20 cases, 3 rounds
+(690/890/321s), 48/48 slot-units — the cap is now exact, the next case
+added must swap one out.
 
 Durations vendored from vllm-ascend .github/workflows/scripts/test_config.yaml
 ``estimated_times`` (maintained by that repo's
 schedule_update_estimated_times workflow); snapshot taken 2026-09-07,
-uva/deepseek_v4 entries 2026-09-10.
+uva/deepseek_v4 entries 2026-09-10, test_basic node entries 2026-09-10
+(green a2-1 run 34367387684).
 Re-sync these numbers whenever the allowlist changes or upstream re-records.
 """
 import json
@@ -60,6 +72,20 @@ _RECORDED_S = {
     # model_runner_v2 entries vendored 2026-09-10 from the same
     # test_config.yaml estimated_times block.
     "tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py": 80,
+    # test_basic.py node durations measured from green vllm-ascend a2-1
+    # PR-CI run 34367387684 (2026-09-09, vllm@b2f68583): per-case engine
+    # init timestamps diffed per parametrized case.  The file-level record
+    # (2650s) exceeds the per-case budget, hence node-level selection.
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
+    "test_qwen3_dense_eager_mode": 321,
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
+    "test_egale_spec_decoding": 521,
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
+    "test_dflash_spec_decoding": 398,
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
+    "test_mtp_spec_decoding": 293,
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
+    "test_qwen3_dense_graph_mode": 573,
     "tests/e2e/pull_request/one_card/rlhf/state_transitions/"
     "test_pause_resume.py": 250,
     "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py": 120,
