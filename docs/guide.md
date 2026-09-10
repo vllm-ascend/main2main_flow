@@ -117,7 +117,7 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `GH_TOKEN` | GitHub PAT（CI 推送与 PR 创建必需） | — |
 | `PR_LABELS` | PR 标签，逗号分隔（默认 `ready-all`，与 PR CI 全量触发对齐） | `ready-all` |
 | `PR_DRAFT` | 是否创建 draft PR（默认 `true`） | `true` |
-| `MAIN2MAIN_MODEL` | opencode 模型（代码默认 `deepseek/deepseek-chat`，CI 用 `deepseek/deepseek-v4-flash`）。按角色覆盖：`MAIN2MAIN_MODEL_ADAPT`、`MAIN2MAIN_MODEL_FIX`、`MAIN2MAIN_MODEL_REVIEW` | `deepseek/deepseek-chat` |
+| `MAIN2MAIN_MODEL` | opencode 模型。按角色覆盖：`MAIN2MAIN_MODEL_ADAPT`、`MAIN2MAIN_MODEL_FIX`、`MAIN2MAIN_MODEL_REVIEW` | `deepseek/deepseek-v4-flash` |
 | `MAIN2MAIN_TIMEOUT_MIN` | opencode 总超时分钟（默认 30） | `30` |
 | `MAIN2MAIN_STALE_SEC` | opencode 输出静默超时秒（默认 300） | `300` |
 | `MAIN2MAIN_WORKSPACE` | workspace 根目录（默认 `<repo>/workspace`） | `<repo>/workspace` |

@@ -48,7 +48,7 @@ _STALE_SECONDS = 300
 # (observed 26 min of non-event output in an adapter-qa session).
 _EVENT_STALE_SECONDS = 600
 _MAX_STALE_RETRIES = 3
-_DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
+_DEFAULT_MODEL = os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-v4-flash")
 
 # Per-file budget for inlining error_logs content into the prompt.  Kept
 # moderate: the prompt is re-processed on every tool call, so unbounded error
@@ -64,9 +64,9 @@ _ERROR_INLINE_HEAD_FRAC = 0.6
 
 # Per-role model overrides.  The analysis/fix roles do mechanical routing
 # (read diff, map symbols, edit) where deep per-call reasoning is not
-# needed — a non-thinking model (deepseek-chat, reasoning:false) cuts the
-# adapter phase from 30+ min to minutes.  The review role keeps the
-# thinking model (its adversarial judgment benefits from deep reasoning).
+# needed — a non-thinking model (reasoning:false) cuts the adapter phase
+# from 30+ min to minutes.  The review role keeps the thinking model (its
+# adversarial judgment benefits from deep reasoning).
 _ROLE_MODEL_ENVS = {
     "adapter": "MAIN2MAIN_MODEL_ADAPT",
     "adapter-fix": "MAIN2MAIN_MODEL_FIX",

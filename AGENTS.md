@@ -72,7 +72,7 @@ skips the A2 NPU batch, `MAIN2MAIN_UT_GATE=0` disables UT in the gate.
 | `SKIP_E2E_TEST=true` | `_run_e2e_test` returns True without touching NPU. |
 | `PUSH_TO_GITHUB=true` + `GITHUB_REPO=owner/name` | Enables `push_to_github`; requires `gh` logged in. |
 | `HEAD_FORK=org/name` | Fork repo to push to (default: `vllm-ascend-ci/vllm-ascend`). |
-| `MAIN2MAIN_MODEL=provider/model` | opencode model (default: `deepseek/deepseek-chat`). Per-role overrides: `MAIN2MAIN_MODEL_ADAPT`, `MAIN2MAIN_MODEL_FIX`, `MAIN2MAIN_MODEL_REVIEW`. |
+| `MAIN2MAIN_MODEL=provider/model` | opencode model (default: `deepseek/deepseek-v4-flash`). Per-role overrides: `MAIN2MAIN_MODEL_ADAPT`, `MAIN2MAIN_MODEL_FIX`, `MAIN2MAIN_MODEL_REVIEW`. |
 | `MAIN2MAIN_TIMEOUT_MIN` | opencode total timeout minutes (default: 30). |
 | `MAIN2MAIN_STALE_SEC` | opencode stale timeout seconds (default: 300). |
 | `MAIN2MAIN_WORKSPACE` | Workspace root directory (default: `<repo>/workspace`). |

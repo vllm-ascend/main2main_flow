@@ -403,7 +403,7 @@ class Main2MainFlow:
 Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
 DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
-        model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-chat")
+        model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-v4-flash")
 
         ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
         qa_log = Path(step_dir) / "opencode_qa.log"
