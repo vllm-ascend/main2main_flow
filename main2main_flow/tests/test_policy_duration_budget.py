@@ -39,7 +39,13 @@ run 34367387684 (2026-09-09, vllm@b2f68583) by diffing per-case engine
 init timestamps — the five nodes sum to 2106s, consistent with the file
 record (2444s incl. the blocked DSPARK node).  test_basic.py therefore
 enters the allowlist as five ``file::node`` entries; the file-level entry
-stays out and the DSPARK node stays blocked.  20 cases, 3 rounds
+stays out and the DSPARK node stays blocked.  test_graph_mode.py joins the
+blocklist the same day (user decision after its aclgraph cases failed the
+decode-logprob tolerance again in run 34437651018): it was already swapped
+out of the allowlist, upstream skip-lists it as precision-unstable, and
+the blocklist entry is what actually removes it from the effective
+selection when the union source is upstream's own main2main_tests.json.
+20 cases, 3 rounds
 (690/890/321s), 48/48 slot-units — the cap is now exact, the next case
 added must swap one out.
 
