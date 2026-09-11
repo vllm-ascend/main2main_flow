@@ -131,8 +131,9 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `MAIN2MAIN_KEEP_BRANCHES` | push 后保留的旧 `main2main_auto_*` 分支数 | `3` |
 | `MAIN2MAIN_RUN_TESTS_REMOTE` | 在远程主机上执行 e2e（`user@host` 或 `env`） | — |
 | `MAIN2MAIN_REMOTE_HOST`、`MAIN2MAIN_REMOTE_CONTAINER` | SSH 主机和容器名，远程 e2e 用 | — |
-| `MAIN2MAIN_UT_SKIP_A2` | 设为 `true` 只跑 CPU-UT，跳过 A2 NPU UT batch | `false` |
 | `MAIN2MAIN_UT_GATE` | 设为 `0` 跳过质量门禁中的 UT 检查（仅 format + mypy） | `1` |
+| `MAIN2MAIN_RELEASE_GATE` | 设为 `0` 跳过所有 release-lane 校验（pre-CI/gate 不使用 release worktree；worktree 本身仍会构建） | `1` |
+| `MAIN2MAIN_RELEASE_UT_BASELINE` | 设为 `0` 关闭 `release_ut_baseline.json` allowlist——release-lane UT 失败将阻塞 push | `1` |
 | `SKIP_TRACK_PR_CI` | 跳过 vllm-report `daily_refresh.sh` 的 step 10（PR CI 追踪，见下文生态闭环） | `false` |
 
 ---
@@ -239,12 +240,14 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 
 - **version_strings**：扫描本次 `git diff upstream/main` 中新增的行，找出 `vllm_version_is("...")` 调用，检查版本号是否与 `release_tag` 一致
 - **temp_files**：检查工作区是否有 `.patch`、`.log`、`.jsonl`、`vllm_changes.md` 等临时文件
-- **broken_imports**：验证新增的 `from vllm.X import Y` 引用的模块在 vllm 源码树中存在；若在 `vllm_version_is` guard 内，自动补 `# type: ignore[import-not-found]`
-- **format**：跑快速格式检查（`_check_fast_format`），只报非自动修复类错误（ruff E501/F821/F841、codespell 等），过滤 gitleaks/shellcheck 环境噪声
-- **mypy**：`_check_mypy`（仅传入 `vllm_path` 时），单 main vllm 树验证，lint 等价隔离 venv，3 个 python 版本（3.10/3.11/3.12）各跑一遍
-- **ut**：`_check_ut`（仅传入 `vllm_path` 时），单 main vllm 版本的 CPU-UT batch（见 Step 3c 的 UT 说明）
+- **broken_imports**：验证新增的 `from vllm.X import Y` 引用的模块在 vllm 源码树中存在；若在 `vllm_version_is` guard 内，自动补 `# type: ignore[import-not-found]`。提供 release worktree 时再做**符号级检查**：未 guard 的新 import 其符号必须同时存在于 pinned release 树（缺失即报 `symbol 'Y' not found in the pinned release vllm tree`——unguarded import 会让 release lane 在 import 时崩溃）
+- **format**：跑 `format.sh`（`_check_format`），只报非自动修复类错误（ruff E501/F821/F841、codespell 等），过滤 gitleaks/shellcheck 环境噪声；失败后重跑一次区分"自动修复后已干净"与"真实残留"
+- **mypy**：`_check_mypy`（仅传入 `vllm_path` 时），lint 等价隔离 venv，main 树跑 3 个 python 版本（3.10/3.11/3.12）；提供 release worktree（`vllm_release_path`，由 flow 构建 pinned release tag 的 `workspace/repos/vllm-release`）时**追加 release 树 pass（仅 3.10）**——同一 call site main 树干净、release 树报 `Missing positional argument` 正是 dataclass 契约漂移的特征（PR #16296 类失败可静态抓住）
+- **ut**：`_check_ut`（仅传入 `vllm_path` 时），main vllm 版本的 CPU-UT batch（见 Step 3c 的 UT 说明；release 批仅在 final gate 跑，pre-CI 不跑）
 
-mypy 与 UT 在 `ThreadPoolExecutor(max_workers=2)` 中**并行执行**。UT 使用**持久 venv**（`MAIN2MAIN_UT_VENV`，默认 `workspace/ut_venv`），跨 attempt、跨 step 创建或复用（venv 内记录的 numpy spec 与本次从 triton-ascend 读到的 spec 一致才复用，否则重建）；完整 pytest 日志写 `ut_full.log`，`log_path`/`venv_python` 键随 `pre_ci_check.json` 输出。UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行（单 main 版本），让类型/单测回归提前到每一步暴露；push 前的 final quality gate 会在最终累积 diff 上再统一执行一遍（见 Step 3c）。
+mypy 与 UT 在 `ThreadPoolExecutor(max_workers=2)` 中**并行执行**（release mypy pass 在 mypy worker 内串行追加，峰值资源不变）。UT 使用**持久 venv**（`MAIN2MAIN_UT_VENV`，默认 `workspace/ut_venv`），跨 attempt、跨 step 创建或复用（venv 内记录的 numpy spec 与本次从 triton-ascend 读到的 spec 一致才复用，否则重建）；完整 pytest 日志写 `ut_full.log`，`log_path`/`venv_python` 键随 `pre_ci_check.json` 输出。UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行，让类型/单测回归提前到每一步暴露；push 前的 final quality gate 会在最终累积 diff 上再统一执行一遍（见 Step 3c）。
+
+release worktree 缺失（构建失败或 `MAIN2MAIN_RELEASE_GATE=0`）时，`run_check` 输出一条 `release_lane` 伪 check（`skipped: true`，detail 说明原因）——缺席有记录、永不 fail step。
 
 校验结果写入 `workspace/steps/<step-id>/pre_ci_check.json`（每次尝试覆盖）。
 
@@ -345,8 +348,10 @@ push 前执行的质量门禁。只要本 run 完成了 ≥1 步就会执行（�
 检查内容与 pre-CI 一致：
 
 - **format**：跑完整 `bash format.sh`
-- **mypy**：`_check_mypy` 用 lint 等价的隔离 venv（`--system-site-packages` + 按 triton-ascend metadata 安装匹配的 numpy），单 **main 树**验证（3 个 python 版本各一遍）
-- **UT**：`_check_ut`（`ut_check.py`）跑 CPU-UT（全部 `tests/ut/*` 中 CPU 路由的用例），**单 main 版本**，每文件独立进程 + 假 npu-smi 注入（PATH 前置一个 `exit 1` 的 npu-smi 脚本，骗过 `tests/ut/conftest.py` 的 mock 检测），持久 venv 复用（与 pre-CI 共享同一 `ut_venv`），每文件 300s 超时。A2 NPU UT 是单独 batch（`MAIN2MAIN_UT_SKIP_A2=true` 可跳过，`MAIN2MAIN_UT_GATE=0` 可整体去掉 gate 的 UT 检查）。UT batch 内设置 `HF_HUB_OFFLINE=1` + `VLLM_USE_MODELSCOPE=True`，与 PR CI 的 cpu-0 runner 环境对齐
+- **mypy**：`_check_mypy` 用 lint 等价的隔离 venv（`--system-site-packages` + 按 triton-ascend metadata 安装匹配的 numpy），main 树 3 个 python 版本各一遍；提供 release worktree 时追加 release 树 pass（仅 3.10），与 pre-CI 双树一致
+- **UT**：`_check_ut`（`ut_check.py`）跑 CPU-UT（全部 `tests/ut/*` 中 CPU 路由的用例），**两个 batch**：main 树 batch + release worktree batch（`VLLM_VERSION=<tag>` 强制 release guard 按 CI release leg 的方式解析；`-k` 额外排除 `test_vllm_version_is`——该用例用 mock env 测 fallback，真设 VLLM_VERSION 必挂）。release 批失败项若命中 `scripts/utils/release_ut_baseline.json` 的 node ID 则**不阻塞**（计数写进 detail、完整日志仍落 `ut_full.log`）；`MAIN2MAIN_RELEASE_UT_BASELINE=0` 关闭 allowlist。每文件独立进程 + 假 npu-smi 注入（PATH 前置一个 `exit 1` 的 npu-smi 脚本，骗过 `tests/ut/conftest.py` 的 mock 检测），持久 venv 复用（与 pre-CI 共享同一 `ut_venv`），每文件 300s 超时。UT batch 内设置 `HF_HUB_OFFLINE=1` + `VLLM_USE_MODELSCOPE=True`，与 PR CI 的 cpu-0 runner 环境对齐。`MAIN2MAIN_UT_GATE=0` 可整体去掉 gate 的 UT 检查
+
+release-lane 失败的价值：vllm-ascend PR CI 的 mypy/cpu-ut 只跑 main pin，release leg 只有 e2e——release 侧的 dataclass 契约漂移（如 PR #16296 的 `InputBatch.max_seq_len_np`）以前只能等昂贵的 e2e 矩阵暴露，现在 release mypy pass + release UT batch 在 push 前静态/廉价地抓住。
 
 门禁失败进入 fix 模式时，错误详情（含 UT 失败用例的 traceback 摘要）通过 `error_logs` 喂给 adapter，静态修复后重新跑 e2e 回归确认没有破坏功能。两个预算耗尽仍不过 → 不 push，由 workflow 创建 manual review issue。
 
@@ -409,7 +414,7 @@ main2main run → adapter 适配 → push PR → PR CI（ready-all 触发全量�
                         下次 adapter 调 get_adaptation_lessons → 命中 → 一次做对
 ```
 
-- **step 10 / track_pr_ci**：`gh` 搜索标题含 "adapt to vLLM main" 的 PR，拉取 CI check 结果，对失败 check 从日志提取最深异常（TypeError/ImportError/AttributeError/RuntimeError 等），写 JSON；支持 `--skip-track-pr-ci` 跳过。**去重**：已分析且 CI 结论未变的 PR 复用旧记录（`already_analyzed: true`），跳过日志拉取，把 5 分钟缩短到 ~1 分钟
+- **step 10 / track_pr_ci**：`gh` 搜索标题含 "adapt to vLLM main" 的 PR，拉取 CI check 结果，对失败 check 从日志提取最深异常（TypeError/ImportError/AttributeError/RuntimeError 等），写 JSON；支持 `--skip-track-pr-ci` 跳过。**lane 分类**：每个 check 按名称归入 vllm lane（`vllm@<40-hex>` = main pin、`vllm@vX.Y.Z` = release tag），record 带 `ci_class`（release-only/main/both/none）——release-only 失败指向 pinned-release 适配缺口（PR #16296 形态）而非主 lane 适配错误；checks 为空且 `mergeStateStatus=CONFLICTING` 记为 `blocked-conflicting`（无 merge ref，e2e 从未运行）而非无信号的 unknown。**去重**：已分析且 CI 结论与 lane 分类均未变的 PR 复用旧记录（`already_analyzed: true`），跳过日志拉取，把 5 分钟缩短到 ~1 分钟
 - **lesson 命中**：adapter 的 MCP 调用是"经验复用 → 新教训 → 再复用"循环的关键一环。本仓库 `main2main_flow/scripts/utils/track_pr_ci.py` 与 vllm-report 的版本保持同步，方便在本仓库内维护/测试
 
 ---
@@ -429,6 +434,7 @@ workspace/
 ├── repos/                                # 自动 clone 的仓库（仅在传入 GitHub URL 时存在）
 │   ├── vllm/
 │   ├── vllm-ascend/
+│   ├── vllm-release/                     # pinned release tag 的 worktree（release-lane mypy/UT 校验用；initialize 时从 `.github/vllm-release-tag.commit` 构建）
 │   └── vllm-report/                      # 知识库 + MCP server（每次运行重新 clone）
 ├── quality_gate/                         # final quality gate 产物（final_gate.patch 等）
 └── steps/

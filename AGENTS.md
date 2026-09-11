@@ -28,8 +28,9 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
   - `utils.py` — filename constants, git helpers, `ts_print`
   - `detect_commits.py`, `plan_steps.py` — commit detection and planning (impact routing via vllm-report MCP `get_commit_impact_batch`)
   - `commit_ref.py` — replace the pinned verified-commit SHA across tracked vllm-ascend files
-  - `pre_ci_check.py` — per-step: version strings, temp files, broken imports (module + symbol against the pinned release tree), fast format
-  - `final_quality_gate.py` — push-time gate: full format + mypy (venv-isolated, numpy aligned to lint image, run against both pinned release tree and main tree) + CPU-UT (`ut_check.py`, per-file isolation with fake npu-smi)
+  - `pre_ci_check.py` — per-step: version strings, temp files, format, broken imports (module + symbol against BOTH vllm trees: main + pinned release worktree), mypy (main 3.10/3.11/3.12 + release 3.10), CPU-UT (main batch); a missing release worktree emits a skipped `release_lane` entry instead of failing
+  - `final_quality_gate.py` — push-time gate: format + mypy (both vllm trees) + CPU-UT (`ut_check.py`, main batch + release batch with `VLLM_VERSION=<tag>`, known-failure baseline allowlist; per-file isolation with fake npu-smi)
+  - `release_ut_baseline.json` — CPU-UT node IDs known to fail on the release lane independent of the current adaptation (never block; `MAIN2MAIN_RELEASE_UT_BASELINE=0` shows all)
   - `run_tests.py` — e2e test runner with parallel scheduling
   - `push_to_github.py` — push branch + create PR + add labels
   - `ci_log_summary.py` — test log parsing
@@ -54,15 +55,17 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
 
 Inside `_ai_analysis`, the attempt loop (up to 3×):
 1. **adapter** (role=adapter) — generates adaptations, consults vllm-report via MCP
-2. `run_check` — per-step pre-CI: version_strings, temp_files, broken_imports, fast format
+2. `run_check` — per-step pre-CI: version_strings, temp_files, broken_imports, format, and (when a vllm checkout is available) mypy + CPU-UT
 3. **adapter-qa** — independent AI review (separate opencode session, no generator context)
 4. All pass → break. Any fail → retry with **adapter-fix** (role=adapter-fix, with error_logs inlined).
 
-format + mypy + UT are NOT run per-step - they run once at push time in the
-final quality gate (`final_quality_gate.py`), which fixes failures via
-adapter-fix (max 3 rounds) and re-runs e2e to confirm no regression. UT is
-CPU-only by default (`_check_ut`, per-file isolation); `MAIN2MAIN_UT_SKIP_A2`
-skips the A2 NPU batch, `MAIN2MAIN_UT_GATE=0` disables UT in the gate.
+The same checks re-run once at push time in the final quality gate
+(`final_quality_gate.py`) on the CUMULATIVE diff, fixing failures via
+adapter-fix (max 3 rounds) and re-running e2e to confirm no regression.
+The gate's UT runs TWO batches: main tree, plus the pinned release worktree
+with `VLLM_VERSION=<tag>` (release-lane failures matching
+`release_ut_baseline.json` never block).  `MAIN2MAIN_UT_GATE=0` disables UT
+in the gate.
 
 ## Env flags worth knowing
 
@@ -80,8 +83,9 @@ skips the A2 NPU batch, `MAIN2MAIN_UT_GATE=0` disables UT in the gate.
 | `MAIN2MAIN_KEEP_BRANCH` | Skip `git reset --hard origin/main` in vllm-ascend setup. |
 | `PR_LABELS` | Comma-separated labels for created PR (default: `ready-all`). |
 | `PR_DRAFT` | Create draft PR (default: `true`). |
-| `MAIN2MAIN_UT_SKIP_A2` | CPU-UT only, skip the A2 NPU UT batch (default: `false`). |
 | `MAIN2MAIN_UT_GATE` | `0` disables UT in the final quality gate (default: `1`). |
+| `MAIN2MAIN_RELEASE_GATE` | `0` skips all release-lane validation: no release worktree use in pre_ci/gate (default: `1`; the worktree is still built). |
+| `MAIN2MAIN_RELEASE_UT_BASELINE` | `0` disables the `release_ut_baseline.json` allowlist — release-lane UT failures then block (default: `1`). |
 | `MAIN2MAIN_RUN_TESTS_REMOTE` | Run tests on a remote host via SSH (`user@host` or `env`). |
 | `MAIN2MAIN_REMOTE_HOST`, `MAIN2MAIN_REMOTE_CONTAINER` | SSH host and container for remote e2e tests. |
 
