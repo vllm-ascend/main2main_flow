@@ -18,6 +18,7 @@ the round budget (run 33976675052 step-1: 41 → 8 → 9 UT failures over
 | §5 Fix top-down | editing | 75-84 |
 | §6 Close the loop from evidence | after each edit batch | 85-101 |
 | §7 Worked example | you want to see the whole playbook applied | 102-118 |
+| §8 Release-lane dataclass field drift | release lane: `TypeError: __init__() missing N required positional argument(s)` (main green) | 119-end |
 
 ## 1. Recognition signals
 
@@ -116,3 +117,30 @@ definitions upstream → §3 the 3-row table above → §4 one `rg` per old
 symbol over `vllm_ascend/ tests/ut/` (~9 files total) → §5 definitions,
 then constructors, then call sites, then mocks → §6 zero-reference grep
 per old symbol. Convergence in 1-2 rounds.
+
+## 8. Release-lane dataclass field drift
+
+Trigger: the release lane fails with
+`TypeError: __init__() missing N required positional argument(s): '<field>'`
+(e2e) or `Missing positional argument "<field>" ... [call-arg]` (the
+release mypy pass), while the main lane is green.  The vllm-ascend
+subclass already carries SOME compat fields for this class — the error is
+the ONE you haven't heard of yet, and it is never alone.
+
+Playbook (this is §3/§4 specialized to dataclasses):
+
+1. Read the base dataclass in BOTH trees — the pinned release worktree
+   (label `release(...)` in mypy details) and the main checkout.  Diff the
+   field lists, including which fields lack defaults.
+2. Grep the release tree for the base class's required fields — there is
+   NEVER just one drifted field; upstream adds them in batches
+   (`max_seq_len_np` came with siblings).  Map every field that differs.
+3. Fix by the SUBCLASS pattern: the vllm-ascend subclass owns each compat
+   field as `field(default=None, kw_only=True)` and every construction
+   site passes it by name.  See `common-pitfalls.md` §"Dual-version
+   dataclass fields" for the full four-axis matrix and the three rejected
+   patterns (plain subclass default = release-tree import-time TypeError;
+   inline conditional kwargs = main mypy; runtime kwargs dict = AST
+   structure tests).
+4. Do NOT write the fix against one direction ("release added it") —
+   verify both trees and keep the write direction-symmetric.

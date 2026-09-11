@@ -31,6 +31,7 @@ Lines are relative to this file; read a section with `sed -n 'A,Bp' <this file>`
 | `device_index` must be explicit | NPU device APIs in version-guarded branches | 453-474 |
 | Variable name shadowing | `AttributeError`/wrong-type errors at a call site | 475-498 |
 | mypy error codes (final gate) | final quality gate mypy failures, fix per `[code]` | 499-530 |
+| Dual-version dataclass fields | release-only `TypeError: __init__() missing N required positional argument(s)` or release mypy `[call-arg]`, main green | 531-end |
 
 ## Version guard direction is inverted
 
@@ -527,4 +528,52 @@ Fix per-code:
 **Common pattern**: `[override]` on a subclass method usually means upstream
 changed the base class signature - grep for ALL overrides of that method
 and update every one (see §"Missing override in sibling class").
+
+## Dual-version dataclass fields
+
+**Symptom**: release lane crashes with `TypeError: __init__() missing N
+required positional argument(s): '<field>'` (or release-lane mypy reports
+`Missing positional argument "<field>" in call to "<Class>" [call-arg]`)
+while the main lane is green — upstream added/removed a dataclass field on
+one vllm tree only (PR #16296: 7 release-matrix jobs down, main lane clean).
+
+**Drift direction is symmetric**: the field may exist on the release tree
+but not main, or vice versa, or on both but required on only one.  Never
+assume "main removed it" or "release added it" — diff the two trees' base
+class definitions and write the pattern that satisfies BOTH.
+
+**The pattern that passes all four axes** (main mypy, release mypy, main
+runtime, release runtime, AST structure tests) — no version guard needed:
+
+```python
+class AscendInputBatch(InputBatch):
+    # The SUBCLASS owns the compat field.  kw_only + default=None is
+    # required: a plain defaulted field inserted before the release
+    # tree's required fields dies at IMPORT time on that tree.
+    max_seq_len_np: np.ndarray | None = field(default=None, kw_only=True)
+
+# every construction site passes it by name, unconditionally:
+batch = AscendInputBatch(..., max_seq_len_np=max_num_batched_tokens, ...)
+```
+
+Four-axis verification matrix (all must pass before you claim done):
+
+| Axis | Check | Expected |
+|------|-------|----------|
+| main mypy | pre_ci `mypy`, main tree pass | clean |
+| release mypy | pre_ci `mypy`, release pass (3.10) | clean — no `[call-arg]` on the field |
+| release runtime | `VLLM_VERSION=<tag> PYTHONPATH=<release worktree>` import + construct | no `TypeError` |
+| AST structure UT | `tests/ut/worker/test_model_runner_v2_mamba.py` | green |
+
+**Rejected patterns** (each verified to fail a specific axis):
+
+| Rejected | Failing axis | Exact failure |
+|----------|--------------|---------------|
+| plain subclass default `x: T \| None = None` | release runtime (import) | `TypeError: non-default argument '<earlier field>' follows default argument` — the whole module dies, worse than the bug being fixed |
+| inline `**({...} if vllm_version_is(...) else {...})` at the call site | main mypy | the conditional kwargs spread is rejected by mypy on the main tree |
+| constructor args moved into a runtime-built kwargs dict | AST structure UT | `test_model_runner_v2_mamba.py` requires `keywords["<arg>"]` to be an `ast.Name`; a dict lookup fails as a message-less KeyError |
+
+**Owning the field without passing the value** is also a bug: the release
+runtime then constructs with `None` silently — no crash, wrong behavior
+(latent; survives pre_ci and smoke e2e, surfaces as wrong outputs).
 

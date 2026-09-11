@@ -229,6 +229,42 @@ Does this code path need to support BOTH the release version AND upstream main?
 - Import path changes: guard the import, import unconditionally if the symbol
   exists in both versions
 
+**Dual-version write patterns** — a dataclass field/constructor arg exists on
+one vllm tree only (e.g. the release pin's `InputBatch` gained a required
+`max_seq_len_np`; drift direction is NOT fixed — either tree can be the one
+that differs, so verify both):
+
+The vllm-ascend SUBCLASS owns the compat field and every construction site
+passes it by name — no version guard, and it passes mypy + runtime + AST
+structure tests on BOTH trees:
+
+```python
+class AscendInputBatch(InputBatch):
+    # kw_only + default=None: a plain defaulted field inserted before the
+    # release tree's required fields dies at IMPORT time on that tree.
+    max_seq_len_np: np.ndarray | None = field(default=None, kw_only=True)
+
+# call site — unconditional and named, BOTH trees:
+batch = AscendInputBatch(..., max_seq_len_np=max_num_batched_tokens, ...)
+```
+
+- Own the field AND pass the value.  Owning it without passing = the release
+  runtime silently runs with `None` — a latent bug worse than the crash.
+- Release-tree mypy (the `mypy` pre_ci check runs a second pass against the
+  pinned release worktree) flags any statically-visible construction site
+  you miss with `Missing positional argument "<field>" [call-arg]`.
+
+Never do these — each fails a different axis:
+
+| Rejected pattern | How it fails |
+|---|---|
+| plain subclass default `x: T \| None = None` | release tree dies at IMPORT: `TypeError: non-default argument '<earlier field>' follows default argument` |
+| inline `**({{...}} if vllm_version_is(...) else {{}})` at the call site | main-tree mypy rejects the conditional kwargs spread |
+| constructor args moved into a runtime-built kwargs dict | AST structure tests (e.g. `test_model_runner_v2_mamba.py`) require `keywords["<arg>"]` to be an `ast.Name` — a dict lookup fails as a message-less KeyError |
+
+See `reference/common-pitfalls.md` §"Dual-version dataclass fields" for the
+four-axis verification matrix.
+
 **BEFORE marking the adaptation complete, verify ALL of these:**
 
 1. Every `vllm_version_is` guard: NEW upstream-main code is in `else`/`not`
@@ -273,6 +309,13 @@ Does this code path need to support BOTH the release version AND upstream main?
    names in enclosing scopes; grep the file for the name before
    introducing it.  See `reference/common-pitfalls.md` §"Variable name
    shadowing".
+21. **Dual-version dataclass fields**: when upstream adds/removes a
+   dataclass field, the vllm-ascend SUBCLASS owns it as
+   `field(default=None, kw_only=True)` and every construction site passes
+   it by name — never a plain subclass default (release-tree import-time
+   TypeError), never an inline conditional kwargs spread (main mypy),
+   never a runtime kwargs dict (AST structure tests).  See
+   `reference/common-pitfalls.md` §"Dual-version dataclass fields".
 
 **Format rules — apply WHILE editing, not after:**
 
