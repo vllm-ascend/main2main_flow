@@ -18,18 +18,32 @@ Output: data/vllm-ascend/pr_ci_results/<date>.json
         "state": "open",
         "created_at": "...",
         "ci_conclusion": "failure",
+        "ci_class": "release-only",
+        "failing_lanes": ["release"],
+        "release_lane_failed": true,
+        "main_lane_failed": false,
         "labels": ["ready-all"],
         "checks": [
           {
-            "name": "run-selected-tests (v0.27.1) / cpu-0 card-(part 1-1)",
+            "name": "run-selected-tests (vllm@v0.28.0) / cpu-0 card-(part 1-1)",
+            "lane": "release",
             "conclusion": "failure",
             "details_url": "...",
-            "failure_summary": "ImportError: cannot import name 'cp_local_slot' ..."
+            "failure_summary": "TypeError: __init__() missing 1 required positional argument: 'max_seq_len_np' ..."
           }
         ]
       }
     ]
   }
+
+PR CI runs TWO vllm lanes (pr_test.yaml): a pinned main commit and the
+frozen release tag.  Each check is classified into its lane and the record
+carries which lane(s) failed (``ci_class``: release-only / main / both /
+none) — a release-only failure usually means a pinned-release adaptation
+gap, not a bad main-lane adaptation.  A PR with no checks at all and
+mergeStateStatus CONFLICTING never ran e2e; it is recorded as
+``blocked-conflicting`` / ``no-e2e-ran`` instead of the signal-less
+``unknown``.
 """
 from __future__ import annotations
 
@@ -91,6 +105,48 @@ def _gh_pr_list(since: str) -> list[dict]:
     return result
 
 
+_LANE_RE = re.compile(r"vllm@([^)]+)\)")
+_MAIN_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_RELEASE_VER_RE = re.compile(r"^v?\d+\.\d+")
+_LEGACY_RELEASE_RE = re.compile(r"^run-selected-tests \((v?\d+\.\d+)")
+
+
+def _lane_from_check_name(name: str) -> str:
+    """Classify a PR CI check name into its vllm lane.
+
+    pr_test.yaml names look like
+    ``run-selected-tests (vllm@<vllm_version>) / ...`` where vllm_version
+    is the 40-hex main pin or a release tag (v0.28.0).  Legacy names
+    (``run-selected-tests (v0.27.1) / ...``) predate the dual-lane split
+    and only ever ran the release pin."""
+    m = _LANE_RE.search(name)
+    if m:
+        ver = m.group(1).strip()
+        if _MAIN_SHA_RE.match(ver):
+            return "main"
+        if _RELEASE_VER_RE.match(ver):
+            return "release"
+        return "unknown"
+    if _LEGACY_RELEASE_RE.match(name):
+        return "release"
+    return "unknown"
+
+
+def _ci_class(failing_lanes: set[str]) -> str:
+    """Classify which vllm lane(s) failed.  Checks with unparseable names
+    carry lane "unknown" — alongside a known lane they collapse into it;
+    alone they stay "unknown" (never misreport as main/release)."""
+    if not failing_lanes:
+        return "none"
+    if "main" in failing_lanes and "release" in failing_lanes:
+        return "both"
+    if "release" in failing_lanes:
+        return "release-only"
+    if "main" in failing_lanes:
+        return "main"
+    return "unknown"
+
+
 def _extract_failure_summary(job_id: str) -> str | None:
     try:
         r = subprocess.run(
@@ -136,6 +192,7 @@ def _get_checks(pr_number: int, skip_log_fetch: bool = False) -> list[dict]:
             continue
         entry = {
             "name": name,
+            "lane": _lane_from_check_name(name),
             "conclusion": state.lower(),
             "details_url": c.get("link", ""),
         }
@@ -150,11 +207,13 @@ def _get_checks(pr_number: int, skip_log_fetch: bool = False) -> list[dict]:
     return result
 
 
-def _load_processed_prs(data_dir: Path) -> dict[int, str]:
-    """Return {pr_number: ci_conclusion} for PRs already recorded with
-    failure summaries in previous runs.  Used to skip re-fetching CI
-    logs for PRs whose results haven't changed."""
-    processed: dict[int, str] = {}
+def _load_processed_prs(data_dir: Path) -> dict[int, dict]:
+    """Return {pr_number: {"conclusion": ..., "ci_class": ...}} for PRs
+    already recorded with failure summaries in previous runs.  Used to
+    skip re-fetching CI logs for PRs whose results haven't changed — a
+    changed conclusion OR a changed lane classification (e.g. records
+    written before lane tagging existed) forces a re-fetch."""
+    processed: dict[int, dict] = {}
     results_dir = data_dir / "vllm-ascend" / "pr_ci_results"
     if not results_dir.exists():
         return processed
@@ -171,7 +230,10 @@ def _load_processed_prs(data_dir: Path) -> dict[int, str]:
                 has_summary = any(
                     c.get("failure_summary") for c in pr.get("checks", []))
                 if has_summary or pr.get("ci_conclusion") == "success":
-                    processed[num] = pr.get("ci_conclusion", "")
+                    processed[num] = {
+                        "conclusion": pr.get("ci_conclusion", ""),
+                        "ci_class": pr.get("ci_class", ""),
+                    }
     return processed
 
 
@@ -207,19 +269,23 @@ def track(data_dir: Path, days: int = 7) -> dict:
     records = []
     for pr in prs:
         pr_number = pr["number"]
-        prev_conclusion = processed.get(pr_number)
+        prev_info = processed.get(pr_number)
         ts_print(f"[track_pr_ci] PR #{pr_number}: {pr.get('title','')[:60]}")
 
-        # If the PR was previously processed and CI conclusion is unchanged,
-        # reuse the previous record (skip the expensive log fetch).
-        if prev_conclusion is not None:
+        # If the PR was previously processed and CI conclusion AND lane
+        # classification are unchanged, reuse the previous record (skip the
+        # expensive log fetch).
+        if prev_info is not None:
             checks = _get_checks(pr_number, skip_log_fetch=True)
             failing = [c for c in checks if c["conclusion"] in ("failure", "cancelled")]
             passing = [c for c in checks if c["conclusion"] == "success"]
             new_conclusion = "failure" if failing else ("success" if passing else "unknown")
-            if new_conclusion == prev_conclusion:
+            new_ci_class = _ci_class({c.get("lane", "unknown") for c in failing})
+            if new_conclusion == prev_info["conclusion"] and \
+                    new_ci_class == prev_info["ci_class"]:
                 ts_print(f"[track_pr_ci] PR #{pr_number}: already processed "
-                         f"({prev_conclusion}), skipping log fetch")
+                         f"({prev_info['conclusion']}, {prev_info['ci_class']}), "
+                         f"skipping log fetch")
                 # Load previous record to preserve failure_summary
                 prev_record = _load_prev_record(data_dir, pr_number)
                 if prev_record:
@@ -229,8 +295,9 @@ def track(data_dir: Path, days: int = 7) -> dict:
                     records.append(prev_record)
                     continue
             else:
-                ts_print(f"[track_pr_ci] PR #{pr_number}: CI conclusion changed "
-                         f"({prev_conclusion} -> {new_conclusion}) — re-fetching logs")
+                ts_print(f"[track_pr_ci] PR #{pr_number}: CI result changed "
+                         f"({prev_info['conclusion']}/{prev_info['ci_class']} -> "
+                         f"{new_conclusion}/{new_ci_class}) — re-fetching logs")
                 # checks so far came from skip_log_fetch=True: no
                 # failure_summary.  A record built from them would carry the
                 # new conclusion without the logs to explain it.
@@ -240,6 +307,22 @@ def track(data_dir: Path, days: int = 7) -> dict:
 
         failing = [c for c in checks if c["conclusion"] in ("failure", "cancelled")]
         passing = [c for c in checks if c["conclusion"] == "success"]
+        failing_lanes = sorted({c.get("lane", "unknown") for c in failing})
+        # A PR with zero checks may be a merge conflict: no merge ref, the
+        # pull_request e2e never ran — report that instead of "unknown".
+        merge_conflicting = False
+        if not checks:
+            info = _gh_json(["pr", "view", str(pr_number)],
+                            fields="mergeable,mergeStateStatus")
+            if (isinstance(info, dict) and (info.get("mergeStateStatus")
+                                            or "").upper() == "CONFLICTING"):
+                merge_conflicting = True
+        if merge_conflicting:
+            ci_conclusion = "blocked-conflicting"
+            ci_class = "no-e2e-ran"
+        else:
+            ci_conclusion = "failure" if failing else ("success" if passing else "unknown")
+            ci_class = _ci_class(set(failing_lanes))
         record = {
             "pr_number": pr_number,
             "pr_url": pr.get("url", ""),
@@ -248,7 +331,11 @@ def track(data_dir: Path, days: int = 7) -> dict:
             "state": pr.get("state", ""),
             "created_at": pr.get("createdAt", ""),
             "labels": pr.get("labels", []),
-            "ci_conclusion": "failure" if failing else ("success" if passing else "unknown"),
+            "ci_conclusion": ci_conclusion,
+            "ci_class": ci_class,
+            "failing_lanes": failing_lanes,
+            "release_lane_failed": "release" in failing_lanes,
+            "main_lane_failed": "main" in failing_lanes,
             "total_checks": len(checks),
             "passing_checks": len(passing),
             "failing_checks": len(failing),
