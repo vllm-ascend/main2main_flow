@@ -115,7 +115,7 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `GITHUB_REPO` | PR 目标仓库，格式 `owner/name`（如 `vllm-project/vllm-ascend`） | — |
 | `HEAD_FORK` | 推送目标 fork 仓库（默认 `vllm-ascend-ci/vllm-ascend`） | — |
 | `GH_TOKEN` | GitHub PAT（CI 推送与 PR 创建必需） | — |
-| `PR_LABELS` | PR 标签，逗号分隔（默认 `ready-all`，与 PR CI 全量触发对齐） | `ready-all` |
+| `PR_LABELS` | PR 标签，逗号分隔（默认 `main2main`） | `main2main` |
 | `PR_DRAFT` | 是否创建 draft PR（默认 `true`） | `true` |
 | `MAIN2MAIN_MODEL` | opencode 模型。按角色覆盖：`MAIN2MAIN_MODEL_ADAPT`、`MAIN2MAIN_MODEL_FIX`、`MAIN2MAIN_MODEL_REVIEW` | `deepseek/deepseek-flash` |
 | `MAIN2MAIN_TIMEOUT_MIN` | opencode 总超时分钟（默认 30） | `30` |
@@ -390,7 +390,7 @@ push 之前把本 run 的适配经验沉淀回 vllm-report 的 lessons（clone �
 4. 推送到 fork 仓库（`HEAD_FORK`，默认 `vllm-ascend-ci/vllm-ascend`），`--force-with-lease`
 5. 最后的安全网：`_git_push` 若检测到 `original_ascend_ref..HEAD` 多于 1 个 commit，会再次 force-squash 成单个 commit
 6. `gh pr create` 创建 draft PR（最多重试 5 次），body 取自 `final_summary.md`
-7. 添加 PR labels（默认 `ready-all`，触发 PR CI 全量测试）
+7. 添加 PR labels（默认 `main2main`）
 8. 关闭旧的 main2main auto PR（按 title pattern 匹配）
 9. 推送 `main2main_baseline` ref 到 fork，供下次增量运行
 10. 清理旧的 `main2main_auto_*` 分支（保留最新 N 个，`MAIN2MAIN_KEEP_BRANCHES` 默认 3）
@@ -404,7 +404,7 @@ push 之前把本 run 的适配经验沉淀回 vllm-report 的 lessons（clone �
 Flow 的运行效果与 [vllm-report](https://github.com/vllm-ascend/vllm-report) 的每日刷新任务（`daily_refresh.sh`）互相加强：
 
 ```
-main2main run → adapter 适配 → push PR → PR CI（ready-all 触发全量）
+main2main run → adapter 适配 → push PR → PR CI
                                           ↓
                         daily_refresh step 10: track_pr_ci（最近 7 天 PR）
                         → pr_ci_results/<date>.json（失败 PR 的最深层异常）

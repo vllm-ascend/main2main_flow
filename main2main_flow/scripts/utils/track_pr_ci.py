@@ -22,7 +22,7 @@ Output: data/vllm-ascend/pr_ci_results/<date>.json
         "failing_lanes": ["release"],
         "release_lane_failed": true,
         "main_lane_failed": false,
-        "labels": ["ready-all"],
+        "labels": ["main2main"],
         "checks": [
           {
             "name": "run-selected-tests (vllm@v0.28.0) / cpu-0 card-(part 1-1)",

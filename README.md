@@ -16,8 +16,8 @@ drives that whole loop:
   (runs on every run that completed ≥1 step, including partial failures;
   a gate failure blocks the push)
 - lessons from fix rounds are persisted back to vllm-report for future runs
-- then push a branch and open a PR (label `ready-all` triggers PR CI, whose
-  failures are tracked back into vllm-report lessons — the full feedback loop
+- then push a branch and open a PR (label `main2main`; the PR CI failures
+  are tracked back into vllm-report lessons — the full feedback loop
   is in `docs/guide.md`)
 
 Full walkthrough lives in [`docs/guide.md`](docs/guide.md); this README only
@@ -95,7 +95,7 @@ kickoff --vllm-path ... --vllm-ascend-path ...
 | `SKIP_E2E_TEST` | skip the NPU e2e tests, treat as passed | `false` |
 | `PUSH_TO_GITHUB` | open a PR after success | `false` |
 | `GITHUB_REPO` | PR target, `owner/name` | — |
-| `PR_LABELS` | labels for the created PR | `ready-all` |
+| `PR_LABELS` | labels for the created PR | `main2main` |
 | `MAIN2MAIN_MODEL` | opencode model (per-role: `_ADAPT`/`_FIX`/`_REVIEW`) | `deepseek/deepseek-flash` |
 | `MAIN2MAIN_TIMEOUT_MIN` / `MAIN2MAIN_STALE_SEC` | opencode total / idle timeouts | `30` / `300` |
 | `MAIN2MAIN_LINE_BUDGET` / `MAIN2MAIN_COMMIT_BUDGET` | step-splitting caps (effective lines / commits per step) | `2000` / `35` |

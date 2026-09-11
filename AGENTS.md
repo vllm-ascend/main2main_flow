@@ -81,7 +81,7 @@ in the gate.
 | `MAIN2MAIN_WORKSPACE` | Workspace root directory (default: `<repo>/workspace`). |
 | `MAIN2MAIN_TEST_CASES` | Space-separated test paths to run. |
 | `MAIN2MAIN_KEEP_BRANCH` | Skip `git reset --hard origin/main` in vllm-ascend setup. |
-| `PR_LABELS` | Comma-separated labels for created PR (default: `ready-all`). |
+| `PR_LABELS` | Comma-separated labels for created PR (default: `main2main`). |
 | `PR_DRAFT` | Create draft PR (default: `true`). |
 | `MAIN2MAIN_UT_GATE` | `0` disables UT in the final quality gate (default: `1`). |
 | `MAIN2MAIN_RELEASE_GATE` | `0` skips all release-lane validation: no release worktree use in pre_ci/gate (default: `1`; the worktree is still built). |
