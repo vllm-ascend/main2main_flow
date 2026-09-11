@@ -76,7 +76,9 @@ def run_final_quality_gate(
     fmt = _check_format(repo)
     mypy = _check_mypy(repo, vllm_path, vllm_release_path)
     if ut_enabled:
-        ut = _check_ut(repo, vllm_path)
+        ut = _check_ut(repo, vllm_path,
+                       vllm_release_path=vllm_release_path,
+                       release_tag=release_tag)
     else:
         ut = {"violations": [], "detail": "UT gate disabled (MAIN2MAIN_UT_GATE=0)",
               "skipped": True}

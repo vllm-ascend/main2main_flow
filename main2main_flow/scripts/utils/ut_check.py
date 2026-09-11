@@ -302,7 +302,32 @@ def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict
     return env
 
 
-def check_ut(repo: Path, vllm_path: str | Path | None = None) -> dict:
+_RELEASE_UT_BASELINE_FILE = Path(__file__).parent / "release_ut_baseline.json"
+
+
+def _load_release_baseline() -> set[str]:
+    """Known-failing release-lane UT node IDs (not adaptation-caused).
+
+    The release-lane UT batch surfaces failures that exist on the release
+    lane independent of the current diff — the same "pre-existing noise"
+    that got the a2 dual-version UT deleted.  Baseline node IDs are
+    reported in the detail and the full log but never block.
+    MAIN2MAIN_RELEASE_UT_BASELINE=0 disables the filtering (see everything).
+    """
+    if os.environ.get("MAIN2MAIN_RELEASE_UT_BASELINE", "1").lower() in (
+            "0", "false", "no", "off"):
+        return set()
+    try:
+        data = json.loads(
+            _RELEASE_UT_BASELINE_FILE.read_text(encoding="utf-8"))
+        return set(data.get("excluded", []))
+    except Exception:
+        return set()
+
+
+def check_ut(repo: Path, vllm_path: str | Path | None = None,
+             vllm_release_path: str | Path | None = None,
+             release_tag: str = "") -> dict:
     """Run the CPU-UT batch, aligned with CI's single-process execution.
 
     Runs the same CPU-routed tests/ut/* files as CI's CPU runner
@@ -311,11 +336,17 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None) -> dict:
     files in ONE pytest process (CI runs 2044 tests in ~44s; per-file
     subprocess isolation cost ~5 min per version).
 
-    Runs the batch against the target main vllm checkout (``vllm_path``)
-    only — single-version validation.
+    Runs the batch against the target main vllm checkout (``vllm_path``).
+    When ``vllm_release_path`` (a worktree of the pinned release tag) and
+    ``release_tag`` are also given, a SECOND batch runs against the
+    release tree with ``VLLM_VERSION`` set — CI's release leg has no
+    cpu-ut, so this is the only UT-level signal for the release lane.
+    Release-batch node IDs listed in ``release_ut_baseline.json`` are
+    reported but never block (pre-existing release-lane failures are not
+    the adaptation's fault).
 
-    ``test_schedule_body_matches_pinned_release_tag`` is excluded —
-    see ``_BALANCE_TAG_BODY_TEST``.
+    ``test_schedule_body_matches_pinned_release_tag`` is excluded on BOTH
+    batches — see ``_BALANCE_TAG_BODY_TEST``.
 
     Env mirrors CI: venv with --system-site-packages + numpy==1.26.4
     (from triton-ascend metadata) + PYTHONPATH=ascend:vllm.  torch_npu
@@ -364,119 +395,168 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None) -> dict:
     fake_bin_dir = _make_fake_npu_smi()
 
     all_violations: list[str] = []
+    baseline_violations: list[str] = []
     all_files_clean = True
     details: list[str] = []
     failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
 
+    # Release-lane batches only: node IDs known to fail on the release
+    # lane independent of the current adaptation (never block).
+    baseline = _load_release_baseline() if vllm_release_path else set()
+
+    # Files known to pollute the shared process get their own
+    # subprocess.  Verified on the A2 env: test_batch_invariant.py
+    # installs a global torch.library.Library monkeypatch that breaks
+    # test_gdn_layerwise_kv.py when run in the same process.
+    # test_vocab_parallel_embedding.py assigns module-level
+    # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
+    # polluting test_linear.py / test_gdn_layerwise_kv.py in the
+    # same process (verified on A2, run 2026-08-12).
+    # test_gdn_layerwise_kv.py itself fails only inside the batch
+    # (qwen_gdn_attention_core CPU-backend NotImplementedError;
+    # passes standalone) — isolate it too so the batch stays clean.
+    isolated = [f for f in cpu_files
+                if f.endswith(("test_batch_invariant.py",
+                               "test_vocab_parallel_embedding.py",
+                               "test_gdn_layerwise_kv.py"))]
+    batch = [f for f in cpu_files if f not in isolated]
+
+    # (label, vllm tree for this batch, VLLM_VERSION value or "").  The
+    # release tuple is appended only when both the worktree and the tag
+    # are available — otherwise the run degrades to main-only.
+    versions: list[tuple[str, Path, str]] = [("main", Path(vllm_path), "")]
+    if vllm_release_path and release_tag:
+        rel_ver = release_tag.lstrip("v")
+        versions.append((rel_ver, Path(vllm_release_path), rel_ver))
+
     try:
-        label = "main"
+        for label, batch_vllm, vllm_version in versions:
+            env = _build_ut_env(repo, batch_vllm, fake_bin_dir)
+            if vllm_version:
+                # A raw git worktree has no installed vllm metadata, so
+                # vllm_ascend.utils.vllm_version_is cannot infer the lane
+                # from __version__ — VLLM_VERSION forces release guards to
+                # resolve the way CI's release leg does.
+                env["VLLM_VERSION"] = vllm_version
+            ts_print(f"[pre_ci] ut: [{label}] pure-CPU env "
+                     f"(ASCEND_RT_VISIBLE_DEVICES='')")
 
-        env = _build_ut_env(repo, vllm_path, fake_bin_dir)
-        ts_print(f"[pre_ci] ut: [{label}] pure-CPU env "
-                 f"(ASCEND_RT_VISIBLE_DEVICES='')")
+            ts_print(f"\n[pre_ci] ut: === batch [{label}] "
+                     f"PYTHONPATH={env['PYTHONPATH']} ===")
 
-        ts_print(f"\n[pre_ci] ut: === batch [{label}] "
-                 f"PYTHONPATH={env['PYTHONPATH']} ===")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            env_header = (
+                f"# pytest cmd: {' '.join(pytest_cmd)}\n"
+                f"# repo: {repo.resolve()}\n"
+                f"# vllm: {batch_vllm.resolve()}\n"
+                f"# PYTHONPATH: {env['PYTHONPATH']}\n")
+            if vllm_version:
+                # Both lanes append to the SAME ut_full.log under labeled
+                # headers — fix mode greps one file for either lane.
+                with log_path.open("a", encoding="utf-8") as lf:
+                    lf.write(f"\n##### [{label}] release-lane batch "
+                             f"(VLLM_VERSION={vllm_version}) #####\n")
+                    lf.write(env_header)
+            else:
+                log_path.write_text("# pre_ci UT full log\n" + env_header,
+                                    encoding="utf-8")
 
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
-            "# pre_ci UT full log\n"
-            f"# pytest cmd: {' '.join(pytest_cmd)}\n"
-            f"# repo: {repo.resolve()}\n"
-            f"# vllm: {Path(vllm_path).resolve()}\n"
-            f"# PYTHONPATH: {env['PYTHONPATH']}\n",
-            encoding="utf-8")
+            exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
+            if vllm_version:
+                # test_vllm_version_is unit-tests the VLLM_VERSION env
+                # fallback with a mocked env; the release batch sets
+                # VLLM_VERSION for real, so the fallback path is
+                # unreachable and the test fails for env reasons only.
+                exclude_expr += " and not test_vllm_version_is"
 
-        # Files known to pollute the shared process get their own
-        # subprocess.  Verified on the A2 env: test_batch_invariant.py
-        # installs a global torch.library.Library monkeypatch that breaks
-        # test_gdn_layerwise_kv.py when run in the same process.
-        # test_vocab_parallel_embedding.py assigns module-level
-        # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
-        # polluting test_linear.py / test_gdn_layerwise_kv.py in the
-        # same process (verified on A2, run 2026-08-12).
-        # test_gdn_layerwise_kv.py itself fails only inside the batch
-        # (qwen_gdn_attention_core CPU-backend NotImplementedError;
-        # passes standalone) — isolate it too so the batch stays clean.
-        isolated = [f for f in cpu_files
-                    if f.endswith(("test_batch_invariant.py",
-                                   "test_vocab_parallel_embedding.py",
-                                   "test_gdn_layerwise_kv.py"))]
-        batch = [f for f in cpu_files if f not in isolated]
-
-        exclude_expr = f"not {_BALANCE_TAG_BODY_TEST}"
-
-        runs: list[tuple[str, subprocess.CompletedProcess]] = []
-        try:
-            # --continue-on-collection-errors: a single file that fails
-            # to import (e.g. an env-specific ModuleNotFoundError) must
-            # NOT abort the whole batch and mask every other test —
-            # the batch is one pytest process for all files (run
-            # 31563761175: sfa_pd_rd2h collection error hid 8 real
-            # regressions that PR CI then exposed).
-            # -p ut_namespace: PYTHONPATH=<ascend>:<vllm>
-            # makes vllm's regular examples/ package shadow ascend's
-            # namespace examples/ — pre-register the ascend dir so the
-            # batch matches real CI (vllm installed, no examples/ on
-            # sys.path).
-            rr = subprocess.run(
-                [*pytest_cmd, "-q", "--tb=short", "--no-header",
-                 "--continue-on-collection-errors",
-                 "-p", "main2main_flow.scripts.utils.ut_namespace",
-                 *batch, "-k", exclude_expr],
-                cwd=str(repo), capture_output=True, text=True,
-                env=env, timeout=1200,
-            )
-            runs.append(("batch", rr))
-        except subprocess.TimeoutExpired:
-            ts_print(f"[pre_ci] ut: [{label}] batch TIMEOUT(1200s)")
-            all_files_clean = False
-            details.append(f"{label}/batch: TIMEOUT(1200s)")
-        for f in isolated:
+            runs: list[tuple[str, subprocess.CompletedProcess]] = []
             try:
+                # --continue-on-collection-errors: a single file that fails
+                # to import (e.g. an env-specific ModuleNotFoundError) must
+                # NOT abort the whole batch and mask every other test —
+                # the batch is one pytest process for all files (run
+                # 31563761175: sfa_pd_rd2h collection error hid 8 real
+                # regressions that PR CI then exposed).
+                # -p ut_namespace: PYTHONPATH=<ascend>:<vllm>
+                # makes vllm's regular examples/ package shadow ascend's
+                # namespace examples/ — pre-register the ascend dir so the
+                # batch matches real CI (vllm installed, no examples/ on
+                # sys.path).
                 rr = subprocess.run(
-                    [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
+                    [*pytest_cmd, "-q", "--tb=short", "--no-header",
+                     "--continue-on-collection-errors",
+                     "-p", "main2main_flow.scripts.utils.ut_namespace",
+                     *batch, "-k", exclude_expr],
                     cwd=str(repo), capture_output=True, text=True,
-                    env=env, timeout=300,
+                    env=env, timeout=1200,
                 )
-                runs.append((f, rr))
+                runs.append(("batch", rr))
             except subprocess.TimeoutExpired:
-                ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
+                ts_print(f"[pre_ci] ut: [{label}] batch TIMEOUT(1200s)")
                 all_files_clean = False
+                details.append(f"{label}/batch: TIMEOUT(1200s)")
+            for f in isolated:
+                try:
+                    rr = subprocess.run(
+                        [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
+                        cwd=str(repo), capture_output=True, text=True,
+                        env=env, timeout=300,
+                    )
+                    runs.append((f, rr))
+                except subprocess.TimeoutExpired:
+                    ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
+                    all_files_clean = False
 
-        for name, rr in runs:
-            clean = strip_ansi(rr.stdout + rr.stderr)
-            with log_path.open("a", encoding="utf-8") as lf:
-                lf.write(f"\n===== run: {name} (exit={rr.returncode}) =====\n")
-                lf.write(clean)
-            seen: set[str] = set()
-            for line in clean.splitlines():
-                m = failed_re.search(line.strip())
-                if m and m.group(2) not in seen:
-                    seen.add(m.group(2))
-                    v = f"[{label}] {line.strip()}"
-                    ex = _failure_excerpt(clean, line.strip())
-                    if ex:
-                        v += "\n" + ex
-                    all_violations.append(v)
-            if rr.returncode != 0:
-                all_files_clean = False
-                if not seen:
-                    all_violations.append(
-                        f"[{label}] {name}: exit={rr.returncode} — "
-                        f"{clean[-500:]}")
-            summary_m = re.search(
-                r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
-            summary = (summary_m.group(1) if summary_m
-                       else f"exit={rr.returncode}")
-            details.append(f"{label}/{name}: {summary}")
-            ts_print(f"[pre_ci] ut: [{label}/{name}] {summary}")
+            for name, rr in runs:
+                clean = strip_ansi(rr.stdout + rr.stderr)
+                with log_path.open("a", encoding="utf-8") as lf:
+                    lf.write(f"\n===== run: {name} (exit={rr.returncode}) =====\n")
+                    lf.write(clean)
+                seen: set[str] = set()
+                run_blocking = 0
+                for line in clean.splitlines():
+                    m = failed_re.search(line.strip())
+                    if m and m.group(2) not in seen:
+                        seen.add(m.group(2))
+                        v = f"[{label}] {line.strip()}"
+                        ex = _failure_excerpt(clean, line.strip())
+                        if ex:
+                            v += "\n" + ex
+                        if vllm_version and m.group(2) in baseline:
+                            baseline_violations.append(v)
+                            continue
+                        all_violations.append(v)
+                        run_blocking += 1
+                if rr.returncode != 0:
+                    if not seen:
+                        all_files_clean = False
+                        all_violations.append(
+                            f"[{label}] {name}: exit={rr.returncode} — "
+                            f"{clean[-500:]}")
+                    elif run_blocking:
+                        all_files_clean = False
+                    # else: every parsed failure baseline-matched (release
+                    # lane, pre-existing) — reported above, never blocks.
+                summary_m = re.search(
+                    r"((?:\d+ failed, )?\d+ passed[^\n]*)", clean)
+                summary = (summary_m.group(1) if summary_m
+                           else f"exit={rr.returncode}")
+                details.append(f"{label}/{name}: {summary}")
+                ts_print(f"[pre_ci] ut: [{label}/{name}] {summary}")
+
+        baseline_note = ""
+        if baseline_violations:
+            baseline_note = (f"; {len(baseline_violations)} release-lane "
+                             f"failure(s) matched the known baseline "
+                             f"(not blocking)")
+            ts_print(f"[pre_ci] ut: {len(baseline_violations)} release-lane "
+                     f"failure(s) matched the known baseline (not blocking)")
 
         if all_files_clean:
             ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean")
             return {"violations": [],
                     "detail": f"UT clean ({len(cpu_files)} files, "
-                              f"single-process batch)",
+                              f"single-process batch)" + baseline_note,
                     "log_path": str(log_path),
                     "venv_python": str(venv_python) if venv_dir else ""}
         ts_print(f"\n[pre_ci] ut: {len(all_violations)} failure(s):")
@@ -486,7 +566,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None) -> dict:
             ts_print(f"  ... and {len(all_violations) - 20} more")
         return {"violations": all_violations,
                 "detail": f"{len(all_violations)} UT failure(s): "
-                          + "; ".join(details),
+                          + "; ".join(details) + baseline_note,
                 "log_path": str(log_path),
                 "venv_python": str(venv_python) if venv_dir else ""}
     finally:

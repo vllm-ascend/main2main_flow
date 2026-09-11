@@ -35,13 +35,12 @@ def _init_repo(repo: Path) -> None:
     git("commit", "-q", "-m", "base")
 
 
-def test_check_ut_single_version_signature() -> None:
-    # The release-lane UT batch is a final-gate-only feature (see commit
-    # "gate: release-lane CPU-UT batch"); per-step pre_ci UT stays
-    # main-only until that lands.
+def test_check_ut_dual_version_signature() -> None:
+    # The release-lane UT batch is a final-gate-only feature; per-step
+    # pre_ci UT stays main-only (flow never passes the release args there).
     params = inspect.signature(check_ut).parameters
-    assert "vllm_release_path" not in params
-    assert "release_tag" not in params
+    assert "vllm_release_path" in params
+    assert "release_tag" in params
     assert "vllm_path" in params
 
 
