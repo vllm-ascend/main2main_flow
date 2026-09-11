@@ -152,6 +152,27 @@ def _failure_excerpt(clean: str, failure_line: str, max_chars: int = 900) -> str
     return excerpt or ""
 
 
+def _unparseable_evidence(clean: str, max_chars: int = 900) -> str:
+    """Extract the actual error from pytest output with no parseable
+    FAILED/ERROR line (batch died before the summary — conftest or
+    startup crash).  Prefers the traceback block ending at pytest's last
+    ``E   ...`` exception line over the stdout tail: the tail is the
+    warnings summary, which is how run 34583706211's final blocker
+    became information-free."""
+    lines = clean.splitlines()
+    last_e = max((i for i, ln in enumerate(lines)
+                  if ln.startswith("E   ")), default=-1)
+    if last_e >= 0:
+        start = next((i for i in range(last_e, -1, -1)
+                      if lines[i].startswith("Traceback")), last_e - 15)
+        return "\n".join(lines[max(0, start):last_e + 1])[-max_chars:].strip()
+    m = list(re.finditer(r"^Traceback \(most recent call last\)", clean,
+                         re.MULTILINE))
+    if m:
+        return clean[m[-1].start():][-max_chars:].strip()
+    return clean[-500:]
+
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 UT_FULL_LOG_NAME = "ut_full.log"
@@ -311,7 +332,9 @@ def _load_release_baseline() -> set[str]:
     The release-lane UT batch surfaces failures that exist on the release
     lane independent of the current diff — the same "pre-existing noise"
     that got the a2 dual-version UT deleted.  Baseline node IDs are
-    reported in the detail and the full log but never block.
+    reported in the detail and the full log but never block.  A whole
+    test-file path (``tests/ut/x.py``, no ``::node``) is also a valid
+    key — it absorbs the file's collection error on the release lane.
     MAIN2MAIN_RELEASE_UT_BASELINE=0 disables the filtering (see everything).
     """
     if os.environ.get("MAIN2MAIN_RELEASE_UT_BASELINE", "1").lower() in (
@@ -398,7 +421,11 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     baseline_violations: list[str] = []
     all_files_clean = True
     details: list[str] = []
-    failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py::\S+)")
+    # Nodeless ERROR lines are collection errors ("ERROR tests/ut/x.py -
+    # ImportError: ...", no ::node): run 34583706211 died on one — with
+    # parsed failures present it stayed invisible, and once alone it
+    # degraded to a warnings-summary tail the adapter couldn't act on.
+    failed_re = re.compile(r"^(FAILED|ERROR)\s+(\S+\.py(?:::\S+)?)")
 
     # Release-lane batches only: node IDs known to fail on the release
     # lane independent of the current adaptation (never block).
@@ -532,7 +559,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                         all_files_clean = False
                         all_violations.append(
                             f"[{label}] {name}: exit={rr.returncode} — "
-                            f"{clean[-500:]}")
+                            f"{_unparseable_evidence(clean)}")
                     elif run_blocking:
                         all_files_clean = False
                     # else: every parsed failure baseline-matched (release

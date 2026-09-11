@@ -239,6 +239,62 @@ def test_check_ut_no_release_path_single_batch(tmp_path, monkeypatch):
     assert len(seen) == 1  # main batch only
 
 
+def test_check_ut_release_collection_error_parsed(tmp_path, monkeypatch):
+    """Nodeless `ERROR <file>.py` (collection error, no ::node) must parse
+    into a blocking violation — run 34583706211's invisible final blocker."""
+    fail_out = ("1 error in 0.01s\n"
+                "ERROR tests/ut/test_a.py - ModuleNotFoundError: "
+                "No module named 'vllm.foo'\n")
+    repo, vllm, release, seen = _dual_lane_setup(
+        tmp_path, monkeypatch,
+        {"main": "1 passed in 0.01s\n", "release": fail_out,
+         "release_rc": 1})
+    result = check_ut(repo, vllm_path=vllm, vllm_release_path=release,
+                      release_tag="0.28.0")
+    assert len(result["violations"]) == 1
+    v = result["violations"][0]
+    assert v.startswith("[0.28.0] ERROR tests/ut/test_a.py")
+    assert "ModuleNotFoundError" in v
+    # Excerpt carries the traceback context, not just the summary line.
+    assert "No module named 'vllm.foo'" in v
+
+
+def test_check_ut_unparseable_fallback_prefers_exception_lines(
+        tmp_path, monkeypatch):
+    """No parseable lines at all → the fallback excerpt must come from the
+    pytest `E   ...` exception lines, not the stdout (warnings-summary)
+    tail that blinded run 34583706211's final gate round."""
+    fail_out = ("2 warnings in 0.01s\n"
+                "Traceback (most recent call last):\n"
+                "  File \"conftest.py\", line 3, in <module>\n"
+                "E   ModuleNotFoundError: No module named 'vllm.foo'\n"
+                "  warning: asyncio_default_fixture_loop_scope\" is unset.\n")
+    repo, vllm, release, seen = _dual_lane_setup(
+        tmp_path, monkeypatch,
+        {"main": "1 passed in 0.01s\n", "release": fail_out,
+         "release_rc": 1})
+    result = check_ut(repo, vllm_path=vllm, vllm_release_path=release,
+                      release_tag="0.28.0")
+    assert len(result["violations"]) == 1
+    v = result["violations"][0]
+    assert v.startswith("[0.28.0] batch: exit=1")
+    assert "ModuleNotFoundError: No module named 'vllm.foo'" in v
+    assert "fixture_loop_scope" not in v
+
+
+def test_unparseable_evidence_tail_fallback():
+    # No E-lines, no traceback → degrades to the raw tail.
+    out = "nothing useful here\njust a tail\n"
+    assert ut_check._unparseable_evidence(out) == out[-500:]
+    # An E-line anchor wins over the tail.
+    out2 = ("warnings summary\n"
+            "E   OSError: died at startup\n"
+            "more tail text that should not appear\n")
+    ev = ut_check._unparseable_evidence(out2)
+    assert "OSError: died at startup" in ev
+    assert "more tail text" not in ev
+
+
 def test_load_release_baseline_from_file(tmp_path, monkeypatch):
     baseline_file = tmp_path / "baseline.json"
     baseline_file.write_text(json.dumps(
