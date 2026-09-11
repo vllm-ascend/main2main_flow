@@ -14,6 +14,7 @@ Design note:
 """
 from __future__ import annotations
 
+import ast
 import platform
 import re
 import shutil
@@ -230,7 +231,8 @@ def _changed_test_py_files(repo: Path) -> list[str]:
             if f.endswith(".py") and f.startswith(("tests/", "examples/"))]
 
 
-def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
+def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
+                vllm_release_path: str | Path | None = None) -> dict:
     """Run mypy with the same core command and environment as vllm-ascend's CI.
 
     Mirrors the CI pre-commit job's "Run mypy" step: for each python version
@@ -244,8 +246,16 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
     ``./vllm-empty`` at verified commit). ``--exclude _cann_ops_custom/``
     handles the build artifact dir that CI's lint image doesn't have.
 
-    Single-version validation: mypy resolves symbols against the target
-    main vllm tree only.
+    Dual-version validation: when ``vllm_release_path`` (a git worktree of
+    the pinned release tag, e.g. v0.28.0) is given, the SAME sources are
+    also type-checked against the release tree.  CI's pre-commit runs mypy
+    on the main pin only, so release-only signature drift (a dataclass
+    field required by the release base class but absent upstream) surfaces
+    there as e2e TypeErrors — one extra mypy invocation catches it statically
+    (PR #16296: missing ``max_seq_len_np`` killed 7 release-lane e2e jobs).
+    The release pass runs at 3.10 only: it adds a different *tree*, not a
+    different *grammar*; python-version-specific breakage is fully covered
+    by the main pass's 3-version loop.
 
     Returns all errors mypy reports across all python versions - no
     added-line filtering.  CI mypy is the source of truth; if it fails,
@@ -416,28 +426,53 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
         all_violations: list[str] = []
         all_output: list[str] = []
         any_failed = False
+        failed_units: list[str] = []
 
-        # Single VLLM version (main tree only) — but every supported
-        # python version is checked, so adapter edits must satisfy all
-        # three syntax targets, not just the local interpreter's.
-        for py_ver in ("3.10", "3.11", "3.12"):
-            ts_print(f"[pre_ci] === mypy [main] --python-version {py_ver} "
-                     f"output begin ===")
-            r = subprocess.run(
-                [*mypy_cmd, "--follow-imports", "skip", "--check-untyped-defs",
-                 "--python-version", py_ver,
-                 "--exclude", "_cann_ops_custom/",
-                 "vllm_ascend", *changed_extra],
-                cwd=str(repo), capture_output=True, text=True, env=base_env,
-            )
-            output = r.stdout + "\n" + r.stderr
-            ts_print(output.strip())
-            ts_print(f"[pre_ci] === mypy [main] output end "
-                     f"(py={py_ver}, exit={r.returncode}) ===")
-            all_output.append(f"--- [main] python {py_ver} "
-                              f"(exit={r.returncode}) ---\n{output}")
-            if r.returncode != 0:
-                any_failed = True
+        # Type-check against each vllm tree: the pinned main checkout plus,
+        # when available, the release-tag worktree.  The release pass catches
+        # call-site signature drift that the main-only pass cannot see (a
+        # required release-only dataclass field reads as a normal keyword on
+        # main).  No "diff looks version-sensitive" heuristic: the
+        # max_seq_len_np class (PR #16296) is a plain call-site edit with no
+        # vllm_version_is string anywhere near it.
+        trees: list[tuple[str, dict[str, str], tuple[str, ...]]] = [
+            ("main", base_env, ("3.10", "3.11", "3.12"))]
+        if vllm_release_path:
+            release_abs = str(Path(vllm_release_path).resolve())
+            release_env = base_env.copy()
+            # Replace (not append) the vllm source in PYTHONPATH so mypy
+            # resolves symbols against the release tree only.
+            existing = base_env.get("PYTHONPATH", "")
+            if vllm_path:
+                vllm_abs = str(Path(vllm_path).resolve())
+                existing = existing.replace(vllm_abs, "").strip(":")
+            release_env["PYTHONPATH"] = (f"{release_abs}:{existing}"
+                                         if existing else release_abs)
+            trees.append((f"release({Path(vllm_release_path).name})",
+                          release_env, ("3.10",)))
+            ts_print(f"[pre_ci] mypy: also checking against release tree: "
+                     f"{release_abs}")
+
+        for tree_label, tree_env, py_vers in trees:
+            for py_ver in py_vers:
+                ts_print(f"[pre_ci] === mypy [{tree_label}] --python-version "
+                         f"{py_ver} output begin ===")
+                r = subprocess.run(
+                    [*mypy_cmd, "--follow-imports", "skip", "--check-untyped-defs",
+                     "--python-version", py_ver,
+                     "--exclude", "_cann_ops_custom/",
+                     "vllm_ascend", *changed_extra],
+                    cwd=str(repo), capture_output=True, text=True, env=tree_env,
+                )
+                output = r.stdout + "\n" + r.stderr
+                ts_print(output.strip())
+                ts_print(f"[pre_ci] === mypy [{tree_label}] output end "
+                         f"(py={py_ver}, exit={r.returncode}) ===")
+                all_output.append(f"--- [{tree_label}] python {py_ver} "
+                                  f"(exit={r.returncode}) ---\n{output}")
+                if r.returncode != 0:
+                    any_failed = True
+                    failed_units.append(f"{tree_label}/{py_ver}")
     finally:
         # Destroy the temporary venv (no need to restore anything - the
         # main environment was never touched).
@@ -446,8 +481,10 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
             ts_print(f"[pre_ci] mypy: destroyed temporary venv at {venv_dir}")
 
     if not any_failed:
-        ts_print("\n[pre_ci] mypy: OK (all python versions clean)")
-        return {"violations": [], "detail": "mypy clean (3.10/3.11/3.12, main)"}
+        trees_ran = "main + release" if vllm_release_path else "main"
+        ts_print("\n[pre_ci] mypy: OK (all python versions clean on all trees)")
+        return {"violations": [],
+                "detail": f"mypy clean (3.10/3.11/3.12, {trees_ran})"}
 
     _MYPY_ERR_RE = re.compile(r"^(.+\.py):(\d+):(?:\d+:)?\s*error:")
     seen: set[str] = set()
@@ -464,14 +501,71 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None) -> dict:
         if len(all_violations) > 20:
             ts_print(f"  ... and {len(all_violations) - 20} more (see pre_ci_check.json)")
         return {"violations": all_violations,
-                "detail": f"{len(all_violations)} mypy issue(s) (3.10/3.11/3.12)"}
+                "detail": f"{len(all_violations)} mypy issue(s) "
+                          f"({', '.join(failed_units)})"}
     ts_print("\n[pre_ci] mypy: FAILED but no parseable error lines")
     return {"violations": ["\n".join(all_output)[-2000:]],
-            "detail": "mypy failed but no parseable errors"}
+            "detail": "mypy failed but no parseable errors "
+                      f"({', '.join(failed_units)})"}
 
 
 
-def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
+def _module_binding_names(src_file: Path) -> set[str]:
+    """Top-level names a module defines/exports (AST-based, best-effort).
+
+    Covers defs/classes/assignments/imports, including inside top-level
+    ``if`` blocks (upstream defines symbols under version guards too —
+    conservative: any branch defines the name, we count it).
+    """
+    if not src_file.exists():
+        return set()
+    try:
+        tree = ast.parse(src_file.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    names: set[str] = set()
+
+    def _collect(node: ast.AST) -> None:
+        for sub in ast.iter_child_nodes(node):
+            if isinstance(sub, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+                names.add(sub.name)
+            elif isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    if isinstance(t, ast.Name):
+                        names.add(t.id)
+            elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                names.add(sub.target.id)
+            elif isinstance(sub, ast.Import):
+                for a in sub.names:
+                    names.add(a.asname or a.name.split(".")[0])
+            elif isinstance(sub, ast.ImportFrom):
+                for a in sub.names:
+                    names.add(a.asname or a.name)
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                names.add(a.asname or a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                names.add(a.asname or a.name)
+        elif isinstance(node, ast.If):
+            # upstream modules define names under top-level version guards
+            for sub in node.body:
+                _collect(sub)
+    return names
+
+
+def _check_broken_imports(repo: Path, vllm_path: str | Path,
+                          vllm_release_path: str | Path | None = None) -> dict:
     """Verify newly-added ``from vllm.X`` imports.
 
     1. Module must exist in the vllm tree (file or package dir).
@@ -479,8 +573,15 @@ def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
        MUST carry ``# type: ignore[import-not-found]`` — mypy checks all
        static paths regardless of runtime guards.  No mypy needed here;
        this is a pure static check on the source text.
+    3. If ``vllm_release_path`` (the pinned release worktree, e.g. v0.28.0)
+       is given, every imported SYMBOL must also exist there — an unguarded
+       module-level import of a main-only symbol (BatchReqState,
+       cp_local_slot) crashes the whole release lane at import time
+       (PRs #14517/#14580).  CI's pre-commit mypy resolves against the main
+       tree only, so this is the only check that can see the class.
     """
     vllm_src = Path(vllm_path) / "vllm"
+    release_src = Path(vllm_release_path) / "vllm" if vllm_release_path else None
     added_lines = _get_added_lines(repo)
     violations: list[str] = []
     _indent_cache: dict[str, set[int]] = {}
@@ -544,19 +645,42 @@ def _check_broken_imports(repo: Path, vllm_path: str | Path) -> dict:
                     ts_print(f"[pre_ci] broken_imports: auto-fixed {entry['file']}:{entry['line_no']} "
                              f"(added # type: ignore[import-not-found])")
 
+        # Symbol-level check against the pinned release tree: an unguarded
+        # module-level import of a main-only symbol crashes the whole lane
+        # at import time (BatchReqState in #14517, cp_local_slot in #14580).
+        if release_src is not None and not has_ignore and \
+                int(entry["line_no"]) not in _guarded_lines(entry["file"]):
+            if "import" in parts:
+                idx = parts.index("import")
+                symbols = [p.strip(",") for p in parts[idx + 1:]
+                           if p.strip(",") and p.strip(",") != "*"]
+                rel_mod_file = release_src / (mod.replace(".", "/") + ".py")
+                rel_pkg_init = release_src / mod.replace(".", "/") / "__init__.py"
+                release_names = (_module_binding_names(rel_mod_file)
+                                 | _module_binding_names(rel_pkg_init))
+                for sym in symbols:
+                    if sym not in release_names:
+                        violations.append(
+                            f"{entry['file']}:{entry['line_no']}: symbol '{sym}' "
+                            f"not found in the pinned release vllm tree — "
+                            f"unguarded import crashes it at import time ({line})")
+
     return {"violations": violations}
 
 
 def run_check(ascend_path: str | Path, release_tag: str,
-              vllm_path: str | Path | None = None) -> dict:
+              vllm_path: str | Path | None = None,
+              vllm_release_path: str | Path | None = None) -> dict:
     """Run pre-CI checks on the vllm-ascend working tree.
 
     Returns a dict with 'all_passed' (bool) and 'checks' (list of check results).
     If `vllm_path` is provided, also verifies that any new ``from vllm.X``
     imports in changed Python files reference modules that actually exist,
-    and runs the mypy + CPU-UT gates (single main vllm version) so type and
+    and runs the mypy + CPU-UT gates (main vllm version) so type and
     unit-test regressions are caught at every step instead of only at the
-    final quality gate.
+    final quality gate.  If `vllm_release_path` is also provided, mypy runs
+    a second pass against the release tree and imported SYMBOLS must exist
+    there too (unguarded main-only imports crash the release lane).
     """
     repo = Path(ascend_path)
 
@@ -564,7 +688,7 @@ def run_check(ascend_path: str | Path, release_tag: str,
         added_lines = _get_added_lines(repo)
         versions = _check_version_strings(added_lines, release_tag)
         temps = _check_temp_files(repo)
-        imports = (_check_broken_imports(repo, vllm_path)
+        imports = (_check_broken_imports(repo, vllm_path, vllm_release_path)
                    if vllm_path else {"violations": []})
     except subprocess.CalledProcessError as exc:
         return {
@@ -637,15 +761,19 @@ def run_check(ascend_path: str | Path, release_tag: str,
         all_passed = False
 
     if vllm_path:
-        # mypy + CPU-UT gates, single main vllm version.  Both self-skip
-        # (skipped=True) when the tool/vllm source is unavailable, and a
-        # skipped check never fails the step.  Both are read-only on the
-        # working tree and build separate venvs, so run them CONCURRENTLY:
-        # the pre_ci wall clock becomes max(mypy, ut) instead of the sum.
-        # _check_format stays sequential above — its auto-fix hooks mutate
-        # files and must finish before either reads the tree.
+        # mypy + CPU-UT gates, main vllm version (+ release tree for mypy
+        # when vllm_release_path is set — the release pass runs inside the
+        # mypy worker, keeping the 2-worker pool's peak resources unchanged).
+        # Both self-skip (skipped=True) when the tool/vllm source is
+        # unavailable, and a skipped check never fails the step.  Both are
+        # read-only on the working tree and build separate venvs, so run
+        # them CONCURRENTLY: the pre_ci wall clock becomes max(mypy, ut)
+        # instead of the sum.  _check_format stays sequential above — its
+        # auto-fix hooks mutate files and must finish before either reads
+        # the tree.
         with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_mypy = pool.submit(_check_mypy, repo, vllm_path)
+            fut_mypy = pool.submit(_check_mypy, repo, vllm_path,
+                                   vllm_release_path)
             fut_ut = pool.submit(_check_ut, repo, vllm_path)
             mypy = fut_mypy.result()
             ut = fut_ut.result()
@@ -675,5 +803,18 @@ def run_check(ascend_path: str | Path, release_tag: str,
         })
         if not ut_ok:
             all_passed = False
+
+    if not vllm_release_path:
+        # Record WHY release-lane validation was absent (worktree setup
+        # failed or MAIN2MAIN_RELEASE_GATE=0) so pre_ci_check.json is
+        # self-explanatory.  Never fails the step.
+        checks.append({
+            "name": "release_lane",
+            "passed": True,
+            "detail": "release worktree unavailable — release-lane checks "
+                      "skipped (mypy release pass + symbol imports)",
+            "violations": [],
+            "skipped": True,
+        })
 
     return {"all_passed": all_passed, "checks": checks}

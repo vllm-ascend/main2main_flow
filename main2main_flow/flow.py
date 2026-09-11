@@ -290,6 +290,13 @@ class Main2MainState(BaseModel):
     steps: list = []
     release_tag: str = ""
 
+    # Git worktree of the pinned release tag (from vllm-ascend's
+    # .github/vllm-release-tag.commit), created in initialize.  Enables the
+    # dual-lane checks: mypy against the release tree, symbol-level import
+    # checks, and the gate's release UT batch.  Empty when setup failed or
+    # MAIN2MAIN_RELEASE_GATE=0 — every release-lane check then self-skips.
+    vllm_release_path: str = ""
+
     total_steps: int = 0
     current_step: int = 0
 
@@ -475,6 +482,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # before push — the clone is recreated every run, so unsaved
         # lessons would be lost.
         persist_lessons(self.state.vllm_report_path)
+        # The release worktree is workspace-scoped (initialize rmtree's
+        # workspace), but a leftover worktree registration in the vllm repo
+        # would break the next run's `worktree add` — remove it cleanly.
+        self._cleanup_release_worktree()
         if self.state.current_step == 0:
             # No step ever passed e2e: there is no successful adaptation to
             # submit, so creating a PR would only ship a "failed" description
@@ -709,6 +720,91 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         except (subprocess.CalledProcessError, OSError) as e:
             self.state.vllm_report_path = ""
             ts_print(f"\n[init] vllm-report clone failed (adapter will use grep): {e}")
+
+        # Prepare a git worktree of vllm at the PINNED RELEASE tag (read
+        # from vllm-ascend's .github/vllm-release-tag.commit, e.g.
+        # "v0.28.0") so pre_ci/gate can validate BOTH vllm lanes.  CI runs
+        # mypy + cpu-ut on the main pin only, so release-lane breakage
+        # (signature drift, unguarded main-only imports) otherwise surfaces
+        # only in the e2e matrix (PR #16296: 7 failed jobs).  Non-fatal:
+        # failure degrades to main-only validation.
+        self._prepare_release_worktree()
+
+    def _prepare_release_worktree(self) -> None:
+        """Worktree of the pinned release tag for dual-lane validation.
+
+        Reads the raw tag from vllm-ascend's tag file directly — NOT
+        state.release_tag, which is set later, in
+        analyze_commit_and_plan_step.  Two tag forms are needed: the raw
+        "v0.28.0" for git, and lstrip("v") for the VLLM_VERSION env
+        (ut_check sets it; detect_commits strips the same way).
+        """
+        self.state.vllm_release_path = ""
+        try:
+            ascend_repo = Path(self.state.vllm_ascend_path)
+            tag_file = ascend_repo / ".github" / "vllm-release-tag.commit"
+            if not tag_file.exists():
+                ts_print("[init] no vllm-release-tag.commit — release-lane "
+                         "checks skipped")
+                return
+            raw_tag = tag_file.read_text(encoding="utf-8").strip()
+            if not raw_tag:
+                ts_print("[init] empty vllm-release-tag.commit — "
+                         "release-lane checks skipped")
+                return
+            vllm_repo = Path(self.state.vllm_path)
+            release_worktree = WORKSPACE_DIR / "repos" / "vllm-release"
+            if release_worktree.exists():
+                shutil.rmtree(release_worktree)
+            # Fetch the tag if not present (depth 1 keeps it fast).  The
+            # clone typically has neither the release tag nor the commit
+            # it points to.
+            subprocess.run(
+                ["git", "fetch", "--depth", "1", "origin",
+                 f"refs/tags/{raw_tag}:refs/tags/{raw_tag}"],
+                cwd=str(vllm_repo), capture_output=True, text=True,
+                timeout=300,
+            )
+            subprocess.run(
+                ["git", "worktree", "add", "-f", "--detach",
+                 str(release_worktree), raw_tag],
+                cwd=str(vllm_repo), capture_output=True, text=True,
+                timeout=120, check=True,
+            )
+            self.state.vllm_release_path = str(release_worktree)
+            ts_print(f"\n[init] vllm release worktree at {release_worktree} "
+                     f"({raw_tag}) for dual-lane validation")
+        except (subprocess.CalledProcessError, OSError) as e:
+            self.state.vllm_release_path = ""
+            ts_print(f"[init] WARNING vllm release worktree failed ({e}) — "
+                     "release-lane checks will self-skip")
+
+    def _cleanup_release_worktree(self) -> None:
+        """Remove the vllm release worktree created in initialize."""
+        if not self.state.vllm_release_path:
+            return
+        try:
+            subprocess.run(
+                ["git", "worktree", "remove", "-f",
+                 self.state.vllm_release_path],
+                cwd=self.state.vllm_path, capture_output=True, text=True,
+                timeout=60,
+            )
+            ts_print("[init] removed vllm release worktree")
+        except (subprocess.CalledProcessError, OSError) as e:
+            ts_print(f"[init] WARNING failed to remove release worktree: {e}")
+        self.state.vllm_release_path = ""
+
+    def _release_gate_path(self) -> str | None:
+        """Release worktree path for the dual-lane checks, or None.
+
+        MAIN2MAIN_RELEASE_GATE=0 keeps the worktree (cheap) but the checks
+        receive None so every release-lane pass self-skips.
+        """
+        if os.environ.get("MAIN2MAIN_RELEASE_GATE", "1").lower() in (
+                "0", "false", "no", "off"):
+            return None
+        return self.state.vllm_release_path or None
 
     def analyze_commit_and_plan_step(self) -> Literal["HasCommit", "HasNoCommit"]:
         vllm_path = Path(self.state.vllm_path)
@@ -992,6 +1088,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     ascend_path=ascend_path,
                     vllm_path=vllm_path,
                     log_dir=gate_dir,
+                    release_tag=self.state.release_tag,
+                    vllm_release_path=self._release_gate_path(),
                 )
                 if not passed:
                     error_logs = new_error_logs
@@ -1425,8 +1523,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 pre_ci_noop_warned = False
 
             # pre_ci: mechanical checks (version, format, imports, temp files)
+            # vllm_release_path adds the release-lane passes: mypy against
+            # the release tree + symbol-level import checks.
             check_result = run_check(
-                ascend_path, self.state.release_tag, vllm_path=vllm_path)
+                ascend_path, self.state.release_tag, vllm_path=vllm_path,
+                vllm_release_path=self._release_gate_path())
             pre_ci_passed = check_result["all_passed"]
             ut_check = next((c for c in check_result.get("checks", [])
                              if c.get("name") == "ut"), None)
