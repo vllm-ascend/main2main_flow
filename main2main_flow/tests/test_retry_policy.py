@@ -114,6 +114,10 @@ def test_budgets_are_hardcoded(monkeypatch):
     # run 34078835752 converged 34→30→5 UT failures in 3 and reverted one
     # round short.
     assert "range(1, 6)" in inspect.getsource(flow_mod.Main2MainFlow._ai_analysis)
+    # The gate's static (format/mypy/UT) fix budget is also 5 — same
+    # "reverted one round short" family, aligned with the pre_ci budget.
+    assert "fix_rounds_left = 5" in inspect.getsource(
+        flow_mod.Main2MainFlow._final_quality_gate)
     # e2e exhaustion threshold stays at 3 fix rounds.
     src = inspect.getsource(flow_mod.Main2MainFlow.process_steps)
     assert "retry_count >= 3" in src

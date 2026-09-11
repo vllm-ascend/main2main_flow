@@ -1052,7 +1052,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         the budgets are exhausted without passing.
 
         Two budgets, consumed independently:
-        - 3 adapter-fix rounds for static (format/mypy/UT) failures; the
+        - 5 adapter-fix rounds for static (format/mypy/UT) failures; the
           static re-run after the last fix VERIFIES it (a fix that never
           gets re-checked is indistinguishable from failure — run
           31691299310's attempt-3 fix was correct and PR CI passed, but the
@@ -1074,7 +1074,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         error_logs: list[str] = []
         static_passed_sha: str | None = None
         fixes_applied = False
-        fix_rounds_left = 3
+        fix_rounds_left = 5
         # The regression e2e is the last guarantee before push when the
         # cumulative state is unvalidated: the LAST step skipped its
         # per-step e2e (no-op judgment may be wrong) or failed.
@@ -1099,10 +1099,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         break
                     fix_rounds_left -= 1
                     ts_print(f"\n[final_quality_gate] fix attempt "
-                             f"{3 - fix_rounds_left}/3: FAILED -> adapter-fix")
+                             f"{5 - fix_rounds_left}/5: FAILED -> adapter-fix")
                     role = "adapter-fix"
                     ts_print(f"[final_quality_gate] opencode attempt "
-                             f"{3 - fix_rounds_left}, role={role}")
+                             f"{5 - fix_rounds_left}, role={role}")
                     adapt_result = run_opencode_adapter({
                     "step_id": "final-quality-gate",
                     "previous_step_id": "",
