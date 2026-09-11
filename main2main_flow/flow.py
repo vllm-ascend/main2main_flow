@@ -1180,7 +1180,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 # A fix round succeeded — record the failure knowledge
                 # (version guards, test isolation, etc.) so future runs
                 # fix the same gate failure in one pass.
-                submit_gate_lesson(self.state.vllm_report_path, error_logs)
+                submit_gate_lesson(self.state.vllm_report_path, error_logs,
+                                   release_tag=self.state.release_tag)
             ts_print("\n[final_quality_gate] PASSED")
             # Regenerate the cumulative patch from the CURRENT working
             # tree so it includes format/mypy fixes made by the gate.
@@ -1612,7 +1613,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # same as e2e/gate recoveries (run 33976675052 step-1 and
             # run 33944487577 step-7 died on the same family twice).
             submit_pre_ci_lesson(self.state.vllm_report_path, step_id,
-                                 last_failed_check)
+                                 last_failed_check,
+                                 release_tag=self.state.release_tag)
 
         if not pre_ci_passed:
             ts_print(f"[ai_analysis] {step_id}: FAILED after {attempt} "
@@ -1622,7 +1624,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # (runs died on the same family twice with no carry-over).
             submit_pre_ci_exhausted_lesson(
                 self.state.vllm_report_path, step_id, last_failed_check,
-                ut_failures_per_attempt)
+                ut_failures_per_attempt, release_tag=self.state.release_tag)
             self.state.test_errors = error_logs if error_logs else []
             # Reset accidental vllm edits on this exit too — run() checks
             # out last_verified_commit next and a dirty vllm tree makes

@@ -201,13 +201,39 @@ def _read_log_entry(entry: str, limit: int = 200_000) -> str:
     return entry
 
 
-def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
+def _release_lane_hit(checks: list[dict], release_tag: str) -> bool:
+    """True when any failing check's evidence is attributed to the release
+    lane.  Attribution lives in two shapes: mypy check details name the
+    release tree (``release(...)`` in failed_units) while UT violations
+    carry the ``[<tag>]`` batch prefix — the violation lines themselves
+    carry no tree label.  Used to tell the KB which vllm tree broke so fix
+    rounds guard the release branch instead of reverting the main path."""
+    if not release_tag:
+        return False
+    raw = release_tag.lstrip("v")
+    prefixes = (f"[{raw}] ", f"[{release_tag}] ")
+    for c in checks:
+        if c.get("passed"):
+            continue
+        if "release(" in (c.get("detail") or ""):
+            return True
+        for v in c.get("violations") or []:
+            first = v.splitlines()[0].lstrip() if v else ""
+            if first.startswith(prefixes):
+                return True
+    return False
+
+
+def submit_gate_lesson(vllm_report_path: str, error_logs: list[str],
+                       release_tag: str = "") -> None:
     """Record a lesson when the final quality gate needed a fix round.
 
     The gate's adapter-fix loop resolves UT/format/mypy failures found only
     at the end of the run (e.g. version-dependent UT failures, test
     isolation issues) — knowledge as valuable as per-step E2E lessons, and
-    previously lost.  Called by flow._final_quality_gate when a fix round
+    previously lost.  ``release_tag`` threads the pinned vllm release tag
+    through so the guidance names the real branch instead of a stale
+    hardcode.  Called by flow._final_quality_gate when a fix round
     succeeded.
     """
     if not vllm_report_path or not error_logs:
@@ -217,6 +243,11 @@ def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
     failed = [t for t in logs if "FAILED" in t or "ERROR" in t]
     error_text = "\n".join(logs)
     keywords = _extract_keywords(error_text, "final quality gate failure")
+    tag = release_tag.lstrip("v") if release_tag else ""
+    version_hint = (f"Check if the failing UT needs a vllm_version_is('{tag}') "
+                    "branch or a version guard" if tag else
+                    "Check if the failing UT needs a vllm_version_is branch "
+                    "or a version guard")
     title = (f"final-gate: fix needed "
              f"({len(failed) or len(error_logs)} failure(s))")
     symptom = ("Final quality gate (format+mypy+UT) failed: "
@@ -226,12 +257,16 @@ def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
                   "test isolation/mock requirements, or format/mypy issues "
                   "surfacing only on the cumulative state.")
     fix_guidance = [
-        "Check if the failing UT needs a vllm_version_is('0.26.0') branch "
-        "or a version guard",
+        version_hint,
         "Check if the failing UT constructs objects requiring ascend config "
         "or NPU env — add a mock/fixture instead of relying on isolation",
         "Verify the fix against the failing test specifically",
     ]
+    if tag:
+        fix_guidance.append(
+            f"If the failure reproduces with VLLM_VERSION={tag} against the "
+            "pinned release vllm worktree, it is release-lane-only — guard "
+            "it for the release branch, do not revert the main path")
     example = error_text[:200]
     _submit_via_mcp(report_dir, title=title, symptom=symptom,
                     root_cause=root_cause, fix_guidance=fix_guidance,
@@ -240,14 +275,16 @@ def submit_gate_lesson(vllm_report_path: str, error_logs: list[str]) -> None:
 
 
 def submit_pre_ci_lesson(vllm_report_path: str, step_id: str,
-                         check_result: dict) -> None:
+                         check_result: dict, release_tag: str = "") -> None:
     """Record a lesson when pre_ci recovered after >=1 failed attempt.
 
     pre_ci failures (format/mypy/UT) killed run 33944487577 step-7 and
     run 33976675052 step-1 on the SAME upstream-contract family — none of
     that knowledge was recorded because only e2e/gate recoveries had a
-    lesson path.  Called by flow._ai_analysis when pre_ci passes on
-    attempt >= 2, with the LAST failing check result.
+    lesson path.  ``release_tag`` marks release-lane-attributed failures
+    in the symptom so the KB distinguishes which vllm tree broke.  Called
+    by flow._ai_analysis when pre_ci passes on attempt >= 2, with the LAST
+    failing check result.
     """
     if not vllm_report_path or not check_result:
         return
@@ -274,6 +311,9 @@ def submit_pre_ci_lesson(vllm_report_path: str, step_id: str,
                f"{len(violations)} violation(s); recovered on a later "
                f"attempt. First violations: "
                + " | ".join(v.splitlines()[0][:120] for v in violations[:3]))
+    if _release_lane_hit(checks, release_tag):
+        symptom += (f"; release lane affected (vllm@{release_tag}) — fix "
+                    "the release branch, do not revert the main path")
     root_cause = (
         "The initial adaptation passed analysis but failed mechanical "
         "checks (format/mypy/UT) — usually an upstream contract drift "
@@ -300,7 +340,8 @@ def submit_pre_ci_lesson(vllm_report_path: str, step_id: str,
 
 def submit_pre_ci_exhausted_lesson(vllm_report_path: str, step_id: str,
                                    check_result: dict | None,
-                                   ut_failures_per_attempt: list[int]) -> None:
+                                   ut_failures_per_attempt: list[int],
+                                   release_tag: str = "") -> None:
     """Record a lesson when the pre_ci budget ran out WITHOUT recovery.
 
     Every round re-analyzes the same upstream commit from zero, even when
@@ -341,6 +382,9 @@ def submit_pre_ci_exhausted_lesson(vllm_report_path: str, step_id: str,
                f"remaining: {len(violations)} violation(s)"
                + (f" in {', '.join(remaining_files)}" if remaining_files
                   else ""))
+    if _release_lane_hit(checks, release_tag):
+        symptom += (f"; release lane affected (vllm@{release_tag}) — fix "
+                    "the release branch, do not revert the main path")
     root_cause = (
         "Budget exhausted mid-convergence: the shrinking failure "
         "trajectory means the contract mapping is correct and only the "
