@@ -71,11 +71,37 @@ one_card/test_qwen3_0_6b.py and two_card/test_qwen3_vl_30b_a3b_instruct.py
 join the blocklist.  18 cases, 44/48 slot-units (4 spare — the next case
 added must swap one out), 3 rounds measured 1048s wall (17.5min).
 
+User requirement 2026-09-13: diff-driven test selection is retired — the
+fixed set is the only source, and it should cover as many modules as
+possible.  Additions covering previously-unselected modules:
+test_simple_cpu_offload.py (KV-connector engine-init path — PR 16439's
+upstream-inherited crash lived exactly there and every fixed case missed
+it), test_cpu_offloading.py, test_multi_instance.py, four_card/
+test_qwen3_mrv2_eplb.py (EPLB).  Cap raised 3→4 rounds; the binding
+budget is the phase-wall pin: Σ per-round makespan ≤ 25min.
+
+Same-day correction from the first daily-bot run on flow 28a17ad
+(nv-action run 34745454795, 2026-09-13, vllm@62f3bf58): test_w8a16 and
+test_w8a8_dynamic were PHANTOM cases — picked from a stale working tree,
+the files don't exist on vllm-ascend upstream main, pytest exited 4, and
+an unfixable collection error froze the blocking set → e2e stop-loss →
+the run produced no PR.  Lesson: candidate cases must be verified
+against the upstream-main tree, not a local checkout.  Also removed:
+test_npu_ipc_weight_transfer — a REAL failure (/update_weights 500 on
+vllm@62f3bf58); two adapter-fix rounds did not converge and it would
+have wedged every future run the same way.  Root-cause it before
+re-adding.  Everything else passed, including test_simple_cpu_offload —
+the new guard caught nothing because nothing was broken, which is the
+point.  22 cases → 4 rounds.
+
 Durations are NOT the upstream test_config.yaml ``estimated_times`` — those
-are a2-based and proved systematically off for a3-16.  They are cold
-per-case measurements from nv-action run 34465652074 set A (2026-09-10,
-16 cards free); test_basic node entries from the green a2-1 PR-CI run
-34367387684 (2026-09-09, vllm@b2f68583).
+are a2-based and proved systematically off for a3-16 (cpu_offloading est
+30s vs 173s real; eplb est 410s vs 300s real).  one_card/two_card/
+four_card suite entries are re-measured from run 34745454795 (2026-09-13)
+by diffing suite start/done timestamps; test_basic node entries from the
+green a2-1 PR-CI run 34367387684 (2026-09-09, vllm@b2f68583); the
+2026-09-10 set-A run 34465652074 measurements for the dsv4/dspark nodes
+carry over.
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """
@@ -90,12 +116,19 @@ _POLICY = Path(__file__).parent.parent / "test_policy.json"
 # run 34465652074 set A (2026-09-10), except the test_basic nodes (green
 # a2-1 PR-CI run 34367387684, 2026-09-09).
 _RECORDED_S = {
-    "tests/e2e/pull_request/one_card/test_sampler.py": 107,
-    "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py": 171,
-    "tests/e2e/pull_request/one_card/test_vlm.py": 328,
+    # one_card suite durations re-measured cold from the first daily-bot
+    # run on flow 28a17ad (vllm-ascend nv-action run 34745454795,
+    # 2026-09-13, vllm@62f3bf58) by diffing suite start/done timestamps;
+    # test_basic nodes from green a2-1 PR-CI run 34367387684 (2026-09-09).
+    "tests/e2e/pull_request/one_card/test_sampler.py": 95,
+    "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py": 166,
+    "tests/e2e/pull_request/one_card/test_vlm.py": 304,
+    "tests/e2e/pull_request/one_card/test_simple_cpu_offload.py": 151,
+    "tests/e2e/pull_request/one_card/test_cpu_offloading.py": 173,
+    "tests/e2e/pull_request/one_card/test_multi_instance.py": 102,
     "tests/e2e/pull_request/one_card/rlhf/state_transitions/"
-    "test_pause_resume.py": 144,
-    "tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py": 63,
+    "test_pause_resume.py": 147,
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py": 99,
     # test_basic.py node durations measured from green vllm-ascend a2-1
     # PR-CI run 34367387684 (2026-09-09, vllm@b2f68583): per-case engine
     # init timestamps diffed per parametrized case.  The file-level record
@@ -110,11 +143,11 @@ _RECORDED_S = {
     "test_mtp_spec_decoding": 198,
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::"
     "test_qwen3_dense_graph_mode": 376,
-    "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py": 93,
-    "tests/e2e/pull_request/two_card/test_prefix_caching.py": 363,
-    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py": 145,
-    "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py": 113,
-    "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py": 352,
+    "tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py": 110,
+    "tests/e2e/pull_request/two_card/test_prefix_caching.py": 357,
+    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py": 126,
+    "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py": 122,
+    "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py": 364,
     # One DSPARK node of test_deepseek_v4.py: the two DSPARK params are
     # redundant twins (full_decode_only vs default_full_and_piecewise), so
     # only the piecewise one is selected — it carries DSPARK+W4A8+
@@ -122,13 +155,29 @@ _RECORDED_S = {
     "tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py::"
     "test_dspark_spec_decoding[default_full_and_piecewise-False-1024-"
     "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test]": 401,
-    "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 31,
-    "tests/e2e/pull_request/four_card/test_pipeline_parallel.py": 501,
+    "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 32,
+    "tests/e2e/pull_request/four_card/test_pipeline_parallel.py": 524,
+    # 2026-09-13 module-coverage expansion (user: maximize module coverage,
+    # diff-driven selection retired).  Kept additions, all measured in the
+    # same 34745454795 run: test_simple_cpu_offload (KV-connector
+    # engine-init path — PR #16439's upstream-inherited crash lived there),
+    # test_cpu_offloading, test_multi_instance, four_card MRV2 EPLB.
+    # REMOVED same day after the run: test_w8a16 + test_w8a8_dynamic
+    # (phantom cases — selected from a stale working tree; the files don't
+    # exist on vllm-ascend upstream main, so pytest exited 4 and the
+    # adapter could never shrink the blocking set → stop-loss), and
+    # test_npu_ipc_weight_transfer (real /update_weights 500 on
+    # vllm@62f3bf58; two adapter-fix rounds did not converge — root-cause
+    # before re-adding).
+    "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py": 300,
 }
 
 _A3_CARDS = 16
 _BUDGET_S = 1200  # 20min per round
-_MAX_ROUNDS = 3
+_MAX_ROUNDS = 4   # was 3 (2026-09-07); the 2026-09-13 module-coverage
+                  # expansion packs to 4 rounds — the phase-wall pin below
+                  # is the binding budget now
+_PHASE_WALL_S = 1500  # 25min total e2e phase (user requirement 2026-09-10)
 
 # disaggregated_encoder and deepseek_v3_2_w8a8_pruning both hardcode
 # physical devices 0..N-1 in their sources (Remote*Server /
@@ -158,11 +207,21 @@ def test_every_selected_case_has_a_recorded_duration():
             "to _RECORDED_S before it can be selected")
 
 
-def test_selected_set_packs_into_at_most_3_rounds():
+def test_selected_set_packs_into_at_most_4_rounds():
     rounds = _scheduled()
     assert len(rounds) <= _MAX_ROUNDS, (
         f"selected cases schedule to {len(rounds)} rounds — exceeds the "
         f"{_MAX_ROUNDS}-round cap; drop or swap cases")
+
+
+def test_whole_phase_within_25min():
+    # Sequential rounds: phase wall = Σ per-round makespan (longest case).
+    # This is the binding budget since the 2026-09-13 expansion.
+    rounds = _scheduled()
+    wall = sum(max(_RECORDED_S.get(t, 0) for t in r) for r in rounds)
+    assert wall <= _PHASE_WALL_S, (
+        f"phase wall {wall}s exceeds the {_PHASE_WALL_S}s (25min) budget; "
+        f"drop or swap cases")
 
 
 def test_every_single_round_within_20min():

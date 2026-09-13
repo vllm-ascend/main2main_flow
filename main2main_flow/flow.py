@@ -20,6 +20,7 @@ from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson,
     submit_pre_ci_exhausted_lesson, submit_pre_ci_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
+from main2main_flow.scripts.utils.pr_ci_monitor import watch_and_fix
 from main2main_flow.scripts.utils.run_tests import (
     PASS_RESULTS,
     build_test_errors_detail,
@@ -87,6 +88,26 @@ def _parse_summary_files(summary_text: str, step_id: str) -> set[str]:
     return set()
 
 
+def _filter_upstream_links(links: list[str], chunk_shas: set[str]) -> list[str]:
+    """Drop sha-labeled upstream citations that are outside the step's chunk.
+
+    The adapter writes ``Upstream commit: <sha>`` lines from memory of the
+    whole range's git log, so a step can end up citing a no-op/doc commit
+    it never worked on (PR #16424 shipped rows pairing ROCm/doc-only
+    commits with an unrelated adaptation text).  A citation is only
+    trustworthy when its commit is a member of the step's own commit
+    chunk.  Non-sha labels (e.g. PR-title links) carry no verifiable sha —
+    they are kept as-is.
+    """
+    kept: list[str] = []
+    for ln in links:
+        m = re.fullmatch(r"\[([0-9a-fA-F]{7,40})\]\([^)]+\)", ln)
+        if m and not any(sha.startswith(m.group(1)[:8]) for sha in chunk_shas):
+            continue
+        kept.append(ln)
+    return kept
+
+
 def _resolve_test_cases() -> list[str] | None:
     """Merge test cases from env, allowlist, and blocklist.
 
@@ -124,6 +145,37 @@ def _resolve_test_cases() -> list[str] | None:
         result.append(t)
 
     return result or None
+
+
+# Smoke-failure triage: pull python files out of pytest tracebacks
+# (`File "..."` lines) and bare `<pkg-path>.py:<line>:` mentions so the
+# failure's code locations can be intersected with the adaptation diff.
+_SMOKE_TRACEBACK_FILE_RE = re.compile(r'File "([^"]+\.py)"')
+_SMOKE_BARE_FILE_RE = re.compile(
+    r"\b((?:vllm_ascend|tests|examples)/[\w./-]+\.py):\d+")
+
+
+def _resolve_release_smoke_cases() -> list[str]:
+    """Release-tag smoke selection for the final quality gate.
+
+    MAIN2MAIN_RELEASE_TEST_CASES (whitespace/newline separated) overrides
+    the test_policy.json "release_smoke" key.  Empty means the smoke is
+    skipped — same fallback philosophy as _resolve_test_cases.
+    """
+    env_val = os.getenv("MAIN2MAIN_RELEASE_TEST_CASES", "").strip()
+    if env_val:
+        return [t.strip() for t in env_val.replace("\n", " ").split()
+                if t.strip()]
+    policy_path = Path(__file__).parent / "test_policy.json"
+    if policy_path.exists():
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            cases = policy.get("release_smoke", [])
+            return [t.strip() for t in cases
+                    if isinstance(t, str) and t.strip()]
+        except (json.JSONDecodeError, KeyError, OSError):
+            ts_print("[test_policy] failed to parse release_smoke, ignoring")
+    return []
 
 
 def _resolve_test_timeouts() -> dict[str, int] | None:
@@ -501,7 +553,36 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print("[push] final quality gate failed after fix rounds, "
                      "skipping PR creation")
             return
-        self.push_to_github()
+        pr_url = self.push_to_github()
+        self._monitor_pr_ci(pr_url)
+
+    def _monitor_pr_ci(self, pr_url: str) -> None:
+        """Closed-loop watch of the submitted PR's upstream CI.
+
+        The E2E workflow on the PR is the only executor of the dual-version
+        matrix, so its failures are repaired here (rebase conflicts
+        deterministically, content failures via adapter-fix rounds) until
+        green, budgets run out, or the failures prove upstream-inherited.
+        Best-effort: any watcher failure is recorded, never propagated —
+        the run itself has already succeeded by this point.  Disabled with
+        MAIN2MAIN_PR_WATCH=0.
+        """
+        if not pr_url or pr_url == "SKIP_PUSH":
+            return
+        if os.getenv("MAIN2MAIN_PR_WATCH", "1") == "0":
+            ts_print("[pr-ci-watch] MAIN2MAIN_PR_WATCH=0, skipping")
+            return
+        try:
+            result = watch_and_fix(
+                pr_url,
+                self.state.vllm_ascend_path,
+                str(WORKSPACE_DIR),
+                session_id=self.state.session_id,
+            )
+            if result.get("session_id"):
+                self.state.session_id = result["session_id"]
+        except Exception as exc:
+            ts_print(f"[pr-ci-watch] monitoring failed (non-fatal): {exc}")
 
     def initialize(self):
         """Initialize state; all paths default to workspace/ under the project root."""
@@ -1052,7 +1133,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         the budgets are exhausted without passing.
 
         Two budgets, consumed independently:
-        - 5 adapter-fix rounds for static (format/mypy/UT) failures; the
+        - 5 adapter-fix rounds for static (format/mypy/UT) and
+          release-smoke (own-diff) failures; the
           static re-run after the last fix VERIFIES it (a fix that never
           gets re-checked is indistinguishable from failure — run
           31691299310's attempt-3 fix was correct and PR CI passed, but the
@@ -1080,6 +1162,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # per-step e2e (no-op judgment may be wrong) or failed.
         need_regression_e2e = not self.state.last_step_e2e_passed
         e2e_attempts_left = 4
+        # Release-smoke memoization (same tree-sha pattern as the static
+        # checks): a passed or suppressed (upstream-inherited) tree is not
+        # re-smoked until the tree changes.
+        smoke_passed_sha: str | None = None
+        smoke_suppressed_sha: str | None = None
 
         while True:
             tree_sha = self._working_tree_diff_sha(ascend_path)
@@ -1103,36 +1190,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     role = "adapter-fix"
                     ts_print(f"[final_quality_gate] opencode attempt "
                              f"{5 - fix_rounds_left}, role={role}")
-                    adapt_result = run_opencode_adapter({
-                    "step_id": "final-quality-gate",
-                    "previous_step_id": "",
-                    "previous_step_summary_path": "",
-                    "is_last_step": "true",
-                    "step_dir": str(gate_dir),
-                    "patch_path": "",
-                    "changed_files_path": "",
-                    "ascend_path": ascend_path,
-                    "release_tag": self.state.release_tag,
-                    "vllm_path": vllm_path,
-                    "role": role,
-                    "error_logs": json.dumps(error_logs, ensure_ascii=False),
-                    "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
-                    "mode": role,
-                    "start_commit": "",
-                    "end_commit": self.state.cur_vllm_commit or "",
-                    # The gate's fix rounds fix UT/test failures (e.g. PIN_MEMORY,
-                    # maybe_calc_kv_scales, deepseek_v4_thinking) — the adapter
-                    # must query vllm-report's lessons (get_adaptation_lessons) to
-                    # fix them in one pass instead of blind retries.
-                    "vllm_report_context": (
-                        "vllm-report MCP server is registered in opencode.jsonc. "
-                        "Call its tools dynamically (see \"vllm-report MCP Tools\" "
-                        "section below).  Call tool_get_adaptation_lessons to find "
-                        "prior lessons matching these failures before fixing."
-                    ),
-                    }, session_id=self.state.session_id)
-                    if adapt_result.session_id:
-                        self.state.session_id = adapt_result.session_id
+                    self._gate_adapter_fix(role, error_logs, gate_dir)
                     fixes_applied = True
                     continue
             # Re-sha after the run: format.sh auto-fix may have edited
@@ -1175,6 +1233,55 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         error_logs = [str(Path(gate_dir) / "quality_gate.json")]
                         continue
                 need_regression_e2e = False
+
+            # Release-tag smoke: once per tree, after the main-lane e2e is
+            # green.  Memoized by tree sha; a skipped round (no worktree,
+            # remote mode) also marks the tree so it isn't retried every
+            # iteration.  Key on static_passed_sha (re-sha'd after the
+            # static run, so it reflects format.sh's auto-fix edits) rather
+            # than the pre-static tree_sha.
+            if (static_passed_sha != smoke_passed_sha
+                    and static_passed_sha != smoke_suppressed_sha):
+                smoke = self._run_release_smoke(gate_dir)
+                if smoke.get("skipped"):
+                    smoke_suppressed_sha = static_passed_sha
+                elif not smoke["passed"]:
+                    # Same-tree retry once: a flaky engine-init failure must
+                    # not trigger an adapter fix round.
+                    ts_print("[final_quality_gate] release smoke failed - "
+                             "retrying once on the same tree (flake check)")
+                    smoke = self._run_release_smoke(gate_dir)
+                if not smoke.get("skipped"):
+                    if smoke["passed"]:
+                        smoke_passed_sha = static_passed_sha
+                    else:
+                        verdict, root_files = self._classify_smoke_failure(smoke)
+                        if verdict == "inherited":
+                            ts_print(f"[final_quality_gate] release smoke failure is "
+                                     f"UPSTREAM-INHERITED (root cause in "
+                                     f"{', '.join(root_files[:3])} — none of them "
+                                     f"is in this adaptation's diff); recording, "
+                                     f"not blocking")
+                            smoke_suppressed_sha = static_passed_sha
+                            self._record_inherited_smoke(smoke, gate_dir,
+                                                         root_files)
+                        elif fix_rounds_left == 0:
+                            break
+                        else:
+                            fix_rounds_left -= 1
+                            ts_print(f"\n[final_quality_gate] release smoke fix "
+                                     f"attempt {5 - fix_rounds_left}/5: FAILED "
+                                     f"(own diff) -> adapter-fix")
+                            role = "adapter-fix"
+                            ts_print(f"[final_quality_gate] opencode attempt "
+                                     f"{5 - fix_rounds_left}, role={role}")
+                            error_logs = smoke["detail_files"] or [
+                                str(Path(gate_dir)
+                                    / "final-quality-gate-release-smoke"
+                                    / "tests" / "round-0-result.json")]
+                            self._gate_adapter_fix(role, error_logs, gate_dir)
+                            fixes_applied = True
+                            continue
 
             if fixes_applied:
                 # A fix round succeeded — record the failure knowledge
@@ -1241,15 +1348,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         ts_print(f"[final_quality_gate] regenerated patch ({len(new_patch)} bytes) "
                  f"for regression e2e")
 
-        # Use the CUMULATIVE changed files (baseline -> final tree) for test
-        # selection.  The last step's changed_files only covers that step, but
-        # gate format/mypy fixes can touch ANY file in the repo (mypy runs the
-        # whole tree), so the regression e2e must cover all accumulated changes.
-        cumulative_files = run_git(
-            ascend_path, "diff", "--name-only", self.state.original_ascend_ref
-        ).strip().splitlines()
-        cumulative_files = [f for f in cumulative_files if f]
-
         # Save and override env vars to skip vllm reinstall + preserve ascend tree.
         saved_skip_pip = os.environ.get("SKIP_PIP_INSTALL", "")
         saved_keep_branch = os.environ.get("MAIN2MAIN_KEEP_BRANCH", "")
@@ -1270,7 +1368,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 ascend_commit=self.state.cur_ascend_commit,
                 patch_path=str(patch_path),
                 step_id=step_id,
-                select_by_files=cumulative_files or None,
                 test_cases=_resolve_test_cases(),
                 test_timeouts=_resolve_test_timeouts(),
                 remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
@@ -1290,6 +1387,215 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         test_passed = result.get("can_commit", False)
         ts_print(f"\n[final_quality_gate] regression e2e: {'PASSED' if test_passed else 'FAILED'}")
         return test_passed
+
+    def _gate_adapter_fix(self, role: str, error_logs: list[str],
+                          gate_dir: Path) -> None:
+        """Run one opencode adapter fix round for a gate failure.
+
+        Shared by the static (format/mypy/UT) path and the release-smoke
+        own-diff path — same payload contract, same session bookkeeping.
+        """
+        adapt_result = run_opencode_adapter({
+            "step_id": "final-quality-gate",
+            "previous_step_id": "",
+            "previous_step_summary_path": "",
+            "is_last_step": "true",
+            "step_dir": str(gate_dir),
+            "patch_path": "",
+            "changed_files_path": "",
+            "ascend_path": self.state.vllm_ascend_path,
+            "release_tag": self.state.release_tag,
+            "vllm_path": self.state.vllm_path,
+            "role": role,
+            "error_logs": json.dumps(error_logs, ensure_ascii=False),
+            "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
+            "mode": role,
+            "start_commit": "",
+            "end_commit": self.state.cur_vllm_commit or "",
+            # The gate's fix rounds fix UT/test failures (e.g. PIN_MEMORY,
+            # maybe_calc_kv_scales, deepseek_v4_thinking) — the adapter
+            # must query vllm-report's lessons (get_adaptation_lessons) to
+            # fix them in one pass instead of blind retries.
+            "vllm_report_context": (
+                "vllm-report MCP server is registered in opencode.jsonc. "
+                "Call its tools dynamically (see \"vllm-report MCP Tools\" "
+                "section below).  Call tool_get_adaptation_lessons to find "
+                "prior lessons matching these failures before fixing."
+            ),
+        }, session_id=self.state.session_id)
+        if adapt_result.session_id:
+            self.state.session_id = adapt_result.session_id
+
+    def _release_raw_tag(self) -> str:
+        """Raw tag (e.g. v0.28.0) the release worktree was created from.
+
+        state.release_tag is detect()'s compat tag and may be empty; the
+        worktree was built from vllm-ascend's tag file directly.
+        """
+        try:
+            tag_file = (Path(self.state.vllm_ascend_path) / ".github"
+                        / "vllm-release-tag.commit")
+            return tag_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _run_release_smoke(self, gate_dir: Path) -> dict:
+        """Run the release-tag e2e smoke against the pinned release tree.
+
+        The smoke answers one question — does this tree's engine still
+        START on the release tag — not regression coverage (that is the
+        main-lane e2e's job).  vllm is shadowed via PYTHONPATH pointing at
+        the release worktree (pure-python; the same mechanism as the
+        release UT batch), so no checkout or reinstall happens
+        (skip_setup=True) and the main-lane env stays untouched.
+
+        Remote e2e mode cannot work: the remote container clones its own
+        vllm trees (the local worktree path does not exist there) and
+        forwards only VLLM_* env — a bare VLLM_VERSION would make
+        vllm_version_is report the release tag while the engine actually
+        runs main vllm.  The smoke self-skips instead.
+
+        Returns {"skipped": bool, "reason": str, "passed": bool,
+                 "detail_files": list[str], "result": dict}.
+        """
+        release_path = self._release_gate_path()
+        if not release_path:
+            return {"skipped": True, "reason": "no release worktree"}
+        smoke_cases = _resolve_release_smoke_cases()
+        if not smoke_cases:
+            return {"skipped": True, "reason": "no release smoke cases"}
+        if os.getenv("SKIP_E2E_TEST", "false").lower() == "true":
+            return {"skipped": True, "reason": "SKIP_E2E_TEST"}
+        if os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE", ""):
+            ts_print("[final_quality_gate] release smoke skipped: remote "
+                     "e2e mode cannot see the release worktree")
+            return {"skipped": True, "reason": "remote e2e mode"}
+
+        tag = self._release_raw_tag() or "release"
+        ts_print(f"[final_quality_gate] release smoke: {len(smoke_cases)} "
+                 f"case(s) against {release_path} ({tag})")
+
+        saved_pythonpath = os.environ.get("PYTHONPATH", "")
+        saved_vllm_version = os.environ.get("VLLM_VERSION", "")
+        os.environ["PYTHONPATH"] = (
+            f"{release_path}:{saved_pythonpath}" if saved_pythonpath
+            else release_path)
+        # vllm_version_is reads VLLM_VERSION first (vllm_ascend/utils.py);
+        # without it the engine would import the release tree but still
+        # report the installed main version, so every version guard would
+        # take the main-vllm branch.
+        os.environ["VLLM_VERSION"] = tag.lstrip("v")
+        try:
+            result = run_tests(
+                vllm_path=self.state.vllm_path,
+                # Unused under skip_setup (no checkout happens); recorded
+                # for the result json only.
+                vllm_commit=self.state.last_verified_commit
+                or self.state.cur_vllm_commit,
+                ascend_path=self.state.vllm_ascend_path,
+                ascend_commit=self.state.cur_ascend_commit,
+                patch_path=None,
+                step_id="final-quality-gate-release-smoke",
+                test_cases=smoke_cases,
+                test_timeouts=None,
+                remote=None,
+                round_number=0,
+                log_dir=str(gate_dir),
+                skip_setup=True,
+            )
+        finally:
+            if saved_pythonpath:
+                os.environ["PYTHONPATH"] = saved_pythonpath
+            else:
+                os.environ.pop("PYTHONPATH", None)
+            if saved_vllm_version:
+                os.environ["VLLM_VERSION"] = saved_vllm_version
+            else:
+                os.environ.pop("VLLM_VERSION", None)
+
+        test_passed = result.get("can_commit", False)
+        ts_print(f"[final_quality_gate] release smoke: "
+                 f"{'PASSED' if test_passed else 'FAILED'}")
+        detail_files: list[str] = []
+        if not test_passed:
+            tests_dir = (Path(gate_dir) / "final-quality-gate-release-smoke"
+                         / "tests")
+            detail_file = build_test_errors_detail(
+                result.get("suite_results", {}), 0, tests_dir,
+                tests_dir / "round-0-result.json")
+            if detail_file:
+                detail_files.append(str(detail_file))
+            detail_files.append(str(tests_dir / "round-0-result.json"))
+        return {"skipped": False, "reason": "", "passed": test_passed,
+                "detail_files": detail_files, "result": result}
+
+    def _smoke_failure_files(self, smoke: dict) -> list[str]:
+        """Ascend-relative .py files appearing in the failed suites' logs.
+
+        Only files inside the vllm-ascend checkout count: absolute paths
+        outside it (installed vllm, harness) carry no own/inherited signal
+        — the adaptation diff can only ever contain ascend-repo files.
+        """
+        ascend_root = Path(self.state.vllm_ascend_path).resolve()
+        files: set[str] = set()
+        for tr in (smoke.get("result", {}).get("suite_results")
+                   or {}).values():
+            if not isinstance(tr, dict) or tr.get("ci_result") not in (
+                    "failed", "summary_error"):
+                continue
+            try:
+                text = Path(tr.get("log_path", "")).read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for m in _SMOKE_TRACEBACK_FILE_RE.finditer(text):
+                raw = m.group(1)
+                p = Path(raw)
+                if p.is_absolute():
+                    try:
+                        files.add(str(p.resolve().relative_to(ascend_root)))
+                    except ValueError:
+                        pass
+                elif re.match(r"^(?:vllm_ascend|tests|examples)/", raw):
+                    files.add(raw)
+            for m in _SMOKE_BARE_FILE_RE.finditer(text):
+                files.add(m.group(1))
+        return sorted(files)
+
+    def _classify_smoke_failure(self, smoke: dict) -> tuple[str, list[str]]:
+        """Split a smoke failure into own-diff vs upstream-inherited.
+
+        Intersects the failure tracebacks' files with the cumulative
+        adaptation diff (baseline -> working tree).  Files OUTSIDE the
+        diff mean the defect predates this adaptation (the PR 16382
+        shape: base-branch code breaking the release tag) — the adapter
+        must not burn fix rounds on it.  No extractable files -> "own"
+        (conservative: an unparseable failure goes to the adapter, whose
+        budget caps the damage).
+
+        Returns (verdict, root_cause_files).
+        """
+        diff_files = set(filter(None, run_git(
+            self.state.vllm_ascend_path, "diff", "--name-only",
+            self.state.original_ascend_ref).strip().splitlines()))
+        failure_files = self._smoke_failure_files(smoke)
+        if not failure_files:
+            return "own", []
+        if set(failure_files) & diff_files:
+            return "own", failure_files
+        return "inherited", failure_files
+
+    def _record_inherited_smoke(self, smoke: dict, gate_dir: Path,
+                                root_files: list[str]) -> None:
+        """Persist the upstream-inherited verdict with its evidence."""
+        (Path(gate_dir) / "release_smoke_inherited.json").write_text(
+            json.dumps({
+                "root_cause_files": root_files,
+                "detail_files": smoke.get("detail_files", []),
+                "suite_results": smoke.get("result", {}).get(
+                    "suite_results", {}),
+            }, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
 
     def _ai_analysis(self) -> bool:
         step = self.state.steps[self.state.current_step]
@@ -1724,7 +2030,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ascend_commit=self.state.cur_ascend_commit,
             patch_path=self.state.cur_patch_path or None,
             step_id=step_id,
-            select_by_files=changed,
             test_cases=_resolve_test_cases(),
             test_timeouts=_resolve_test_timeouts(),
             remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
@@ -2129,6 +2434,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     cause = " ".join(parts)
                 elif collecting == "change":
                     change = " ".join(parts)
+            # The adapter sometimes cites an upstream commit it merely saw
+            # in the range's git log rather than the commit that drove this
+            # step's change — PR #16424 shipped rows pairing ROCm/doc-only
+            # commits with an unrelated adaptation text.  Keep sha-labeled
+            # citations only when the cited commit is a member of this
+            # step's own chunk; everything else falls back to the routed
+            # (ascend-affected) commits at render time.
+            upstream_links = _filter_upstream_links(
+                upstream_links, {c["sha"][:8] for c in s.get("commits", [])})
             # Attribute cumulative files to this step via the summary header
             # and the Change: field's backtick-quoted paths.  Falls back to
             # mentioning all cumulative files for the step if the adapter
@@ -2171,6 +2485,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             step_items.append({
                 "files": step_files,
                 "commit": s["end_commit"][:8],
+                "affected_commits": s.get("affected_commits", []),
                 "cause": cause,
                 "change": change,
                 "upstream_links": upstream_links,
@@ -2224,10 +2539,18 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # adaptation).  Missing values get a "—" placeholder.
         for item in step_items:
             files_str = "<br>".join(f"`{f}`" for f in item["files"]) or "—"
-            # Upstream column: PR/commit links + cause
+            # Upstream column: PR/commit links + cause.  With no (in-chunk)
+            # citation, prefer the routed ascend-affected commits — a
+            # chunk's end_commit is often a trailing no-op/doc commit the
+            # adapter never worked on.
             links = item.get("upstream_links") or []
             if not links:
-                links = [f"[{item['commit'][:8]}]({commit_url}/{item['commit']})"]
+                affected = item.get("affected_commits") or []
+                if affected:
+                    links = [f"[{sha[:8]}]({commit_url}/{sha})"
+                             for sha in affected[:3]]
+                else:
+                    links = [f"[{item['commit'][:8]}]({commit_url}/{item['commit']})"]
             upstream = " · ".join(links)
             if item.get("cause"):
                 upstream = f"{upstream} — {item['cause']}"

@@ -474,3 +474,53 @@ def test_schedule_rounds_assign_end_to_end_pool_offset8():
     for rnd in out:
         for _, devs in rnd:
             assert set(devs.split(",")) <= pool
+
+
+# ---- diff-driven test selection is retired (2026-09-13) ---------------------
+# PR #16439: upstream vllm 07b75534 added a kwarg to the SimpleCPUOffload
+# coordinator call while vllm-ascend's existing patch wrapper wasn't
+# extended — the engine died at connector init, and no diff-driven
+# selector could ever have caught it: the PR diff doesn't touch the
+# ascend patch, and upstream removed select_tests.py's --changed-files
+# mode on 09-01 (#15447) anyway.  The fixed test-policy set is the only
+# selection source now.
+
+def test_diff_driven_selection_is_retired(tmp_path, monkeypatch):
+    # select_by_files is accepted for call-site compatibility but must not
+    # trigger any subprocess (no select_tests.py invocation), and with no
+    # test_cases the run reports "no tests requested" — never a selection.
+    def _boom(*a, **k):
+        raise AssertionError("subprocess called during test resolution")
+    monkeypatch.setattr(rt.subprocess, "run", _boom)
+    r = rt.run_tests(
+        vllm_path=tmp_path, vllm_commit="0" * 40,
+        ascend_path=tmp_path, ascend_commit="1" * 40,
+        step_id=9, select_by_files=["vllm_ascend/foo.py"])
+    assert r["can_commit"] is True
+    assert r["suite_results"] == {}
+
+
+def test_selection_error_still_importable():
+    # legacy import compat for the retired mechanism's error type
+    assert issubclass(rt.TestSelectionError, RuntimeError)
+
+
+# ---- missing selected cases must be dropped loudly, not wedge the run -----
+# Run 34745454795: two phantom policy cases (files don't exist on upstream
+# main) failed pytest collection — exit 4 is unfixable for the adapter, the
+# e2e blocking set froze, stop-loss reverted the tree, no PR.
+
+def test_drop_missing_cases(tmp_path: Path) -> None:
+    (tmp_path / "tests" / "e2e" / "one_card").mkdir(parents=True)
+    real = "tests/e2e/one_card/test_real.py"
+    (tmp_path / real).write_text("")
+    node = real + "::TestClass::test_method"
+    phantom = "tests/e2e/one_card/test_phantom.py"
+    kept = rt._drop_missing_cases([real, node, phantom], tmp_path)
+    assert kept == [real, node]
+
+
+def test_drop_missing_cases_reports_and_keeps_existing(tmp_path: Path, capsys) -> None:
+    phantom = "tests/e2e/one_card/test_phantom.py"
+    assert rt._drop_missing_cases([phantom], tmp_path) == []
+    assert "test_phantom.py" in capsys.readouterr().out

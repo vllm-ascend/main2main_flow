@@ -43,6 +43,9 @@ EACH_STEP_CODE_STRUCTURE_GUIDE_FILE = "code-structure-guide.md"
 FINAL_SUMMARY_FILE = "final_summary.md"
 FINAL_TARGET_PATCH_FILE = "final_target.patch"
 FINAL_CODE_STRUCTURE_GUIDE_FILE = "final_code-structure-guide.md"
+# PR CI closed-loop watcher evidence (pr_ci_monitor.py), workspace-scoped.
+PR_CI_WATCH_DIR = "pr_ci_watch"
+PR_CI_WATCH_RESULT_FILE = "pr_ci_watch_result.json"
 
 def run_git(repo: Path | str, *args: str) -> str:
     result = subprocess.run(
