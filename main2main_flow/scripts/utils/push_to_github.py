@@ -327,12 +327,15 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
             f"(exit {r.returncode}):\n{last_error}",
             flush=True,
         )
-        if re.search(r"\b413\b", last_error):
-            # HTTP 413 = the proxy rejected the request body outright —
-            # deterministic, so retrying through the same path cannot help.
-            # Drop the offending route from the rotation (kept when it is
-            # the only route, preserving the retry-with-backoff behavior
-            # for single-route hosts) and try the remaining ones.
+        if re.search(r"\b(?:413|418)\b", last_error):
+            # HTTP 413 = the proxy rejected the request body outright;
+            # 418 = the WAF blocked the client outright (observed from
+            # non-runner hosts, which the proxy only serves in-cluster).
+            # Both are deterministic, so retrying through the same path
+            # cannot help.  Drop the offending route from the rotation
+            # (kept when it is the only route, preserving the
+            # retry-with-backoff behavior for single-route hosts) and try
+            # the remaining ones.
             if len(routes) > 1:
                 routes = ([u for u in routes if u != route]
                           or [f"https://x-access-token:{token}"
@@ -350,7 +353,7 @@ def _push_via_proxy(ascend_path: Path | None, head_fork: str, refspec: str,
                 cwd=cwd, capture_output=True, text=True, timeout=900,
             )
             if dr.returncode == 0:
-                ts_print("[push] proxy rejected the pack (HTTP 413); "
+                ts_print("[push] proxy rejected the push (HTTP 413/418); "
                          "direct github.com push succeeded", flush=True)
                 return
             ts_print(f"[push] direct github.com push also failed: "
@@ -381,8 +384,12 @@ def _force_squash(ascend_path: Path, base_ref: str, branch: str) -> None:
         subprocess.run(["git", "reset", "--soft", base_ref],
                        cwd=str(ascend_path), capture_output=True)
         subprocess.run(["git", "add", "-A"], cwd=str(ascend_path), capture_output=True)
+        # -s: upstream requires DCO on every commit; the squash commit is
+        # the PR's only commit, so it must carry the sign-off itself
+        # (the WF runner's git config used to supply it — flow-standalone
+        # runs had none).
         subprocess.run(
-            ["git", "commit", "-m", f"main2main: sync vllm upstream [{branch}]"],
+            ["git", "commit", "-s", "-m", f"main2main: sync vllm upstream [{branch}]"],
             cwd=str(ascend_path), capture_output=True)
         ts_print(f"[push] Force-squashed {count.stdout.strip()} commits into 1 (base={base_ref[:8]})")
     except (ValueError, subprocess.CalledProcessError):
@@ -750,10 +757,14 @@ def push_and_create_pr(
         ts_print(f"\n[push] PR created: {pr_url}")
 
         # ---- labels ----
+        # 10s after create: GitHub is still finalizing the new PR, and an
+        # immediate label POST can race that (user request 2026-09-13).
+        # _add_labels retries on top of this.
         pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
         if pr_number.isdigit():
             if labels is None:
                 labels = ["main2main"]
+            time.sleep(10)
             _add_labels(github_repo, pr_number, labels)
 
         # ---- persist PR URL ----

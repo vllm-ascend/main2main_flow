@@ -110,6 +110,38 @@ def test_push_via_proxy_413_falls_back_to_direct(monkeypatch,
     assert seen["direct_url"] == "https://x-access-token:t0k@github.com/org/fork.git"
 
 
+def test_push_via_proxy_418_falls_back_to_direct(monkeypatch,
+                                                 tmp_path: Path) -> None:
+    # HTTP 418 = the proxy WAF blocking the client outright (observed from
+    # non-runner hosts).  Deterministic like 413 — same direct fallback.
+    (tmp_path / "r").mkdir()
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        args = list(cmd)
+        if "push" in args and "m2m-push" in args:
+            seen["proxy"] = args
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout="",
+                stderr="fatal: unable to access 'https://gh-proxy.test"
+                       ".osinfra.cn/https://github.com/org/fork.git/': "
+                       "The requested URL returned error: 418\n")
+        direct = [a for a in args
+                  if a.startswith("https://x-access-token:")
+                  and a.endswith("@github.com/org/fork.git")]
+        if "push" in args and direct:
+            seen["direct_url"] = direct[0]
+            return _ok(cmd)
+        return _ok(cmd)
+
+    monkeypatch.setattr(push_to_github.subprocess, "run", fake_run)
+    monkeypatch.setenv("GH_TOKEN", "t0k")
+    push_to_github._push_via_proxy(tmp_path / "r", "org/fork",
+                                   "HEAD:refs/heads/b1", "--force")
+    assert "proxy" in seen
+    assert seen["direct_url"] == "https://x-access-token:t0k@github.com/org/fork.git"
+
+
 def test_push_via_proxy_413_direct_failure_continues(monkeypatch,
                                                      tmp_path: Path) -> None:
     # Direct fallback failing (e.g. egress blocked) must not abort the

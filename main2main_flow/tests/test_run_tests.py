@@ -474,3 +474,32 @@ def test_schedule_rounds_assign_end_to_end_pool_offset8():
     for rnd in out:
         for _, devs in rnd:
             assert set(devs.split(",")) <= pool
+
+
+# ---- diff-driven test selection is retired (2026-09-13) ---------------------
+# PR #16439: upstream vllm 07b75534 added a kwarg to the SimpleCPUOffload
+# coordinator call while vllm-ascend's existing patch wrapper wasn't
+# extended — the engine died at connector init, and no diff-driven
+# selector could ever have caught it: the PR diff doesn't touch the
+# ascend patch, and upstream removed select_tests.py's --changed-files
+# mode on 09-01 (#15447) anyway.  The fixed test-policy set is the only
+# selection source now.
+
+def test_diff_driven_selection_is_retired(tmp_path, monkeypatch):
+    # select_by_files is accepted for call-site compatibility but must not
+    # trigger any subprocess (no select_tests.py invocation), and with no
+    # test_cases the run reports "no tests requested" — never a selection.
+    def _boom(*a, **k):
+        raise AssertionError("subprocess called during test resolution")
+    monkeypatch.setattr(rt.subprocess, "run", _boom)
+    r = rt.run_tests(
+        vllm_path=tmp_path, vllm_commit="0" * 40,
+        ascend_path=tmp_path, ascend_commit="1" * 40,
+        step_id=9, select_by_files=["vllm_ascend/foo.py"])
+    assert r["can_commit"] is True
+    assert r["suite_results"] == {}
+
+
+def test_selection_error_still_importable():
+    # legacy import compat for the retired mechanism's error type
+    assert issubclass(rt.TestSelectionError, RuntimeError)

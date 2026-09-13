@@ -134,6 +134,15 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `MAIN2MAIN_UT_GATE` | 设为 `0` 跳过质量门禁中的 UT 检查（仅 format + mypy） | `1` |
 | `MAIN2MAIN_RELEASE_GATE` | 设为 `0` 跳过所有 release-lane 校验（pre-CI/gate 不使用 release worktree；worktree 本身仍会构建） | `1` |
 | `MAIN2MAIN_RELEASE_UT_BASELINE` | 设为 `0` 关闭 `release_ut_baseline.json` allowlist——release-lane UT 失败将阻塞 push | `1` |
+| `MAIN2MAIN_RELEASE_TEST_CASES` | 空白分隔的 e2e node 列表，覆盖 gate 的 release-tag smoke 测试集（默认取 `test_policy.json` 的 `release_smoke` 键；设为空则整体禁用 smoke） | policy |
+| `MAIN2MAIN_PR_WATCH` | 设为 `0` 关闭 push 后的 PR CI 闭环监控（见 Step 5.5） | `1` |
+| `MAIN2MAIN_PR_WATCH_TIMEOUT_MIN` | 监控总预算（分钟），超时后停止并评论 | `360` |
+| `MAIN2MAIN_PR_WATCH_ROUND_TIMEOUT_MIN` | 单轮 CI（同一 head sha）轮询超时（分钟） | `200` |
+| `MAIN2MAIN_PR_WATCH_FIX_ROUNDS` | rebase/adapter 修复轮预算 | `2` |
+| `MAIN2MAIN_PR_WATCH_RERUNS` | infra 失败自动重跑预算 | `2` |
+| `MAIN2MAIN_PR_WATCH_POLL_SEC` | check-run 轮询间隔（秒） | `300` |
+| `MAIN2MAIN_PR_WATCH_BASELINE` | 设为 `0` 跳过修复后的 `main2main_baseline` 回写 | `1` |
+| `MAIN2MAIN_PR_WATCH_COMMENT` | 设为 `0` 关闭 exhausted/timeout/inherited 时的 PR 评论 | `1` |
 | `SKIP_TRACK_PR_CI` | 跳过 vllm-report `daily_refresh.sh` 的 step 10（PR CI 追踪，见下文生态闭环） | `false` |
 
 ---
@@ -142,13 +151,13 @@ SKIP_AI_ANALYSIS=true kickoff \
 
 整个 Flow 由 `Main2MainFlow` 类（`main2main_flow/flow.py`）驱动，节点顺序为：
 
-`initialize` → `analyze_commit_and_plan_step` → `process_steps`（循环 `_ai_analysis` + `_run_e2e_test`；pre-CI + critic 循环最多 5 次 attempt，e2e 失败最多重试 3 轮）→ `_final_quality_gate`（只要完成 ≥1 步就执行，包括中途失败的 run；先回 `last_verified_commit` 再校验）→ `generate_final_post` → `persist_lessons` → `push_to_github`
+`initialize` → `analyze_commit_and_plan_step` → `process_steps`（循环 `_ai_analysis` + `_run_e2e_test`；pre-CI + critic 循环最多 5 次 attempt，e2e 失败最多重试 3 轮）→ `_final_quality_gate`（只要完成 ≥1 步就执行，包括中途失败的 run；先回 `last_verified_commit` 再校验）→ `generate_final_post` → `persist_lessons` → `push_to_github` → `_monitor_pr_ci`（PR CI 闭环监控，见 Step 5.5）
 
 流程通过字符串信号传递控制权：`HasCommit`、`HasNoCommit`、`UpgradeCompleted`、`UpgradeFailed`，定义在 `scripts/utils/utils.py`。注意提前退出的分支：
 
 - `HasNoCommit`：上游没有需要适配的新 commit，直接结束，不创建 PR
 - **0 步完成**：`process_steps` 后若没有任何 step 通过 e2e（`current_step == 0`），不创建 PR（避免提交一个"失败描述 + 损坏 diff"的 PR），只生成 manual review issue
-- **质量门禁失败**：gate 的静态 fix（3 轮）或回归 e2e（4 次）预算耗尽仍不过时，同样不 push，改由 workflow 创建 manual review issue
+- **质量门禁失败**：gate 的静态 fix（5 轮，含 release smoke 的 own-diff 修复）或回归 e2e（4 次）预算耗尽仍不过时，同样不 push，改由 workflow 创建 manual review issue
 
 ![Flow 结构图](images/workflow.png)
 
@@ -342,7 +351,7 @@ push 前执行的质量门禁。只要本 run 完成了 ≥1 步就会执行（�
 
 两个预算相互独立：
 
-- **静态 fix 预算（3 轮）**：format/mypy/UT 失败进入 adapter fix 模式，每轮 fix 后重新确认（最后一轮的 fix 也会被复验——从未复验的 fix 与失败无法区分，run 31691299310 的教训）。静态检查按工作树 diff sha 记忆化：revert 后树与已通过版本字节一致时不再重跑
+- **静态 fix 预算（5 轮，静态与 release smoke own-diff 共享）**：format/mypy/UT/release smoke 失败进入 adapter fix 模式，每轮 fix 后重新确认（最后一轮的 fix 也会被复验——从未复验的 fix 与失败无法区分，run 31691299310 的教训）。静态检查按工作树 diff sha 记忆化：revert 后树与已通过版本字节一致时不再重跑
 - **回归 e2e 预算（4 次）**：当最后一步没有通过 per-step e2e（no-op 判定可能出错或 e2e 失败）时触发。首次失败先在同一棵树上重试一次（抖动的回归不应直接毁掉 gate 的修复成果，连续两次失败才证明是确定性的）
 
 检查内容与 pre-CI 一致：
@@ -352,6 +361,8 @@ push 前执行的质量门禁。只要本 run 完成了 ≥1 步就会执行（�
 - **UT**：`_check_ut`（`ut_check.py`）跑 CPU-UT（全部 `tests/ut/*` 中 CPU 路由的用例），**两个 batch**：main 树 batch + release worktree batch（`VLLM_VERSION=<tag>` 强制 release guard 按 CI release leg 的方式解析；`-k` 额外排除 `test_vllm_version_is`——该用例用 mock env 测 fallback，真设 VLLM_VERSION 必挂）。release 批失败项若命中 `scripts/utils/release_ut_baseline.json` 的 node ID 则**不阻塞**（计数写进 detail、完整日志仍落 `ut_full.log`）；`MAIN2MAIN_RELEASE_UT_BASELINE=0` 关闭 allowlist。每文件独立进程 + 假 npu-smi 注入（PATH 前置一个 `exit 1` 的 npu-smi 脚本，骗过 `tests/ut/conftest.py` 的 mock 检测），持久 venv 复用（与 pre-CI 共享同一 `ut_venv`），每文件 300s 超时。UT batch 内设置 `HF_HUB_OFFLINE=1` + `VLLM_USE_MODELSCOPE=True`，与 PR CI 的 cpu-0 runner 环境对齐。`MAIN2MAIN_UT_GATE=0` 可整体去掉 gate 的 UT 检查
 
 release-lane 失败的价值：vllm-ascend PR CI 的 mypy/cpu-ut 只跑 main pin，release leg 只有 e2e——release 侧的 dataclass 契约漂移（如 PR #16296 的 `InputBatch.max_seq_len_np`）以前只能等昂贵的 e2e 矩阵暴露，现在 release mypy pass + release UT batch 在 push 前静态/廉价地抓住。
+
+**release-tag e2e smoke（主 lane e2e 绿后，每棵树一次）**：静态与 UT 都抓不住的生命周期时序类缺陷（PR #16382 的 `AscendBlockTables.compute_slot_mappings` 在 spec-decode capture 阶段才 AttributeError）由这里兜底——这是三层 release 检查中唯一真正执行 release 引擎的层。机制：`run_tests(skip_setup=True)`，流程进程注入 `PYTHONPATH=<release worktree>` 遮蔽已安装的 main vllm + `VLLM_VERSION=<tag>` 让 `vllm_version_is` 走 release 分支（与 release UT batch 同一遮蔽机制，主 lane 环境零扰动、不 checkout 不重装）；用例取 `test_policy.json` 的 `release_smoke` 键（3 个 one_card 节点，约 8min）。远程 e2e 模式下自跳过（容器内 git clone 的树看不到本地 release worktree，只设 VLLM_VERSION 会骗过版本判定）。失败先同树重试一次（flake 吸收），再按 traceback 文件 ∩ 累计 adaptation diff 分诊：交集非空 → **own-diff**，进共享 5 轮 adapter-fix 预算；全部在 diff 外或无法提取文件 → **upstream-inherited**（#16382 形态：基线分支代码破坏 release tag），写 `quality_gate/release_smoke_inherited.json` 留证、不阻塞、不烧 adapter。
 
 门禁失败进入 fix 模式时，错误详情（含 UT 失败用例的 traceback 摘要）通过 `error_logs` 喂给 adapter，静态修复后重新跑 e2e 回归确认没有破坏功能。两个预算耗尽仍不过 → 不 push，由 workflow 创建 manual review issue。
 
@@ -396,6 +407,26 @@ push 之前把本 run 的适配经验沉淀回 vllm-report 的 lessons（clone �
 10. 清理旧的 `main2main_auto_*` 分支（保留最新 N 个，`MAIN2MAIN_KEEP_BRANCHES` 默认 3）
 
 **输出**：GitHub PR URL（打印到 stdout 并写入 `/tmp/main2main/pr_url.txt`）
+
+### Step 5.5 — PR CI 闭环监控（`pr_ci_monitor.py`）
+
+PR 创建后，上游 `E2E` workflow 是双版本矩阵（main pin + release tag）的**唯一执行者**——flow 自己的 gate 从不跑 release-lane 引擎。`MAIN2MAIN_PR_WATCH`（默认开启）让 flow 在 push 之后继续驻留：轮询该 PR 的 check-runs 直到终态，然后按失败类别修复（预算内循环，直到绿/预算耗尽/确证非本 PR 可修）。上游 CI 仍是唯一测试执行者——监控器自身不跑任何测试。
+
+**失败分类与动作**：
+
+| 类别 | 判定签名 | 动作 |
+|---|---|---|
+| rebase 冲突 | job 日志含 `CONFLICT (` / `error: could not apply`（cpu-ut 对移动的 origin/main rebase） | 确定性 `git rebase` upstream/main；冲突时走 1 轮 adapter-fix（冲突文件 + 双侧 diff 作 error_logs），lease 强推 + baseline 回写 |
+| CSRC 漂移 | 日志含 `CSRC build workflows changed` | 同 rebase 处理 |
+| infra | 失败日志无任何测试失败签名（setup/runner/缓存类） | `gh run rerun --failed`（预算内） |
+| content | 其余（pytest/mypy 失败） | own-diff 分诊（见下） |
+| 聚合器 | `ci-gate` 自身失败 | 永不单独处置——修好真实 job 它自然绿 |
+
+**content 的 own-diff 分诊**：从失败日志提取根因 `.py` 路径（traceback 帧 + `vllm_ascend|tests` 路径），与适配 diff（`base...head`）求交——根因完全在 diff 外 = upstream-inherited（#16382 形态），只记录证据 + PR 评论，不烧修复轮；否则（保守含"无路径可提取"）进入 adapter-fix 轮，error_logs = 失败 job 日志文件（与 gate 修复轮同一 payload 契约）。adapter 判定 `env-flake`（no-op + summary 声明）时改为重跑失败 job 而非推送。
+
+**终态语义**：`green`（round 0 即绿）/ `fixed`（修复后绿）/ `inherited`（全部失败非本 PR 可修）/ `exhausted` / `timeout` / `pr-closed` / `no-ci`（15 分钟宽限后仍无任何 CI）/ `error`。exhausted/timeout/inherited 会在 PR 上发一条确定性模板评论（失败 check + 已做动作 + 证据路径）。`ci-gate` 绿才算闭环完成。
+
+**关键机制**：修复以追加 commit + `--force-with-lease` 推送（每日 14:00 UTC 的 bot 会 force-with-lease 重写分支，所以成功修复后同时把分支回写到 fork 的 `main2main_baseline`，让下次日跑继承修复而不是重演同一冲突）。证据落 `workspace/pr_ci_watch/round-N/`（checks.json、失败 job 日志、triage.json、adapter_result.json）+ `pr_ci_watch_result.json`，随 run artifact 上传。监控器自身的任何失败只记录、不上抛——执行到这一步时 run 本身已经成功。独立运行：`python -m main2main_flow.scripts.utils.pr_ci_monitor --ascend-path <path> [--pr-url <url>]`。
 
 ---
 

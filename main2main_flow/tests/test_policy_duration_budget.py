@@ -71,6 +71,19 @@ one_card/test_qwen3_0_6b.py and two_card/test_qwen3_vl_30b_a3b_instruct.py
 join the blocklist.  18 cases, 44/48 slot-units (4 spare — the next case
 added must swap one out), 3 rounds measured 1048s wall (17.5min).
 
+User requirement 2026-09-13: diff-driven test selection is retired — the
+fixed set is the only source, and it should cover as many modules as
+possible.  Six additions, all covering previously-unselected modules:
+test_simple_cpu_offload.py (KV-connector engine-init path — PR 16439's
+upstream-inherited crash lived exactly there and every fixed case missed
+it), test_cpu_offloading.py, test_multi_instance.py, test_npu_ipc_weight_
+transfer.py, test_w8a16.py, test_w8a8_dynamic.py, four_card/test_qwen3_
+mrv2_eplb.py (EPLB).  25 cases → 4 rounds (cap raised 3→4); the binding
+budget is the phase-wall pin: Σ per-round makespan ≤ 25min.  The six new
+durations are upstream a2 estimates (PROVISIONAL — re-measure cold on
+a3-16 at the first green run); every round's makepan still comes from a
+measured case, so the wall estimate holds even if the new cases inflate.
+
 Durations are NOT the upstream test_config.yaml ``estimated_times`` — those
 are a2-based and proved systematically off for a3-16.  They are cold
 per-case measurements from nv-action run 34465652074 set A (2026-09-10,
@@ -93,6 +106,8 @@ _RECORDED_S = {
     "tests/e2e/pull_request/one_card/test_sampler.py": 107,
     "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py": 171,
     "tests/e2e/pull_request/one_card/test_vlm.py": 328,
+    # upstream-measured per-file duration (vllm-ascend test_config.yaml)
+    "tests/e2e/pull_request/one_card/test_simple_cpu_offload.py": 220,
     "tests/e2e/pull_request/one_card/rlhf/state_transitions/"
     "test_pause_resume.py": 144,
     "tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py": 63,
@@ -124,11 +139,27 @@ _RECORDED_S = {
     "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test]": 401,
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 31,
     "tests/e2e/pull_request/four_card/test_pipeline_parallel.py": 501,
+    # 2026-09-13 module-coverage expansion (user: maximize module coverage,
+    # diff-driven selection retired).  Durations below are upstream a2
+    # estimates from test_config.yaml — PROVISIONAL until cold-measured on
+    # a3-16; re-measure on the first green run and re-sync.  Every new
+    # module here was previously uncovered by the selection: quant w8a16/
+    # w8a8-dynamic, multi-instance, IPC weight transfer, the cpu-offload
+    # weight path, and MRV2 EPLB.
+    "tests/e2e/pull_request/one_card/test_cpu_offloading.py": 30,
+    "tests/e2e/pull_request/one_card/test_multi_instance.py": 160,
+    "tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py": 180,
+    "tests/e2e/pull_request/one_card/test_w8a16.py": 40,
+    "tests/e2e/pull_request/one_card/test_w8a8_dynamic.py": 30,
+    "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py": 410,
 }
 
 _A3_CARDS = 16
 _BUDGET_S = 1200  # 20min per round
-_MAX_ROUNDS = 3
+_MAX_ROUNDS = 4   # was 3 (2026-09-07); the 2026-09-13 module-coverage
+                  # expansion packs to 4 rounds — the phase-wall pin below
+                  # is the binding budget now
+_PHASE_WALL_S = 1500  # 25min total e2e phase (user requirement 2026-09-10)
 
 # disaggregated_encoder and deepseek_v3_2_w8a8_pruning both hardcode
 # physical devices 0..N-1 in their sources (Remote*Server /
@@ -158,11 +189,21 @@ def test_every_selected_case_has_a_recorded_duration():
             "to _RECORDED_S before it can be selected")
 
 
-def test_selected_set_packs_into_at_most_3_rounds():
+def test_selected_set_packs_into_at_most_4_rounds():
     rounds = _scheduled()
     assert len(rounds) <= _MAX_ROUNDS, (
         f"selected cases schedule to {len(rounds)} rounds — exceeds the "
         f"{_MAX_ROUNDS}-round cap; drop or swap cases")
+
+
+def test_whole_phase_within_25min():
+    # Sequential rounds: phase wall = Σ per-round makespan (longest case).
+    # This is the binding budget since the 2026-09-13 expansion.
+    rounds = _scheduled()
+    wall = sum(max(_RECORDED_S.get(t, 0) for t in r) for r in rounds)
+    assert wall <= _PHASE_WALL_S, (
+        f"phase wall {wall}s exceeds the {_PHASE_WALL_S}s (25min) budget; "
+        f"drop or swap cases")
 
 
 def test_every_single_round_within_20min():

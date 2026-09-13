@@ -214,6 +214,17 @@ def _make_step(index: int, commits: list[dict[str, str]], start: str,
             impact = impacts.get(c["sha"])
             if impact:
                 tags.update(impact.get("tags", []) or [])
+    # Commits vllm-report routed to ascend work (analyzed+affected, or
+    # unanalyzed → conservative).  The PR description cites THESE as the
+    # upstream drivers of a step's adaptation — a step's end_commit is
+    # often a trailing no-op/doc commit that had nothing to do with the
+    # change the adapter actually made (PR #16424 shipped rows citing
+    # ROCm/doc-only commits with another commit's adaptation text).
+    affected_commits = [
+        c["sha"] for c in commits
+        if (impacts is None or impacts.get(c["sha"]) is None
+            or impacts[c["sha"]].get("ascend_affected", False))
+    ]
     return {
         "index": index,
         "id": f"step-{index}",
@@ -221,6 +232,7 @@ def _make_step(index: int, commits: list[dict[str, str]], start: str,
         "commit_count": len(commits),
         "start_commit": start,
         "end_commit": commits[-1]["sha"],
+        "affected_commits": affected_commits,
         "vllm_changed_lines": vllm_lines,
         "effective_lines": effective_lines,
         "line_budget": LINE_BUDGET,

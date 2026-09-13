@@ -36,6 +36,7 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
   - `ci_log_summary.py` — test log parsing
   - `lessons.py` — submit/persist adaptation lessons to vllm-report
   - `track_pr_ci.py` — PR CI result tracking (vllm-report `daily_refresh.sh` step 10; kept in sync with the vllm-report copy)
+  - `pr_ci_monitor.py` — post-push closed loop: polls the PR's check-runs, classifies failures, and repairs the PR (rebase conflicts deterministically, infra via rerun, content via own-diff triage + adapter-fix)
 
 ## workspace/ is volatile
 
@@ -61,11 +62,50 @@ Inside `_ai_analysis`, the attempt loop (up to 3×):
 
 The same checks re-run once at push time in the final quality gate
 (`final_quality_gate.py`) on the CUMULATIVE diff, fixing failures via
-adapter-fix (max 3 rounds) and re-running e2e to confirm no regression.
+adapter-fix (max 5 rounds) and re-running e2e to confirm no regression.
 The gate's UT runs TWO batches: main tree, plus the pinned release worktree
 with `VLLM_VERSION=<tag>` (release-lane failures matching
 `release_ut_baseline.json` never block).  `MAIN2MAIN_UT_GATE=0` disables UT
 in the gate.
+
+After the main-lane e2e is green, the gate also runs a release-tag e2e
+SMOKE (3 nodes from `test_policy.json` `release_smoke`, ~8min): run_tests
+with `skip_setup=True` and PYTHONPATH pointing at the release worktree +
+`VLLM_VERSION=<tag>` — the only check that executes the release lane's
+engine lifecycle (the PR-CI release e2e leg is main2main-label-gated, so
+flow PRs are the only per-PR executors).  A failed smoke retries once on
+the same tree (flake), then is triaged: traceback files inside the
+adaptation diff → own-diff → adapter-fix round (shared 5-round budget);
+files entirely outside the diff → upstream-inherited (the PR #16382
+shape) → recorded in `quality_gate/release_smoke_inherited.json`, not
+blocking.  Remote e2e mode self-skips (the container can't see the local
+release worktree).  `MAIN2MAIN_RELEASE_TEST_CASES` overrides the case
+list; empty list disables the smoke.
+
+## PR CI closed loop
+
+After `push_to_github` creates the PR, `_monitor_pr_ci` (`MAIN2MAIN_PR_WATCH`,
+default on) runs the watcher (`pr_ci_monitor.watch_and_fix`): it polls the
+PR's check-runs until terminal, then repairs the PR within budgets.  The
+upstream CI stays the only test executor — the watcher runs no tests itself.
+
+- **rebase conflict / CSRC drift** (cpu-ut/select-tests logs) — deterministic
+  `git rebase` onto upstream main; conflicts go through one adapter-fix round
+  (conflict files as error_logs), then lease-push + `main2main_baseline`
+  write-back (the daily bot force-pushes the branch, so without the baseline
+  write-back a fix would be ephemeral).
+- **infra-shaped failures** (no test-failure signature in the job log) —
+  `gh run rerun --failed`, budgeted.
+- **content failures** — own-diff triage: root-cause files inside the
+  adaptation diff → adapter-fix rounds (same payload contract as the gate,
+  error_logs = fetched job logs); entirely outside it → upstream-inherited
+  (#16382 shape), evidence + PR comment only.  An adapter-declared
+  `env-flake` triggers a rerun instead of a push.
+- `ci-gate` is an aggregator and never actionable by itself; exhausted/
+  timeout/inherited endings post a deterministic PR comment.  Evidence:
+  `workspace/pr_ci_watch/round-N/` + `pr_ci_watch_result.json`.
+- Every watcher failure is recorded, never propagated — the run itself has
+  already succeeded by the time it executes.
 
 ## Env flags worth knowing
 
@@ -80,6 +120,7 @@ in the gate.
 | `MAIN2MAIN_STALE_SEC` | opencode stale timeout seconds (default: 300). |
 | `MAIN2MAIN_WORKSPACE` | Workspace root directory (default: `<repo>/workspace`). |
 | `MAIN2MAIN_TEST_CASES` | Space-separated test paths to run. |
+| `MAIN2MAIN_RELEASE_TEST_CASES` | Space/newline-separated e2e nodes for the gate's release-tag smoke (default: `test_policy.json` `release_smoke` key; empty disables the smoke). |
 | `MAIN2MAIN_KEEP_BRANCH` | Skip `git reset --hard origin/main` in vllm-ascend setup. |
 | `PR_LABELS` | Comma-separated labels for created PR (default: `main2main`). |
 | `PR_DRAFT` | Create draft PR (default: `true`). |
@@ -88,6 +129,14 @@ in the gate.
 | `MAIN2MAIN_RELEASE_UT_BASELINE` | `0` disables the `release_ut_baseline.json` allowlist — release-lane UT failures then block (default: `1`). |
 | `MAIN2MAIN_RUN_TESTS_REMOTE` | Run tests on a remote host via SSH (`user@host` or `env`). |
 | `MAIN2MAIN_REMOTE_HOST`, `MAIN2MAIN_REMOTE_CONTAINER` | SSH host and container for remote e2e tests. |
+| `MAIN2MAIN_PR_WATCH` | `0` disables the post-push PR CI closed loop (default: `1`). |
+| `MAIN2MAIN_PR_WATCH_TIMEOUT_MIN` | Overall watcher budget in minutes (default: `360`). |
+| `MAIN2MAIN_PR_WATCH_ROUND_TIMEOUT_MIN` | Per CI round (one head sha) poll timeout (default: `200`). |
+| `MAIN2MAIN_PR_WATCH_FIX_ROUNDS` | Adapter-fix/rebase fix rounds (default: `2`). |
+| `MAIN2MAIN_PR_WATCH_RERUNS` | Infra rerun budget (default: `2`). |
+| `MAIN2MAIN_PR_WATCH_POLL_SEC` | Check-run poll interval seconds (default: `300`). |
+| `MAIN2MAIN_PR_WATCH_BASELINE` | `0` skips the `main2main_baseline` write-back after an accepted fix (default: `1`). |
+| `MAIN2MAIN_PR_WATCH_COMMENT` | `0` skips the PR comment on exhausted/timeout/inherited (default: `1`). |
 
 ## Conventions
 

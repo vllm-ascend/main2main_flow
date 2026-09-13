@@ -1051,50 +1051,16 @@ def _extract_error_excerpt(log_text: str, max_chars: int = 4000) -> str | None:
     return "\n\n---\n\n".join(parts) if parts else None
 
 
-def _select_tests_by_files(ascend_path: Path, changed_files: list[str]) -> list[str] | None:
-    """Call vllm-ascend's select_tests.py to resolve changed files → test files.
+class TestSelectionError(RuntimeError):
+    """Retired with diff-driven test selection (2026-09-13).
 
-    Returns a list of test file paths, or None if the selector is unavailable.
+    The fixed test-policy set is the only selection source now: upstream
+    removed select_tests.py's ``--changed-files`` mode on 2026-09-01
+    (#15447), and a diff-driven selector can never cover the failure
+    shape that matters here — an upstream vllm change interacting with
+    an ascend patch the PR diff doesn't touch (PR #16439's engine-init
+    crash).  Kept only so old callers importing it still work.
     """
-    select_script = ascend_path / ".github/workflows/scripts/select_tests.py"
-    if not select_script.exists():
-        ts_print("  [warn] select_tests.py not found, falling back to full scan", flush=True)
-        return None
-
-    r = subprocess.run(
-        [sys.executable, str(select_script), "--changed-files"] + changed_files,
-        cwd=ascend_path, capture_output=True, text=True,
-        env={**os.environ, "GITHUB_OUTPUT": ""},  # force stdout output
-    )
-    if r.stderr.strip():
-        for line in r.stderr.strip().splitlines():
-            ts_print(f"  [select_tests] {line}", flush=True)
-    if r.returncode != 0:
-        ts_print(f"  [warn] select_tests.py failed (exit {r.returncode})", flush=True)
-        return None
-
-    # Parse key=value output (GITHUB_OUTPUT format)
-    test_groups_json = ""
-    for line in r.stdout.strip().splitlines():
-        if line.startswith("test_groups="):
-            test_groups_json = line[len("test_groups="):]
-            break
-
-    if not test_groups_json:
-        return None
-
-    try:
-        groups = json.loads(test_groups_json)
-    except json.JSONDecodeError:
-        return None
-
-    tests: list[str] = []
-    for g in groups:
-        if g.get("npu_type") == "cpu":
-            continue  # skip CPU-only tests, main2main runs on NPU
-        for t in g.get("tests", "").split():
-            tests.append(t)
-    return tests or None
 
 
 def _build_test_cmd(test: str, devices: str, *,
@@ -1217,8 +1183,8 @@ def run_tests(
     """Run end-to-end tests for a main2main step.
 
     Args:
-        select_by_files: Changed file paths for precise test selection
-                         via vllm-ascend's select_tests.py.
+        select_by_files: Ignored (diff-driven selection retired — the
+                         fixed test-policy set is the only source).
         skip_setup: Skip the local repo checkout/reinstall (the external
                     E2E exec workflow already checked out the signal
                     branch and installed editable packages — re-running
@@ -1242,13 +1208,17 @@ def run_tests(
         _CARD_OVERRIDES.update(card_overrides)
 
     # ---- step 1: resolve tests ----
+    # Diff-driven selection is retired (see TestSelectionError): the fixed
+    # test-policy set is the only selection source, so test_cases is the
+    # way tests get here.  select_by_files is accepted-but-ignored for
+    # call-site compatibility.
+    if select_by_files:
+        ts_print(f"[run_tests] {len(select_by_files)} changed file(s) passed "
+                 f"but diff-driven selection is retired — using the fixed "
+                 f"test-policy set")
     if test_cases:
         test_files = test_cases
         ts_print(f"Using {len(test_files)} fixed test cases")
-    elif select_by_files:
-        ts_print(f"Selecting tests for {len(select_by_files)} changed file(s)")
-        test_files = _select_tests_by_files(ascend_path, select_by_files) or []
-        ts_print(f"Selected {len(test_files)} test(s)")
     else:
         test_files = []
 
@@ -1594,7 +1564,8 @@ def main() -> None:
     p.add_argument("--step-id", type=int, required=True)
     p.add_argument("--round", type=int, default=1)
     p.add_argument("--select-by-files", nargs="*", default=None,
-                   help="Changed file paths for precise test selection via select_tests.py.")
+                   help="Ignored: diff-driven selection retired; the fixed "
+                        "test-policy set is the only source.")
     p.add_argument("--test-cases", nargs="*", default=None,
                    help="Explicit test targets; append '@N' to pin N cards "
                         "(e.g. tests/.../one_card/test_x.py@4), overriding "

@@ -3,6 +3,12 @@
     "tests/e2e/pull_request/one_card/test_sampler.py",
     "tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py",
     "tests/e2e/pull_request/one_card/test_vlm.py",
+    "tests/e2e/pull_request/one_card/test_simple_cpu_offload.py",
+    "tests/e2e/pull_request/one_card/test_cpu_offloading.py",
+    "tests/e2e/pull_request/one_card/test_multi_instance.py",
+    "tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py",
+    "tests/e2e/pull_request/one_card/test_w8a16.py",
+    "tests/e2e/pull_request/one_card/test_w8a8_dynamic.py",
     "tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py",
     "tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py",
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_eager_mode",
@@ -17,7 +23,8 @@
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py",
     "tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py::test_dspark_spec_decoding[default_full_and_piecewise-False-1024-UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test]",
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py",
-    "tests/e2e/pull_request/four_card/test_pipeline_parallel.py"
+    "tests/e2e/pull_request/four_card/test_pipeline_parallel.py",
+    "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py"
   ],
   "blocklist": [
     "tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py",
@@ -27,5 +34,10 @@
     "tests/e2e/pull_request/one_card/test_qwen3_0_6b.py",
     "tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py",
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_dspark_spec_decoding"
+  ],
+  "release_smoke": [
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_eager_mode",
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_graph_mode",
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_mtp_spec_decoding"
   ]
 }
