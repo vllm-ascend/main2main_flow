@@ -102,6 +102,26 @@ by diffing suite start/done timestamps; test_basic node entries from the
 green a2-1 PR-CI run 34367387684 (2026-09-09, vllm@b2f68583); the
 2026-09-10 set-A run 34465652074 measurements for the dsv4/dspark nodes
 carry over.
+User requirement 2026-09-14: the fixed set must also see what PR CI sees.
+PR 16466's a3-4card-2-4 leg (run 34788679070, vllm@c377114636) failed two
+nodes of four_card/context_parallel/test_accuracy_v2.py —
+test_mtp_mla_spec_decode_with_pcp and test_eagle3_gqa_spec_decode_with_pcp,
+both on aclnnInterleaveRope error 561002 -> EngineDeadError — a surface
+(PCP spec decode) nothing in the selection touched.  Both nodes enter the
+allowlist at NODE granularity (the file's two dsv3 PCP nodes passed and
+stay out; the whole file would add ~590s).  Their recorded durations are
+crash-terminated wall times, i.e. lower bounds of a passing run.
+
+User requirement 2026-09-14 (same day): the main lane gets an eagle3
+case.  PR 16483's diff lived on eagle_proposer.py, yet the lane's
+spec-decode methods were mtp/egale/dflash/dspark — eagle3 was unguarded.
+test_spec_decode.py::test_eagle3_sliding_window enters the allowlist
+(109s, measured from PR 16483's a3-2card release-leg job): Qwen3-8B main
+is already cached and it packs into R3's free slot, so the wall holds at
+1431s.  test_hang stays RELEASE-ONLY: the mrope version-compat class it
+guards is invisible on the main lane (the API exists on vllm main), the
+release smoke already runs it per-tree, and its 35B DP+EP model is a
+bad budget trade.
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """
@@ -147,6 +167,15 @@ _RECORDED_S = {
     "tests/e2e/pull_request/two_card/test_prefix_caching.py": 357,
     "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py": 126,
     "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py": 122,
+    # 2026-09-14 addition, measured from PR 16483's a3-2card release leg
+    # part 4-4 (run 34801745274, node-start timestamp diffing): every
+    # other node in that job passed; test_hang was the mrope break.  The
+    # lane's spec-decode methods were mtp/egale/dflash/dspark — eagle3 had
+    # NO case, and eagle_proposer.py is exactly where PR 16483's diff
+    # lived.  Sliding window is the cheapest eagle3 node (Qwen3-8B main is
+    # already cached; the 30B p-eagle/vwn nodes need a ~60GB download).
+    "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py::"
+    "test_eagle3_sliding_window": 109,
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py": 364,
     # One DSPARK node of test_deepseek_v4.py: the two DSPARK params are
     # redundant twins (full_decode_only vs default_full_and_piecewise), so
@@ -170,6 +199,17 @@ _RECORDED_S = {
     # vllm@62f3bf58; two adapter-fix rounds did not converge — root-cause
     # before re-adding).
     "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py": 300,
+    # 2026-09-14 additions from PR 16466's CI (nv-action run 34788679070,
+    # job a3-4card-2-4, vllm@c377114636): both nodes died with
+    # aclnnInterleaveRope error 561002 -> EngineDeadError — a surface no
+    # fixed case covered (context_parallel / PCP spec decode).  Durations
+    # are crash-terminated wall times (per-node engine-init to failure),
+    # so they are LOWER bounds of a passing run — re-sync from the first
+    # run where the nodes go green.
+    "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::"
+    "test_mtp_mla_spec_decode_with_pcp": 221,
+    "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::"
+    "test_eagle3_gqa_spec_decode_with_pcp": 181,
 }
 
 _A3_CARDS = 16

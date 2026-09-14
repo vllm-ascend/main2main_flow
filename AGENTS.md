@@ -69,7 +69,7 @@ with `VLLM_VERSION=<tag>` (release-lane failures matching
 in the gate.
 
 After the main-lane e2e is green, the gate also runs a release-tag e2e
-SMOKE (3 nodes from `test_policy.json` `release_smoke`, ~8min): run_tests
+SMOKE (4 nodes from `test_policy.json` `release_smoke`, ~8-10min): run_tests
 with `skip_setup=True` and PYTHONPATH pointing at the release worktree +
 `VLLM_VERSION=<tag>` — the only check that executes the release lane's
 engine lifecycle (the PR-CI release e2e leg is main2main-label-gated, so

@@ -17,11 +17,14 @@
     "tests/e2e/pull_request/two_card/test_prefix_caching.py",
     "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py",
     "tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py",
+    "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py::test_eagle3_sliding_window",
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py",
     "tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py::test_dspark_spec_decoding[default_full_and_piecewise-False-1024-UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test]",
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py",
     "tests/e2e/pull_request/four_card/test_pipeline_parallel.py",
-    "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py"
+    "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py",
+    "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::test_mtp_mla_spec_decode_with_pcp",
+    "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::test_eagle3_gqa_spec_decode_with_pcp"
   ],
   "blocklist": [
     "tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py",
@@ -35,6 +38,7 @@
   "release_smoke": [
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_eager_mode",
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_graph_mode",
-    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_mtp_spec_decoding"
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_mtp_spec_decoding",
+    "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py::test_hang"
   ]
 }

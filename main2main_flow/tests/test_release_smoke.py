@@ -286,7 +286,7 @@ def test_release_raw_tag_reads_tag_file(monkeypatch, tmp_path):
 
 def test_resolve_release_smoke_cases_env_overrides_policy(monkeypatch):
     monkeypatch.delenv("MAIN2MAIN_RELEASE_TEST_CASES", raising=False)
-    assert len(flow_mod._resolve_release_smoke_cases()) == 3
+    assert len(flow_mod._resolve_release_smoke_cases()) == 4
     monkeypatch.setenv("MAIN2MAIN_RELEASE_TEST_CASES",
                        "a.py::x\n  b.py::y  ")
     assert flow_mod._resolve_release_smoke_cases() == ["a.py::x", "b.py::y"]
@@ -347,9 +347,22 @@ def test_release_smoke_policy_is_pinned_to_allowlist():
     policy_path = Path(inspect.getfile(flow_mod)).parent / "test_policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     cases = policy["release_smoke"]
-    assert len(cases) == 3
-    for case in cases:
-        assert case in policy["allowlist"]
+    assert len(cases) == 4
+    # Three basic nodes are proven main-lane cases (allowlist members).
+    # test_hang is deliberately RELEASE-ONLY: it is not in the allowlist
+    # (the main lane's 25min wall has no room for it) but it is the case
+    # that caught PR 16483's own-diff break on the v0.28.0 leg — the
+    # drafter init reads ModelConfig.mrope_num_dims, a property that only
+    # exists on vllm main, and only a uses_mrope drafter model reaches
+    # that branch.  Every allowlist node runs a non-mrope model, so the
+    # smoke needs one mrope case of its own.
+    allowlist_only = [c for c in cases if c in policy["allowlist"]]
+    release_only = [c for c in cases if c not in policy["allowlist"]]
+    assert len(allowlist_only) == 3
+    assert release_only == [
+        "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py"
+        "::test_hang"]
     # The graph-mode node is the 16382 crash site (spec-decode capture).
     assert any("test_qwen3_dense_graph_mode" in c for c in cases)
     assert any("test_mtp_spec_decoding" in c for c in cases)
+    assert any("test_hang" in c for c in cases)
