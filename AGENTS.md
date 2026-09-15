@@ -70,7 +70,7 @@ with `VLLM_VERSION=<tag>` (release-lane failures matching
 in the gate.
 
 After the main-lane e2e is green, the gate also runs a release-tag e2e
-SMOKE (6 nodes from `test_policy.json` `release_smoke`, ~10-15min): run_tests
+SMOKE (8 nodes from `test_policy.json` `release_smoke`, ~12min): run_tests
 with `skip_setup=True` and PYTHONPATH pointing at the release worktree +
 `VLLM_VERSION=<tag>` — the only check that executes the release lane's
 engine lifecycle (the PR-CI release e2e leg is main2main-label-gated, so
@@ -91,16 +91,18 @@ list; empty list disables the smoke.
 
 After the gate passes, `_run_extended_e2e` adds ONE bounded e2e batch
 beyond the per-step fixed set, while the tree is final and the NPUs would
-otherwise idle until push — small fast steps (~15min per-step e2e), then a
-single ~30-35min coverage sweep (the 2026-09-15 revision).  The per-step
-set only proves the cases it contains (PR 16575 shipped green on pre_ci
-while upstream CI failed legs it never touched).
+otherwise idle until push — small fast steps (~20min per-step e2e), then a
+single ~30-35min coverage sweep (the 2026-09-15 second revision).  The
+per-step set only proves the cases it contains (PR 16575 shipped green on
+pre_ci while upstream CI failed legs it never touched).
 
 Case source (`extended_e2e.py`): by default the FIXED curated
-`test_policy.json` `extended_e2e` key — 60 cases (2026-09-15) maximizing
-two/four-card coverage (23 entries) and excluding every `_310p` suite
-(the a3-16 pool absolutely cannot run 310P hardware paths — the exclusion
-is structural, applied at runtime in BOTH modes, overrides included).
+`test_policy.json` `extended_e2e` key — 55 cases (2026-09-15) weighted
+toward the surfaces that recently failed CI (extract_hidden_states,
+gumbel, mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP), 19 two/four-card
+entries, and excluding every `_310p` suite (the a3-16 pool absolutely
+cannot run 310P hardware paths — the exclusion is structural, applied at
+runtime in BOTH modes, overrides included).
 Curation is offline; runtime guards drop entries the per-step allowlist
 already covers (drift), upstream `skip_tests` has since claimed, `_310p`
 suites, or files missing from the tree.
