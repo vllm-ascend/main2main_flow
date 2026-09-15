@@ -17,7 +17,7 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
 
 ## Layout
 
-- `main2main_flow/flow.py` — the Flow; node order: `initialize → _warmup_mega_moe → analyze_commit_and_plan_step → process_steps (per-step _ai_analysis + _run_e2e_test, then _final_quality_gate) → generate_final_post → persist_lessons → push_to_github`. Routing uses string signals defined in `scripts/utils/utils.py` (`HasCommit`, `HasNoCommit`, `UpgradeCompleted`, `UpgradeFailed`). Two early exits: `HasNoCommit` (nothing to adapt) and `current_step == 0` after process_steps (no PR — nothing passed e2e).
+- `main2main_flow/flow.py` — the Flow; node order: `initialize → _warmup_mega_moe → analyze_commit_and_plan_step → process_steps (per-step _ai_analysis + _run_e2e_test, then _final_quality_gate, then _run_extended_e2e) → generate_final_post → persist_lessons → push_to_github`. Routing uses string signals defined in `scripts/utils/utils.py` (`HasCommit`, `HasNoCommit`, `UpgradeCompleted`, `UpgradeFailed`). Two early exits: `HasNoCommit` (nothing to adapt) and `current_step == 0` after process_steps (no PR — nothing passed e2e).
 - `main2main_flow/cli.py` — CLI entry point (`kickoff`).
 - `main2main_flow/agents/` — agent SKILL.md files and per-role reference docs consumed by opencode. Each role is a self-contained directory:
   - `adapter/SKILL.md` + `adapter/reference/` — adapt and fix modes (MCP is PRIMARY, grep is FALLBACK)
@@ -31,7 +31,8 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
   - `pre_ci_check.py` — per-step: version strings, temp files, format, broken imports (module + symbol against BOTH vllm trees: main + pinned release worktree), mypy (main 3.10/3.11/3.12 + release 3.10), CPU-UT (main batch); a missing release worktree emits a skipped `release_lane` entry instead of failing
   - `final_quality_gate.py` — push-time gate: format + mypy (both vllm trees) + CPU-UT (`ut_check.py`, main batch + release batch with `VLLM_VERSION=<tag>`, known-failure baseline allowlist; per-file isolation with fake npu-smi)
   - `release_ut_baseline.json` — CPU-UT node IDs known to fail on the release lane independent of the current adaptation (never block; `MAIN2MAIN_RELEASE_UT_BASELINE=0` shows all)
-  - `run_tests.py` — e2e test runner with parallel scheduling
+  - `run_tests.py` — e2e test runner with parallel scheduling (`preserve_order=True` hands the caller's case order to the scheduler untouched; default LPT re-sort unchanged)
+  - `extended_e2e.py` — post-gate extended e2e case resolution: tree scan of `tests/e2e/pull_request/**/test_*.py` minus upstream `skip_tests`/fixed-set coverage/blocklist; import-closure tiering against the adaptation diff + estimated-time ordering
   - `push_to_github.py` — push branch + create PR + add labels
   - `ci_log_summary.py` — test log parsing
   - `lessons.py` — submit/persist adaptation lessons to vllm-report
@@ -88,6 +89,30 @@ blocking.  Remote e2e mode self-skips (the container can't see the local
 release worktree).  `MAIN2MAIN_RELEASE_TEST_CASES` overrides the case
 list; empty list disables the smoke.
 
+After the gate passes, `_run_extended_e2e` runs the FULL main2main-label
+e2e set — what upstream PR CI would execute for this PR — while the tree
+is final and the NPUs would otherwise idle until push.  The fixed 25-case
+policy set only proves the cases it contains (2026-09-15: PR 16575 shipped
+green on pre_ci while upstream CI failed legs the fixed set never touched).
+Case source (`extended_e2e.py`): tree scan of `tests/e2e/pull_request/**/test_*.py`
+− upstream `test_config.yaml` `skip_tests` − fixed-set coverage (file/node)
+− policy blocklist − missing files.  Cases whose test file imports a module
+touched by the adaptation diff run first (import-closure tier); the rest
+follow, both tiers by estimated time ascending (`run_tests` is called with
+`preserve_order=True`).  Failures enter adapter-fix rounds
+(`MAIN2MAIN_EXTENDED_FIX_ROUNDS`, default 2, re-running ONLY the failed
+suites) with a wall-clock backstop (`MAIN2MAIN_EXTENDED_MAX_MIN`, default
+360) and a stop-loss on an identical failing set; pytest exit 4
+(collection error) suites are excluded from fix rounds permanently.  Each
+fix round re-checks the gate statics when the tree changed (statics fail →
+one adapter round → still failing ends the phase but KEEPS the fixes).
+The phase is BEST-EFFORT: exhausting every budget never fails the run —
+fixes are committed (`main2main: extended e2e fixes (round N)`), `gate_final_patch`
+is regenerated so the PR description carries them, and upstream PR CI
+remains the verifier.  Evidence: `workspace/extended_e2e/extended_e2e_result.json`
++ an "Extended e2e" section in `final_summary.md`/the PR body.
+`MAIN2MAIN_EXTENDED_E2E=0` disables the phase.
+
 ## PR CI closed loop
 
 After `push_to_github` creates the PR, `_monitor_pr_ci` (`MAIN2MAIN_PR_WATCH`,
@@ -143,6 +168,12 @@ upstream CI stays the only test executor — the watcher runs no tests itself.
 | `MAIN2MAIN_PR_WATCH_POLL_SEC` | Check-run poll interval seconds (default: `300`). |
 | `MAIN2MAIN_PR_WATCH_BASELINE` | `0` skips the `main2main_baseline` write-back after an accepted fix (default: `1`). |
 | `MAIN2MAIN_PR_WATCH_COMMENT` | `0` skips the PR comment on exhausted/timeout/inherited (default: `1`). |
+| `MAIN2MAIN_EXTENDED_E2E` | `0` disables the post-gate extended e2e phase (default: `1`). |
+| `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | Adapter-fix rounds for extended e2e failures after the first full round (default: `2`). |
+| `MAIN2MAIN_EXTENDED_MAX_MIN` | Extended e2e wall-clock backstop in minutes, `0` = off (default: `360`). |
+| `MAIN2MAIN_EXTENDED_TEST_CASES` | Space/newline-separated extended e2e cases replacing the resolver output entirely. |
+| `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | `1` keeps upstream `skip_tests` files in the extended set (default: `0`). |
+| `MAIN2MAIN_MYPY_VENV` | Persistent mypy lint venv directory (default: `<workspace>/mypy_venv`; built once, rebuilt when triton-ascend's numpy constraint moves). |
 
 ## Conventions
 

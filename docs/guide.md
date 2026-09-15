@@ -135,6 +135,12 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `MAIN2MAIN_RELEASE_GATE` | 设为 `0` 跳过所有 release-lane 校验（pre-CI/gate 不使用 release worktree；worktree 本身仍会构建） | `1` |
 | `MAIN2MAIN_RELEASE_UT_BASELINE` | 设为 `0` 关闭 `release_ut_baseline.json` allowlist——release-lane UT 失败将阻塞 push | `1` |
 | `MAIN2MAIN_RELEASE_TEST_CASES` | 空白分隔的 e2e node 列表，覆盖 gate 的 release-tag smoke 测试集（默认取 `test_policy.json` 的 `release_smoke` 键；设为空则整体禁用 smoke） | policy |
+| `MAIN2MAIN_EXTENDED_E2E` | 设为 `0` 关闭 gate 后的扩展 e2e 阶段（见 Step 3d） | `1` |
+| `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | 扩展 e2e 首轮失败后的 adapter-fix 轮数（每轮只重跑失败 suite） | `2` |
+| `MAIN2MAIN_EXTENDED_MAX_MIN` | 扩展 e2e 阶段墙钟兜底（分钟），`0` 关闭 | `360` |
+| `MAIN2MAIN_EXTENDED_TEST_CASES` | 空白分隔的扩展 e2e 用例列表，整体替代树扫描解析结果 | — |
+| `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | 设为 `1` 保留上游 `skip_tests` 文件在扩展集内 | `0` |
+| `MAIN2MAIN_MYPY_VENV` | 持久 mypy lint venv 目录（numpy spec 与 triton-ascend 约束不一致时自动重建；任何失败回退系统 mypy） | `workspace/mypy_venv` |
 | `MAIN2MAIN_PR_WATCH` | 设为 `0` 关闭 push 后的 PR CI 闭环监控（见 Step 5.5） | `1` |
 | `MAIN2MAIN_PR_WATCH_TIMEOUT_MIN` | 监控总预算（分钟），超时后停止并评论 | `360` |
 | `MAIN2MAIN_PR_WATCH_ROUND_TIMEOUT_MIN` | 单轮 CI（同一 head sha）轮询超时（分钟） | `200` |
@@ -251,7 +257,7 @@ agent 在 `agents/adapter/SKILL.md` 模板中接收完整任务上下文，包�
 - **temp_files**：检查工作区是否有 `.patch`、`.log`、`.jsonl`、`vllm_changes.md` 等临时文件
 - **broken_imports**：验证新增的 `from vllm.X import Y` 引用的模块在 vllm 源码树中存在；若在 `vllm_version_is` guard 内，自动补 `# type: ignore[import-not-found]`。提供 release worktree 时再做**符号级检查**：未 guard 的新 import 其符号必须同时存在于 pinned release 树（缺失即报 `symbol 'Y' not found in the pinned release vllm tree`——unguarded import 会让 release lane 在 import 时崩溃）
 - **format**：跑 `format.sh`（`_check_format`），只报非自动修复类错误（ruff E501/F821/F841、codespell 等），过滤 gitleaks/shellcheck 环境噪声；失败后重跑一次区分"自动修复后已干净"与"真实残留"
-- **mypy**：`_check_mypy`（仅传入 `vllm_path` 时），lint 等价隔离 venv，main 树跑 3 个 python 版本（3.10/3.11/3.12）；提供 release worktree（`vllm_release_path`，由 flow 构建 pinned release tag 的 `workspace/repos/vllm-release`）时**追加 release 树 pass（仅 3.10）**——同一 call site main 树干净、release 树报 `Missing positional argument` 正是 dataclass 契约漂移的特征（PR #16296 类失败可静态抓住）
+- **mypy**：`_check_mypy`（仅传入 `vllm_path` 时），lint 等价隔离 venv（持久复用，`MAIN2MAIN_MYPY_VENV`，默认 `workspace/mypy_venv`，与 UT venv 同一 marker/重建模式），main 树跑 3 个 python 版本（3.10/3.11/3.12）；提供 release worktree（`vllm_release_path`，由 flow 构建 pinned release tag 的 `workspace/repos/vllm-release`）时**追加 release 树 pass（仅 3.10）**——同一 call site main 树干净、release 树报 `Missing positional argument` 正是 dataclass 契约漂移的特征（PR #16296 类失败可静态抓住）
 - **ut**：`_check_ut`（仅传入 `vllm_path` 时），main vllm 版本的 CPU-UT batch（见 Step 3c 的 UT 说明；release 批仅在 final gate 跑，pre-CI 不跑）
 
 mypy 与 UT 在 `ThreadPoolExecutor(max_workers=2)` 中**并行执行**（release mypy pass 在 mypy worker 内串行追加，峰值资源不变）。UT 使用**持久 venv**（`MAIN2MAIN_UT_VENV`，默认 `workspace/ut_venv`），跨 attempt、跨 step 创建或复用（venv 内记录的 numpy spec 与本次从 triton-ascend 读到的 spec 一致才复用，否则重建）；完整 pytest 日志写 `ut_full.log`，`log_path`/`venv_python` 键随 `pre_ci_check.json` 输出。UT 与 mypy 检查在每个 step 的 pre-CI 阶段就会执行，让类型/单测回归提前到每一步暴露；push 前的 final quality gate 会在最终累积 diff 上再统一执行一遍（见 Step 3c）。
@@ -357,7 +363,7 @@ push 前执行的质量门禁。只要本 run 完成了 ≥1 步就会执行（�
 检查内容与 pre-CI 一致：
 
 - **format**：跑完整 `bash format.sh`
-- **mypy**：`_check_mypy` 用 lint 等价的隔离 venv（`--system-site-packages` + 按 triton-ascend metadata 安装匹配的 numpy），main 树 3 个 python 版本各一遍；提供 release worktree 时追加 release 树 pass（仅 3.10），与 pre-CI 双树一致
+- **mypy**：`_check_mypy` 用 lint 等价的隔离 venv（`--system-site-packages` + 按 triton-ascend metadata 安装匹配的 numpy；持久复用，与 pre-CI 共享同一 `mypy_venv`），main 树 3 个 python 版本各一遍；提供 release worktree 时追加 release 树 pass（仅 3.10），与 pre-CI 双树一致
 - **UT**：`_check_ut`（`ut_check.py`）跑 CPU-UT（全部 `tests/ut/*` 中 CPU 路由的用例），**两个 batch**：main 树 batch + release worktree batch（`VLLM_VERSION=<tag>` 强制 release guard 按 CI release leg 的方式解析；`-k` 额外排除 `test_vllm_version_is`——该用例用 mock env 测 fallback，真设 VLLM_VERSION 必挂）。release 批失败项若命中 `scripts/utils/release_ut_baseline.json` 的 node ID 则**不阻塞**（计数写进 detail、完整日志仍落 `ut_full.log`）；`MAIN2MAIN_RELEASE_UT_BASELINE=0` 关闭 allowlist。每文件独立进程 + 假 npu-smi 注入（PATH 前置一个 `exit 1` 的 npu-smi 脚本，骗过 `tests/ut/conftest.py` 的 mock 检测），持久 venv 复用（与 pre-CI 共享同一 `ut_venv`），每文件 300s 超时。UT batch 内设置 `HF_HUB_OFFLINE=1` + `VLLM_USE_MODELSCOPE=True`，与 PR CI 的 cpu-0 runner 环境对齐。`MAIN2MAIN_UT_GATE=0` 可整体去掉 gate 的 UT 检查
 
 release-lane 失败的价值：vllm-ascend PR CI 的 mypy/cpu-ut 只跑 main pin，release leg 只有 e2e——release 侧的 dataclass 契约漂移（如 PR #16296 的 `InputBatch.max_seq_len_np`）以前只能等昂贵的 e2e 矩阵暴露，现在 release mypy pass + release UT batch 在 push 前静态/廉价地抓住。
@@ -365,6 +371,16 @@ release-lane 失败的价值：vllm-ascend PR CI 的 mypy/cpu-ut 只跑 main pin
 **release-tag e2e smoke（主 lane e2e 绿后，每棵树一次）**：静态与 UT 都抓不住的生命周期时序类缺陷（PR #16382 的 `AscendBlockTables.compute_slot_mappings` 在 spec-decode capture 阶段才 AttributeError）由这里兜底——这是三层 release 检查中唯一真正执行 release 引擎的层。机制：`run_tests(skip_setup=True)`，流程进程注入 `PYTHONPATH=<release worktree>` 遮蔽已安装的 main vllm + `VLLM_VERSION=<tag>` 让 `vllm_version_is` 走 release 分支（与 release UT batch 同一遮蔽机制，主 lane 环境零扰动、不 checkout 不重装）；用例取 `test_policy.json` 的 `release_smoke` 键（4 个 one_card 节点 + 1 个 two_card mrope 节点 + 1 个 four_card dspark-w4a8 节点，约 10-15min），执行前有 lane 探针（`_release_lane_probe`：`import vllm` 必须解析进 release worktree **且** `vllm_version_is` 为 True——树身份与版本解析任一错位都响亮跳过，不烧卡时不产出误导性结果）。mrope 节点（test_spec_decode.py::test_hang）是 2026-09-14 加入的 release 专属用例（不在主 lane allowlist 内）：PR #16483 的 own-diff 把 drafter 初始化改成读 `ModelConfig.mrope_num_dims`（vllm main 才有的属性），v0.28.0 腿 AttributeError——而 allowlist 全部是非 mrope 模型，永远走不进 `uses_mrope` 分支，主 lane 与旧 smoke 都看不见；上游 CI 正是用该用例在 v0.28.0 腿抓到的。dflash 与 dspark-w4a8 哨兵是 2026-09-15（PR #16575）补的：该 PR 的 `build_draft_attn_metadatas` 覆写绕过 lane-aware shim 直调 main-only `_build_uniform_attn_metadata`（上游 #56181 才有），v0.28.0 腿任何 dflash/dspark 引擎启动必崩——MTP 用例不经过该调用点形态，4 用例旧 smoke 看不见，上游 CI release 双腿才暴露。release 通道 vllm 来自 release worktree、vllm_ascend/tests 来自 PR 树，哨兵执行的就是 PR 树 adapter 代码 against release vllm。远程 e2e 模式下自跳过（容器内 git clone 的树看不到本地 release worktree，只设 VLLM_VERSION 会骗过版本判定）。失败先同树重试一次（flake 吸收），再按 traceback 文件 ∩ 累计 adaptation diff 分诊：交集非空 → **own-diff**，进共享 5 轮 adapter-fix 预算；全部在 diff 外或无法提取文件 → **upstream-inherited**（#16382 形态：基线分支代码破坏 release tag），写 `quality_gate/release_smoke_inherited.json` 留证、不阻塞、不烧 adapter。
 
 门禁失败进入 fix 模式时，错误详情（含 UT 失败用例的 traceback 摘要）通过 `error_logs` 喂给 adapter，静态修复后重新跑 e2e 回归确认没有破坏功能。两个预算耗尽仍不过 → 不 push，由 workflow 创建 manual review issue。
+
+### Step 3d — `_run_extended_e2e`（gate 后扩展 e2e）
+
+门禁通过后、push 之前执行（`MAIN2MAIN_EXTENDED_E2E`，默认开启）。背景：固定 25 例 allowlist 只能证明它包含的用例——2026-09-15 的 run 在 pre_ci 全绿下送出 PR 16575，上游 CI 却在固定集从未触及的腿上失败（dflash/dspark release lane、PCP spec decode）。此阶段在树已定稿、NPU 在 push 前空闲的窗口里，把上游 PR CI 将要执行的用例尽可能跑一遍。
+
+**用例源**（`extended_e2e.py`）：树扫描 `tests/e2e/pull_request/**/test_*.py`（对齐 `pr_test.yaml` `MODE=all` 的 label 语义）− 上游 `test_config.yaml` `skip_tests` − 固定集覆盖（文件级或节点级）− `test_policy.json` blocklist − 树上不存在的文件。注意 `main2main_tests.json` 不是来源：它是定时回归子集（18 条）且全部 ⊆ 固定集，用它减固定集得到空集。排序：测试文件 import 的 `vllm_ascend.*`/`tests.*` 模块与适配 diff 相交的为 tier1 先跑，其余随后，两层内部按预估时长升序（`run_tests` 以 `preserve_order=True` 调用，调度器不再重排）。
+
+**修复循环**：首轮跑全扩展集；失败 suite 进 adapter-fix 轮（`MAIN2MAIN_EXTENDED_FIX_ROUNDS`，默认 2），每轮**只重跑失败的 suite**（全扩展集单轮数小时，全量重跑不可行——2026-09-15 拍板的全量重跑决策只约束 per-step 固定集与 gate 回归 e2e，不约束此阶段）。pytest exit 4（collection error）的 suite 永久移出修复轮（adapter 修不了 import 层损坏，2026-09-13 幻影文件教训）。预算：修复轮数 + 墙钟兜底（`MAIN2MAIN_EXTENDED_MAX_MIN`，默认 360）+ 失败集合与上轮相同即 stop-loss。修复使树 sha 变化时先重跑 gate 静态（静态失败 → 1 轮 adapter → 仍败则阶段以 static_failed 结束但**保留修复**）。
+
+**兜底语义**：本阶段是 best-effort——任何预算耗尽都不会把绿 gate 变成失败 run；树（含保留的修复）照常 push，上游 PR CI 与 pr_ci_watch 仍是裁决者。修复产生的变更追加一条 `main2main: extended e2e fixes (round N)` commit 并重新生成 `gate_final_patch`，保证 PR 描述的累计 patch 包含扩展修复。证据：`workspace/extended_e2e/extended_e2e_result.json`（status/rounds/fix_actions/statics/budgets/final）+ `final_summary.md` 与 PR body 的 "Extended e2e" 段。
 
 ### Step 4 — `generate_final_post`
 
@@ -462,6 +478,7 @@ workspace/
 ├── final_target.patch                    # gate 后重新生成的累计 patch
 ├── final_status.json                     # 运行结果状态（status/steps_completed/old/new commit）
 ├── gate_final_patch                      # final quality gate 后重新生成的累计 patch（PR 描述事实来源）
+├── extended_e2e/                         # gate 后扩展 e2e 产物（extended_e2e_result.json、extended.patch、extended-e2e/tests/ 轮日志、statics/）
 ├── repos/                                # 自动 clone 的仓库（仅在传入 GitHub URL 时存在）
 │   ├── vllm/
 │   ├── vllm-ascend/
