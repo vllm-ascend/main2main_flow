@@ -60,10 +60,9 @@ these rules to stay on the critical path:
    step_summary.md. What burns the budget is NOT doing too little — it
    is exploring: re-reading files, single-line edits repeated per
    violation, linting, or trying to run tests. None of that is part
-   of the job; skip it. The single most budget-burning failure shape is
-   a metric assert with no vllm_ascend traceback frame — improvising it
-   is open-ended, and its bounded 4-command path is
-   `reference/upstream-contract-drift.md` §9.
+   of the job; skip it. One shape had no bounded path until now — a
+   metric assert with no vllm_ascend traceback frame; its bounded
+   4-command path is `reference/upstream-contract-drift.md` §9.
 
 
 ## Repositories

@@ -190,5 +190,10 @@ Bounded path — 4 commands, each one decisive; do not broaden the search:
    `analysis.md` which contract item each edit restores.
 
 If step 2 shows no deletion, this is NOT §9 — go to §2 and re-read the
-new contract source. Timebox: the whole path is ≤4 tool calls; a session
-that improvises here instead is the run-34018086282 shape (80min, killed).
+new contract source. Timebox: the whole path is ≤4 tool calls. No adapter
+session has faced this shape yet (PR #16554 predates the monitor loop) —
+what IS documented is non-convergence on uninformative evidence:
+line-by-line rounds against a family (run 33976675052: 41→8→9 over 3
+rounds, killed) and fix rounds repeating one blocking failure (run
+34018086282: same OOM 3 rounds, ~7h). §9 exists so this shape joins the
+bounded paths instead of becoming a third case.
