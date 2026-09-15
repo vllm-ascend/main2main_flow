@@ -69,11 +69,17 @@ with `VLLM_VERSION=<tag>` (release-lane failures matching
 in the gate.
 
 After the main-lane e2e is green, the gate also runs a release-tag e2e
-SMOKE (4 nodes from `test_policy.json` `release_smoke`, ~8-10min): run_tests
+SMOKE (6 nodes from `test_policy.json` `release_smoke`, ~10-15min): run_tests
 with `skip_setup=True` and PYTHONPATH pointing at the release worktree +
 `VLLM_VERSION=<tag>` — the only check that executes the release lane's
 engine lifecycle (the PR-CI release e2e leg is main2main-label-gated, so
-flow PRs are the only per-PR executors).  A failed smoke retries once on
+flow PRs are the only per-PR executors).  A lane probe (tree identity +
+version resolution) runs first; a mis-resolved lane skips loudly instead
+of burning NPU time on a meaningless run.  The dflash and dspark-w4a8
+spec-decode nodes were added 2026-09-15 after PR 16575's dflash/dspark
+release-lane break (main-only `_build_uniform_attn_metadata` called
+unconditionally) was invisible to the previous 4-node smoke.  A failed
+smoke retries once on
 the same tree (flake), then is triaged: traceback files inside the
 adaptation diff → own-diff → adapter-fix round (shared 5-round budget);
 files entirely outside the diff → upstream-inherited (the PR #16382
