@@ -32,7 +32,7 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
   - `final_quality_gate.py` — push-time gate: format + mypy (both vllm trees) + CPU-UT (`ut_check.py`, main batch + release batch with `VLLM_VERSION=<tag>`, known-failure baseline allowlist; per-file isolation with fake npu-smi)
   - `release_ut_baseline.json` — CPU-UT node IDs known to fail on the release lane independent of the current adaptation (never block; `MAIN2MAIN_RELEASE_UT_BASELINE=0` shows all)
   - `run_tests.py` — e2e test runner with parallel scheduling (`preserve_order=True` hands the caller's case order to the scheduler untouched; default LPT re-sort unchanged)
-  - `extended_e2e.py` — post-gate extended e2e case resolution: tree scan of `tests/e2e/pull_request/**/test_*.py` minus upstream `skip_tests`/fixed-set coverage/blocklist; import-closure tiering against the adaptation diff + estimated-time ordering
+  - `extended_e2e.py` — post-gate extended e2e case selection: the fixed curated `extended_e2e` policy key (runtime guards against allowlist drift/upstream skip_tests/missing files), the `MODE=full` tree-scan resolver (`tests/e2e/pull_request/**/test_*.py` minus `skip_tests`/fixed-set/blocklist), and import-closure tiering + estimated-time ordering
   - `push_to_github.py` — push branch + create PR + add labels
   - `ci_log_summary.py` — test log parsing
   - `lessons.py` — submit/persist adaptation lessons to vllm-report
@@ -89,29 +89,40 @@ blocking.  Remote e2e mode self-skips (the container can't see the local
 release worktree).  `MAIN2MAIN_RELEASE_TEST_CASES` overrides the case
 list; empty list disables the smoke.
 
-After the gate passes, `_run_extended_e2e` runs the FULL main2main-label
-e2e set — what upstream PR CI would execute for this PR — while the tree
-is final and the NPUs would otherwise idle until push.  The fixed 25-case
-policy set only proves the cases it contains (2026-09-15: PR 16575 shipped
-green on pre_ci while upstream CI failed legs the fixed set never touched).
-Case source (`extended_e2e.py`): tree scan of `tests/e2e/pull_request/**/test_*.py`
-− upstream `test_config.yaml` `skip_tests` − fixed-set coverage (file/node)
-− policy blocklist − missing files.  Cases whose test file imports a module
-touched by the adaptation diff run first (import-closure tier); the rest
-follow, both tiers by estimated time ascending (`run_tests` is called with
-`preserve_order=True`).  Failures enter adapter-fix rounds
-(`MAIN2MAIN_EXTENDED_FIX_ROUNDS`, default 2, re-running ONLY the failed
-suites) with a wall-clock backstop (`MAIN2MAIN_EXTENDED_MAX_MIN`, default
-360) and a stop-loss on an identical failing set; pytest exit 4
-(collection error) suites are excluded from fix rounds permanently.  Each
-fix round re-checks the gate statics when the tree changed (statics fail →
-one adapter round → still failing ends the phase but KEEPS the fixes).
-The phase is BEST-EFFORT: exhausting every budget never fails the run —
-fixes are committed (`main2main: extended e2e fixes (round N)`), `gate_final_patch`
-is regenerated so the PR description carries them, and upstream PR CI
-remains the verifier.  Evidence: `workspace/extended_e2e/extended_e2e_result.json`
-+ an "Extended e2e" section in `final_summary.md`/the PR body.
-`MAIN2MAIN_EXTENDED_E2E=0` disables the phase.
+After the gate passes, `_run_extended_e2e` adds ONE bounded e2e batch
+beyond the per-step fixed set, while the tree is final and the NPUs would
+otherwise idle until push — small fast steps, then a single ~30min
+coverage sweep (the 2026-09-15 revision of the earlier full-scan design).
+The fixed 25-case per-step set only proves the cases it contains (PR 16575
+shipped green on pre_ci while upstream CI failed legs it never touched).
+
+Case source (`extended_e2e.py`): by default the FIXED curated
+`test_policy.json` `extended_e2e` key — 55 cases picked cheapest-first
+from the label scan to the allowlist's estimated-time scale (sum(est)
+≈ 210min ≈ ~30min measured wall), maximizing distinct covered
+`vllm_ascend.*` modules and feature areas.  Curation is offline; runtime
+guards drop entries the per-step allowlist already covers (drift), upstream
+`skip_tests` has since claimed, or files missing from the tree.
+`MAIN2MAIN_EXTENDED_MODE=full` opts into the whole-label resolver instead
+(tree scan of `tests/e2e/pull_request/**/test_*.py` − `skip_tests` −
+fixed-set coverage − blocklist, hours).  In both modes, cases whose test
+file imports a module touched by the adaptation diff run first
+(import-closure tier); the rest follow, both by estimated time ascending
+(`run_tests` is called with `preserve_order=True`).  Failures enter
+adapter-fix rounds (`MAIN2MAIN_EXTENDED_FIX_ROUNDS`, default 2, re-running
+ONLY the failed suites) with a wall-clock backstop
+(`MAIN2MAIN_EXTENDED_MAX_MIN`, default 360) and a stop-loss on an identical
+failing set; pytest exit 4 (collection error) suites are excluded from fix
+rounds permanently.  Each fix round re-checks the gate statics when the
+tree changed (statics fail → one adapter round → still failing ends the
+phase but KEEPS the fixes).  The phase is BEST-EFFORT: exhausting every
+budget never fails the run — fixes are committed
+(`main2main: extended e2e fixes (round N)`), `gate_final_patch` is
+regenerated so the PR description carries them, and upstream PR CI (plus
+pr_ci_watch) remains the verifier.  Evidence:
+`workspace/extended_e2e/extended_e2e_result.json` + an "Extended e2e"
+section in `final_summary.md`/the PR body.  `MAIN2MAIN_EXTENDED_E2E=0`
+disables the phase.
 
 ## PR CI closed loop
 
@@ -169,10 +180,11 @@ upstream CI stays the only test executor — the watcher runs no tests itself.
 | `MAIN2MAIN_PR_WATCH_BASELINE` | `0` skips the `main2main_baseline` write-back after an accepted fix (default: `1`). |
 | `MAIN2MAIN_PR_WATCH_COMMENT` | `0` skips the PR comment on exhausted/timeout/inherited (default: `1`). |
 | `MAIN2MAIN_EXTENDED_E2E` | `0` disables the post-gate extended e2e phase (default: `1`). |
-| `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | Adapter-fix rounds for extended e2e failures after the first full round (default: `2`). |
+| `MAIN2MAIN_EXTENDED_MODE` | `fixed` (default) runs the curated `test_policy.json` `extended_e2e` set (~30min); `full` resolves the whole label minus subtraction (hours). |
+| `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | Adapter-fix rounds for extended e2e failures after the first round (default: `2`). |
 | `MAIN2MAIN_EXTENDED_MAX_MIN` | Extended e2e wall-clock backstop in minutes, `0` = off (default: `360`). |
-| `MAIN2MAIN_EXTENDED_TEST_CASES` | Space/newline-separated extended e2e cases replacing the resolver output entirely. |
-| `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | `1` keeps upstream `skip_tests` files in the extended set (default: `0`). |
+| `MAIN2MAIN_EXTENDED_TEST_CASES` | Space/newline-separated extended e2e cases replacing both sources entirely (drift guards still apply). |
+| `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | `1` keeps upstream `skip_tests` files in the `full`-mode set (default: `0`; no effect in `fixed` mode). |
 | `MAIN2MAIN_MYPY_VENV` | Persistent mypy lint venv directory (default: `<workspace>/mypy_venv`; built once, rebuilt when triton-ascend's numpy constraint moves). |
 
 ## Conventions

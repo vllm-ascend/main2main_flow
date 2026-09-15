@@ -136,10 +136,11 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `MAIN2MAIN_RELEASE_UT_BASELINE` | 设为 `0` 关闭 `release_ut_baseline.json` allowlist——release-lane UT 失败将阻塞 push | `1` |
 | `MAIN2MAIN_RELEASE_TEST_CASES` | 空白分隔的 e2e node 列表，覆盖 gate 的 release-tag smoke 测试集（默认取 `test_policy.json` 的 `release_smoke` 键；设为空则整体禁用 smoke） | policy |
 | `MAIN2MAIN_EXTENDED_E2E` | 设为 `0` 关闭 gate 后的扩展 e2e 阶段（见 Step 3d） | `1` |
+| `MAIN2MAIN_EXTENDED_MODE` | `fixed`（默认）跑 `test_policy.json` `extended_e2e` 固定集（~30min）；`full` 解析 label 全集减去各类扣除（数小时） | `fixed` |
 | `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | 扩展 e2e 首轮失败后的 adapter-fix 轮数（每轮只重跑失败 suite） | `2` |
 | `MAIN2MAIN_EXTENDED_MAX_MIN` | 扩展 e2e 阶段墙钟兜底（分钟），`0` 关闭 | `360` |
-| `MAIN2MAIN_EXTENDED_TEST_CASES` | 空白分隔的扩展 e2e 用例列表，整体替代树扫描解析结果 | — |
-| `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | 设为 `1` 保留上游 `skip_tests` 文件在扩展集内 | `0` |
+| `MAIN2MAIN_EXTENDED_TEST_CASES` | 空白分隔的扩展 e2e 用例列表，整体替代两种来源（漂移护栏仍生效） | — |
+| `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | 设为 `1` 在 `full` 模式保留上游 `skip_tests` 文件（`fixed` 模式无效果） | `0` |
 | `MAIN2MAIN_MYPY_VENV` | 持久 mypy lint venv 目录（numpy spec 与 triton-ascend 约束不一致时自动重建；任何失败回退系统 mypy） | `workspace/mypy_venv` |
 | `MAIN2MAIN_PR_WATCH` | 设为 `0` 关闭 push 后的 PR CI 闭环监控（见 Step 5.5） | `1` |
 | `MAIN2MAIN_PR_WATCH_TIMEOUT_MIN` | 监控总预算（分钟），超时后停止并评论 | `360` |
@@ -374,13 +375,13 @@ release-lane 失败的价值：vllm-ascend PR CI 的 mypy/cpu-ut 只跑 main pin
 
 ### Step 3d — `_run_extended_e2e`（gate 后扩展 e2e）
 
-门禁通过后、push 之前执行（`MAIN2MAIN_EXTENDED_E2E`，默认开启）。背景：固定 25 例 allowlist 只能证明它包含的用例——2026-09-15 的 run 在 pre_ci 全绿下送出 PR 16575，上游 CI 却在固定集从未触及的腿上失败（dflash/dspark release lane、PCP spec decode）。此阶段在树已定稿、NPU 在 push 前空闲的窗口里，把上游 PR CI 将要执行的用例尽可能跑一遍。
+门禁通过后、push 之前执行（`MAIN2MAIN_EXTENDED_E2E`，默认开启）。整体节奏是**小步快跑 + 一次有界覆盖**：每步跑固定 allowlist（快速迭代），gate 后在树已定稿、NPU 在 push 前空闲的窗口里追加**一次约 30min 的覆盖 batch**，上游 PR CI 兜底其余覆盖。背景：固定 25 例 allowlist 只能证明它包含的用例——2026-09-15 的 run 在 pre_ci 全绿下送出 PR 16575，上游 CI 却在固定集从未触及的腿上失败（dflash/dspark release lane、PCP spec decode）。
 
-**用例源**（`extended_e2e.py`）：树扫描 `tests/e2e/pull_request/**/test_*.py`（对齐 `pr_test.yaml` `MODE=all` 的 label 语义）− 上游 `test_config.yaml` `skip_tests` − 固定集覆盖（文件级或节点级）− `test_policy.json` blocklist − 树上不存在的文件。注意 `main2main_tests.json` 不是来源：它是定时回归子集（18 条）且全部 ⊆ 固定集，用它减固定集得到空集。排序：测试文件 import 的 `vllm_ascend.*`/`tests.*` 模块与适配 diff 相交的为 tier1 先跑，其余随后，两层内部按预估时长升序（`run_tests` 以 `preserve_order=True` 调用，调度器不再重排）。
+**用例源**（`extended_e2e.py`，默认 `MAIN2MAIN_EXTENDED_MODE=fixed`）：`test_policy.json` 的 **`extended_e2e` 固定键**——从 label 全集（树扫描 `tests/e2e/pull_request/**/test_*.py` − 上游 `skip_tests` − allowlist 覆盖 − blocklist，共 89 例）中**按预估时长从便宜到贵**装填到 allowlist 同量级预算（sum(est) ≈ 210min ≈ 实测墙钟 ~30min），55 例，覆盖 74 个不同 `vllm_ascend.*` 模块、16 个目录（spec decode 各算法、量化各方案、lora、compile 融合、pooling、rlhf、2/4 卡拓扑）。离线筛选用例，运行时有三个护栏兜住列表过期：allowlist 已覆盖（策略漂移，那些每步都跑）、上游 `skip_tests` 新收入、树上已消失（2026-09-13 幻影文件教训），命中即剔除并记录。`MAIN2MAIN_EXTENDED_MODE=full` 切换为全集解析器（89 例、数小时），`MAIN2MAIN_EXTENDED_TEST_CASES` 整体覆盖两种来源（护栏仍生效）。排序（两种模式相同）：测试文件 import 的 `vllm_ascend.*`/`tests.*` 模块与适配 diff 相交的为 tier1 先跑，其余随后，两层内部按预估时长升序（`run_tests` 以 `preserve_order=True` 调用，调度器不再重排）。注意 `main2main_tests.json` 不是来源：它是定时回归子集（18 条）且全部 ⊆ 固定集，用它减固定集得到空集。
 
-**修复循环**：首轮跑全扩展集；失败 suite 进 adapter-fix 轮（`MAIN2MAIN_EXTENDED_FIX_ROUNDS`，默认 2），每轮**只重跑失败的 suite**（全扩展集单轮数小时，全量重跑不可行——2026-09-15 拍板的全量重跑决策只约束 per-step 固定集与 gate 回归 e2e，不约束此阶段）。pytest exit 4（collection error）的 suite 永久移出修复轮（adapter 修不了 import 层损坏，2026-09-13 幻影文件教训）。预算：修复轮数 + 墙钟兜底（`MAIN2MAIN_EXTENDED_MAX_MIN`，默认 360）+ 失败集合与上轮相同即 stop-loss。修复使树 sha 变化时先重跑 gate 静态（静态失败 → 1 轮 adapter → 仍败则阶段以 static_failed 结束但**保留修复**）。
+**修复循环**：首轮跑完整扩展集；失败 suite 进 adapter-fix 轮（`MAIN2MAIN_EXTENDED_FIX_ROUNDS`，默认 2），每轮**只重跑失败的 suite**（2026-09-15 拍板的全量重跑决策只约束 per-step 固定集与 gate 回归 e2e，不约束此阶段）。pytest exit 4（collection error）的 suite 永久移出修复轮（adapter 修不了 import 层损坏）。预算：修复轮数 + 墙钟兜底（`MAIN2MAIN_EXTENDED_MAX_MIN`，默认 360）+ 失败集合与上轮相同即 stop-loss。修复使树 sha 变化时先重跑 gate 静态（静态失败 → 1 轮 adapter → 仍败则阶段以 static_failed 结束但**保留修复**）。
 
-**兜底语义**：本阶段是 best-effort——任何预算耗尽都不会把绿 gate 变成失败 run；树（含保留的修复）照常 push，上游 PR CI 与 pr_ci_watch 仍是裁决者。修复产生的变更追加一条 `main2main: extended e2e fixes (round N)` commit 并重新生成 `gate_final_patch`，保证 PR 描述的累计 patch 包含扩展修复。证据：`workspace/extended_e2e/extended_e2e_result.json`（status/rounds/fix_actions/statics/budgets/final）+ `final_summary.md` 与 PR body 的 "Extended e2e" 段。
+**兜底语义**：本阶段是 best-effort——任何预算耗尽都不会把绿 gate 变成失败 run；树（含保留的修复）照常 push，上游 PR CI 与 pr_ci_watch 仍是裁决者。修复产生的变更追加一条 `main2main: extended e2e fixes (round N)` commit 并重新生成 `gate_final_patch`，保证 PR 描述的累计 patch 包含扩展修复。证据：`workspace/extended_e2e/extended_e2e_result.json`（status/mode/rounds/fix_actions/statics/budgets/dropped_*/final）+ `final_summary.md` 与 PR body 的 "Extended e2e" 段。
 
 ### Step 4 — `generate_final_post`
 
