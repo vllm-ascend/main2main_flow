@@ -256,4 +256,34 @@ def test_prune_fixed_set_keeps_clean_list(tmp_path):
         ascend, ["tests/e2e/pull_request/one_card/test_a.py"], [])
     assert out["cases"] == ["tests/e2e/pull_request/one_card/test_a.py"]
     assert not any(out[k] for k in
-                   ("dropped_fixed", "dropped_skip", "dropped_missing"))
+                   ("dropped_fixed", "dropped_skip", "dropped_310p",
+                    "dropped_missing"))
+
+
+def test_prune_fixed_set_drops_310p_structurally(tmp_path):
+    # _310p suites never run on the a3-16 pool (user 2026-09-15) — the
+    # guard is structural, so even an explicit MAIN2MAIN_EXTENDED_TEST_
+    # CASES override cannot schedule them.
+    from main2main_flow.scripts.utils.extended_e2e import prune_fixed_set
+
+    ascend = _make_ascend(tmp_path, [
+        "tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py",
+        "tests/e2e/pull_request/one_card/test_a.py"])
+    out = prune_fixed_set(
+        ascend,
+        ["tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py",
+         "tests/e2e/pull_request/one_card/test_a.py"],
+        [])
+    assert out["cases"] == ["tests/e2e/pull_request/one_card/test_a.py"]
+    assert out["dropped_310p"] == [
+        "tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py"]
+
+
+def test_resolve_extended_cases_drops_310p_from_tree_scan(tmp_path):
+    ascend = _make_ascend(tmp_path, [
+        "tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py",
+        "tests/e2e/pull_request/one_card/test_free.py"])
+    out = resolve_extended_cases(ascend, [], [])
+    assert out["cases"] == ["tests/e2e/pull_request/one_card/test_free.py"]
+    assert out["dropped_310p"] == [
+        "tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py"]

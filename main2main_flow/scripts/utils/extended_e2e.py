@@ -1,20 +1,21 @@
-"""Extended e2e case selection: a fixed ~30min set, or the full label scan.
+"""Extended e2e case selection: a fixed ~30-35min set, or the full label scan.
 
 After the final quality gate passes, the flow runs the extended e2e phase —
-the fixed 25-case per-step set only proves the cases it contains (the
-2026-09-15 run shipped PR 16575 green on pre_ci while upstream CI failed
-legs the fixed set never touched).  Small fast steps + one bounded coverage
-batch: the default source is the FIXED ``test_policy.json`` ``extended_e2e``
-key (55 cases curated cheapest-first from the label scan to the allowlist's
-estimated-time scale — sum(est) ≈ 210min ≈ ~30min measured wall — maximizing
-distinct covered ``vllm_ascend.*`` modules and feature areas).
+the per-step set only proves the cases it contains (the 2026-09-15 run
+shipped PR 16575 green on pre_ci while upstream CI failed legs the fixed
+set never touched).  Small fast steps (~15min per-step e2e) + one bounded
+coverage batch: the default source is the FIXED ``test_policy.json``
+``extended_e2e`` key (60 cases — the 2026-09-15 revision maximizes two/four
+card coverage (23 entries) and excludes every ``_310p`` suite: the a3-16
+pool absolutely cannot run 310P hardware paths, so they are dropped
+structurally in BOTH modes, not just omitted from curation).
 ``MAIN2MAIN_EXTENDED_MODE=full`` opts into the whole-label resolver instead
-(89 cases, hours): tree scan of ``tests/e2e/pull_request/**/test_*.py``
-minus ``test_config.yaml`` ``skip_tests``, fixed-set coverage, and the
-blocklist.  ``main2main_tests.json`` is NOT usable as a source: it is the
-daily-bot regression subset (18 entries) and every entry is already inside
-the fixed policy allowlist — subtracting the fixed set from it yields an
-empty set.
+(hours): tree scan of ``tests/e2e/pull_request/**/test_*.py`` minus
+``test_config.yaml`` ``skip_tests``, fixed-set coverage, ``_310p`` suites,
+and the blocklist.  ``main2main_tests.json`` is NOT usable as a source: it
+is the daily-bot regression subset (18 entries) and every entry is already
+inside the fixed policy allowlist — subtracting the fixed set from it
+yields an empty set.
 
 In both modes, cases whose test file imports a module touched by the
 adaptation diff are ordered first (relevance tier); the rest follow, both
@@ -77,6 +78,16 @@ def load_upstream_skip_tests(ascend_path: str | Path) -> set[str]:
 
 def _file_of(case: str) -> str:
     return case.split("::", 1)[0]
+
+
+def _is_310p(case: str) -> bool:
+    """310P-hardware suite (a ``_310p`` path segment) — unrunnable here.
+
+    The a3-16 pool has no 310P devices, so these suites can never pass;
+    they are dropped structurally in every mode (user requirement
+    2026-09-15), independent of curation freshness.
+    """
+    return "/_310p/" in case
 
 
 def covered_by_fixed(candidate: str, fixed: list[str] | set[str]) -> bool:
@@ -229,19 +240,23 @@ def prune_fixed_set(
     Curation is offline (against a past tree); these guards keep a stale
     list from wasting NPU time or lying: entries the per-step allowlist
     already covers (policy drift — those ran every step), entries upstream
-    has since moved to ``skip_tests``, and files missing from the current
-    tree (2026-09-13 phantom-file lesson).
+    has since moved to ``skip_tests``, ``_310p`` suites the pool can never
+    run (overrides included — the exclusion is structural), and files
+    missing from the current tree (2026-09-13 phantom-file lesson).
     """
     skip = load_upstream_skip_tests(ascend_path)
     kept: list[str] = []
     dropped_fixed: list[str] = []
     dropped_skip: list[str] = []
+    dropped_310p: list[str] = []
     dropped_missing: list[str] = []
     for c in cases:
         if covered_by_fixed(c, fixed_cases):
             dropped_fixed.append(c)
         elif c in skip:
             dropped_skip.append(c)
+        elif _is_310p(c):
+            dropped_310p.append(c)
         elif not (Path(ascend_path) / _file_of(c)).exists():
             dropped_missing.append(c)
         else:
@@ -253,11 +268,15 @@ def prune_fixed_set(
     if dropped_skip:
         ts_print(f"[extended_e2e] upstream skip_tests now covers "
                  f"{len(dropped_skip)} extended case(s), dropped")
+    if dropped_310p:
+        ts_print(f"[extended_e2e] {len(dropped_310p)} _310p case(s) "
+                 f"dropped — the a3-16 pool cannot run 310P suites")
     if dropped_missing:
         ts_print(f"[extended_e2e] {len(dropped_missing)} case(s) not on "
                  f"the tree, dropped")
     return {"cases": kept, "dropped_fixed": dropped_fixed,
-            "dropped_skip": dropped_skip, "dropped_missing": dropped_missing}
+            "dropped_skip": dropped_skip, "dropped_310p": dropped_310p,
+            "dropped_missing": dropped_missing}
 
 
 def resolve_extended_cases(
@@ -273,15 +292,20 @@ def resolve_extended_cases(
     The default mode runs the curated fixed set instead (prune_fixed_set
     over the ``extended_e2e`` policy key).  MAIN2MAIN_EXTENDED_TEST_CASES
     (passed as *override*) replaces the whole resolution.  Otherwise: tree
-    scan − upstream skip_tests − fixed-set coverage − blocklist − missing
-    files.  Returns a dict with the cases, tier1 membership, and everything
-    dropped (evidence).
+    scan − upstream skip_tests − fixed-set coverage − ``_310p`` suites −
+    blocklist − missing files.  Returns a dict with the cases, tier1
+    membership, and everything dropped (evidence).
     """
     skipped = load_upstream_skip_tests(ascend_path)
     dropped_skip: list[str] = []
+    dropped_310p: list[str] = []
     if override is not None:
-        cases = list(override)
+        dropped_310p = [c for c in override if _is_310p(c)]
+        cases = [c for c in override if not _is_310p(c)]
         source = "override"
+        if dropped_310p:
+            ts_print(f"[extended_e2e] {len(dropped_310p)} _310p case(s) "
+                     f"dropped — the a3-16 pool cannot run 310P suites")
     else:
         cases = scan_e2e_pull_request_files(ascend_path)
         source = "tree-scan tests/e2e/pull_request"
@@ -289,11 +313,13 @@ def resolve_extended_cases(
         if not include_skipped:
             dropped_skip = [c for c in cases if c in skipped]
             cases = [c for c in cases if c not in skipped]
+        dropped_310p = [c for c in cases if _is_310p(c)]
         cases = [c for c in cases
-                 if not covered_by_fixed(c, fixed_cases)
+                 if not _is_310p(c)
+                 and not covered_by_fixed(c, fixed_cases)
                  and not covered_by_fixed(c, blocked)]
         ts_print(f"[extended_e2e] tree scan: {before} file(s), "
-                 f"{len(cases)} after skip/fixed/blocklist subtraction")
+                 f"{len(cases)} after skip/310p/fixed/blocklist subtraction")
     existing = [c for c in cases
                 if (Path(ascend_path) / _file_of(c)).exists()]
     return {
@@ -301,5 +327,6 @@ def resolve_extended_cases(
         "tier1": [],  # filled by the caller (needs changed_modules)
         "dropped_missing": sorted(set(cases) - set(existing)),
         "dropped_skip": sorted(set(dropped_skip)),
+        "dropped_310p": sorted(set(dropped_310p)),
         "source": source,
     }

@@ -122,6 +122,25 @@ is already cached and it packs into R3's free slot, so the wall holds at
 guards is invisible on the main lane (the API exists on vllm main), the
 release smoke already runs it per-tree, and its 35B DP+EP model is a
 bad budget trade.
+User requirement 2026-09-15: the per-step e2e phase must land ~15min —
+the 1437s (24min) wall was too slow for the small-fast-steps rhythm — and
+the post-gate extended batch must cover as many two/four-card cases as
+possible while one extended run stays ~30-35min; 310P suites absolutely
+cannot run on the a3-16 pool (structural exclusion in extended_e2e.py,
+both modes).  Seven demotions carry the heavy half of the per-step set
+into extended (still covered once per run): pipeline_parallel (524s),
+deepseek_v3_2_w8a8_pruning (364s), disaggregated_encoder (126s),
+prefix_caching (357s), qwen3_mrv2_eplb (300s — eplb stays guarded by
+extended's two_card/test_qwen3_moe_eplb), vlm (304s), and the test_basic
+graph_mode node (376s — the release smoke still runs it per-tree).  The
+dspark V2 node (401s) stays per-step as the V2 sentinel.  18 cases, 3
+rounds, recorded wall 807s (13.4min) — inside the tightened 900s pin.
+Extended grows to 60 cases: 4 _310p entries removed, the 7 demoted plus
+two_card test_data_parallel / model_runner_v2 test_data_parallel added
+(those two pack into existing rounds for free) — 23 two/four-card
+entries, predicted ~37min (zero-sample estimate: calibrated est×0.69 for
+entries without recorded durations; the first real run's elapsed_s is the
+calibration point).
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """
@@ -217,17 +236,16 @@ _BUDGET_S = 1200  # 20min per round
 _MAX_ROUNDS = 4   # was 3 (2026-09-07); the 2026-09-13 module-coverage
                   # expansion packs to 4 rounds — the phase-wall pin below
                   # is the binding budget now
-_PHASE_WALL_S = 1500  # 25min total e2e phase (user requirement 2026-09-10)
+_PHASE_WALL_S = 900  # 15min per-step e2e phase (user requirement
+                     # 2026-09-15; was 25min under the 2026-09-10 set)
 
 # disaggregated_encoder and deepseek_v3_2_w8a8_pruning both hardcode
 # physical devices 0..N-1 in their sources (Remote*Server /
 # ASCEND_RT_VISIBLE_DEVICES assignment), so the runtime scheduler gives
-# each a private round; simulate that here (the pin must count the rounds
-# the same way run_tests will build them).
-_OVERRIDERS = {
-    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py",
-    "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py",
-}
+# each a private round.  Both were demoted to extended on 2026-09-15, so
+# nothing in the current allowlist needs an overrider — re-add entries
+# here if either (or another physical-device case) returns per-step.
+_OVERRIDERS: set[str] = set()
 
 
 def _allowlist() -> list[str]:
@@ -254,13 +272,13 @@ def test_selected_set_packs_into_at_most_4_rounds():
         f"{_MAX_ROUNDS}-round cap; drop or swap cases")
 
 
-def test_whole_phase_within_25min():
+def test_whole_phase_within_15min():
     # Sequential rounds: phase wall = Σ per-round makespan (longest case).
     # This is the binding budget since the 2026-09-13 expansion.
     rounds = _scheduled()
     wall = sum(max(_RECORDED_S.get(t, 0) for t in r) for r in rounds)
     assert wall <= _PHASE_WALL_S, (
-        f"phase wall {wall}s exceeds the {_PHASE_WALL_S}s (25min) budget; "
+        f"phase wall {wall}s exceeds the {_PHASE_WALL_S}s (15min) budget; "
         f"drop or swap cases")
 
 
@@ -276,3 +294,15 @@ def test_gemma4_is_not_selected():
     # removed from the selection outright (user 2026-09-06) — the allowlist
     # IS the selected set; no blocklist bookkeeping.
     assert "tests/e2e/pull_request/two_card/test_gemma4.py" not in _allowlist()
+
+
+def test_extended_set_has_no_310p_and_no_per_step_overlap():
+    # User requirement 2026-09-15: 310P suites absolutely cannot run on the
+    # a3-16 pool (extended_e2e.py also drops them at runtime, both modes),
+    # and extended must not re-run anything the per-step set already covers.
+    policy = json.loads(_POLICY.read_text())
+    for t in policy["extended_e2e"]:
+        assert "/_310p/" not in t, (
+            f"{t} is a 310P suite — the a3-16 pool cannot run it")
+        assert t not in policy["allowlist"], (
+            f"{t} is already covered per-step — extended would re-run it")

@@ -192,11 +192,12 @@ def _resolve_release_smoke_cases() -> list[str]:
 def _resolve_extended_policy_cases() -> list[str]:
     """Fixed extended-e2e selection for the post-gate phase.
 
-    The curated ``test_policy.json`` ``extended_e2e`` key — sized to the
-    allowlist's estimated-time scale (sum(est) ≈ 210min ≈ ~30min measured
-    wall), so per-run cost stays one bounded batch.  MAIN2MAIN_EXTENDED_
-    TEST_CASES overrides entirely (handled by the caller); an empty key
-    disables the phase — same fallback philosophy as _resolve_release_smoke_cases.
+    The curated ``test_policy.json`` ``extended_e2e`` key — 60 cases
+    (2026-09-15 revision) maximizing two/four-card coverage (23 entries),
+    free of ``_310p`` suites, sized to one bounded ~30-35min batch.
+    MAIN2MAIN_EXTENDED_TEST_CASES overrides entirely (handled by the
+    caller); an empty key disables the phase — same fallback philosophy
+    as _resolve_release_smoke_cases.
     """
     policy_path = Path(__file__).parent / "test_policy.json"
     if policy_path.exists():
@@ -1388,14 +1389,15 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         return False
 
     def _run_extended_e2e(self) -> dict:
-        """Post-gate, pre-push extended e2e: run the full main2main-label set.
+        """Post-gate, pre-push extended e2e: one bounded coverage batch.
 
-        The fixed 25-case policy set only proves the cases it contains —
-        the 2026-09-15 run shipped PR 16575 green on pre_ci while upstream
-        CI failed legs (dflash/dspark release lane, PCP spec decode) the
-        fixed set never touched.  Small fast steps + one bounded coverage
-        batch: the default source is the FIXED curated set
-        (test_policy.json "extended_e2e", allowlist-scale ≈ ~30min wall);
+        The per-step policy set only proves the cases it contains — the
+        2026-09-15 run shipped PR 16575 green on pre_ci while upstream CI
+        failed legs (dflash/dspark release lane, PCP spec decode) the fixed
+        set never touched.  Small fast steps (~15min per-step e2e) + one
+        bounded coverage batch (~30-35min): the default source is the FIXED
+        curated set (test_policy.json "extended_e2e", 60 cases maximizing
+        two/four-card coverage, _310p suites structurally excluded);
         MAIN2MAIN_EXTENDED_MODE=full opts into the whole-label resolver
         (extended_e2e.resolve_extended_cases, hours).  Failures enter
         adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS); a fix round
@@ -1425,11 +1427,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
             # ---- case resolution ----
             # Default: the FIXED extended set (test_policy.json
-            # "extended_e2e", curated to the allowlist's estimated-time
-            # scale ≈ ~30min wall — small fast steps, one bounded coverage
-            # batch per run).  MAIN2MAIN_EXTENDED_MODE=full opts into the
-            # whole-label resolver (hours).  MAIN2MAIN_EXTENDED_TEST_CASES
-            # overrides both.
+            # "extended_e2e", 60 cases ≈ ~30-35min wall — small fast
+            # steps, one bounded coverage batch per run).
+            # MAIN2MAIN_EXTENDED_MODE=full opts into the whole-label
+            # resolver (hours).  MAIN2MAIN_EXTENDED_TEST_CASES overrides
+            # both.
             override_env = os.getenv("MAIN2MAIN_EXTENDED_TEST_CASES",
                                      "").strip()
             override = ([t.strip() for t in
@@ -1461,6 +1463,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 pruned = {"cases": resolution["cases"],
                           "dropped_fixed": [],
                           "dropped_skip": resolution["dropped_skip"],
+                          "dropped_310p": resolution["dropped_310p"],
                           "dropped_missing": resolution["dropped_missing"]}
                 source = resolution["source"]
             else:
@@ -1474,6 +1477,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 "dropped_fixed": pruned["dropped_fixed"],
                 "dropped_missing": pruned["dropped_missing"],
                 "dropped_skip": pruned["dropped_skip"],
+                "dropped_310p": pruned["dropped_310p"],
                 "source": source,
             })
             if not cases:

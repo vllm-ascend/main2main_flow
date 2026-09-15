@@ -58,10 +58,12 @@ def _extended_flow(monkeypatch, tmp_path, cases=(CASE_A, CASE_B, CASE_C)):
     monkeypatch.setattr(flow_mod, "prune_fixed_set",
                         lambda ascend, cs, fixed: {
                             "cases": list(cs), "dropped_fixed": [],
-                            "dropped_skip": [], "dropped_missing": []})
+                            "dropped_skip": [], "dropped_310p": [],
+                            "dropped_missing": []})
     monkeypatch.setattr(flow_mod, "resolve_extended_cases", lambda *a, **k: {
         "cases": list(cases), "tier1": [],
-        "dropped_missing": [], "dropped_skip": [], "source": "override"})
+        "dropped_missing": [], "dropped_skip": [], "dropped_310p": [],
+        "source": "override"})
     monkeypatch.setattr(flow_mod, "partition_by_import_closure",
                         lambda cases, mods, path: ([], list(cases)))
     monkeypatch.setattr(flow_mod, "order_cases",
@@ -202,7 +204,8 @@ def test_override_env_skips_policy_and_resolver(monkeypatch, tmp_path):
     def fake_prune(ascend, cs, fixed):
         seen["cases"] = list(cs)
         return {"cases": list(cs), "dropped_fixed": [],
-                "dropped_skip": [], "dropped_missing": []}
+                "dropped_skip": [], "dropped_310p": [],
+                "dropped_missing": []}
 
     monkeypatch.setattr(flow_mod, "prune_fixed_set", fake_prune)
     out = f._run_extended_e2e()
@@ -220,7 +223,7 @@ def test_drift_guard_drops_allowlist_covered(monkeypatch, tmp_path):
     monkeypatch.setattr(flow_mod, "prune_fixed_set",
                         lambda ascend, cs, fixed: {
                             "cases": [CASE_A], "dropped_fixed": [CASE_B],
-                            "dropped_skip": [CASE_C],
+                            "dropped_skip": [CASE_C], "dropped_310p": [],
                             "dropped_missing": []})
     out = f._run_extended_e2e()
     assert out["status"] == "passed"

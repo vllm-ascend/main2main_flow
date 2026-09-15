@@ -425,18 +425,25 @@ def test_release_smoke_policy_is_pinned_to_allowlist():
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     cases = policy["release_smoke"]
     assert len(cases) == 6
-    # Five basic nodes are proven main-lane cases (allowlist members).
+    # Four basic nodes are proven main-lane cases (allowlist members).
     # test_hang is deliberately RELEASE-ONLY: it is not in the allowlist
-    # (the main lane's 25min wall has no room for it) but it is the case
-    # that caught PR 16483's own-diff break on the v0.28.0 leg — the
-    # drafter init reads ModelConfig.mrope_num_dims, a property that only
-    # exists on vllm main, and only a uses_mrope drafter model reaches
-    # that branch.  Every allowlist node runs a non-mrope model, so the
-    # smoke needs one mrope case of its own.
+    # (the mrope version-compat class it guards is invisible on the main
+    # lane) but it is the case that caught PR 16483's own-diff break on
+    # the v0.28.0 leg — the drafter init reads ModelConfig.mrope_num_dims,
+    # a property that only exists on vllm main, and only a uses_mrope
+    # drafter model reaches that branch.  Every allowlist node runs a
+    # non-mrope model, so the smoke needs one mrope case of its own.
     allowlist_only = [c for c in cases if c in policy["allowlist"]]
     release_only = [c for c in cases if c not in policy["allowlist"]]
-    assert len(allowlist_only) == 5
+    assert len(allowlist_only) == 4
+    # graph_mode joined test_hang as release-only on 2026-09-15: demoted
+    # from the per-step allowlist to hit the 15min phase pin (it still
+    # runs once per run in extended_e2e on the MAIN lane), but the smoke
+    # keeps it — the release-lane graph-mode capture path is only ever
+    # exercised here.
     assert release_only == [
+        "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py"
+        "::test_qwen3_dense_graph_mode",
         "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py"
         "::test_hang"]
     # The graph-mode node is the 16382 crash site (spec-decode capture).
