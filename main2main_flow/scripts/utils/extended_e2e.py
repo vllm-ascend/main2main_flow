@@ -1,21 +1,25 @@
-"""Extended e2e case resolution: run as many PR-relevant cases as possible.
+"""Extended e2e case selection: a fixed ~30min set, or the full label scan.
 
-After the final quality gate passes, the flow runs the FULL main2main-label
-e2e set (what upstream PR CI would execute for this PR) — the fixed 25-case
-policy set only proves the cases it contains (the 2026-09-15 run shipped
-PR 16575 green on pre_ci while upstream CI failed legs the fixed set never
-touched).
+After the final quality gate passes, the flow runs the extended e2e phase —
+the fixed 25-case per-step set only proves the cases it contains (the
+2026-09-15 run shipped PR 16575 green on pre_ci while upstream CI failed
+legs the fixed set never touched).  Small fast steps + one bounded coverage
+batch: the default source is the FIXED ``test_policy.json`` ``extended_e2e``
+key (55 cases curated cheapest-first from the label scan to the allowlist's
+estimated-time scale — sum(est) ≈ 210min ≈ ~30min measured wall — maximizing
+distinct covered ``vllm_ascend.*`` modules and feature areas).
+``MAIN2MAIN_EXTENDED_MODE=full`` opts into the whole-label resolver instead
+(89 cases, hours): tree scan of ``tests/e2e/pull_request/**/test_*.py``
+minus ``test_config.yaml`` ``skip_tests``, fixed-set coverage, and the
+blocklist.  ``main2main_tests.json`` is NOT usable as a source: it is the
+daily-bot regression subset (18 entries) and every entry is already inside
+the fixed policy allowlist — subtracting the fixed set from it yields an
+empty set.
 
-The label's real semantics (vllm-ascend ``pr_test.yaml`` MODE=all +
-``select_tests.py``) is a tree scan of ``tests/e2e/pull_request/**/test_*.py``
-minus ``test_config.yaml`` ``skip_tests``.  ``main2main_tests.json`` is NOT
-usable as the source: it is the daily-bot regression subset (18 entries) and
-every entry is already inside the fixed policy allowlist — subtracting the
-fixed set from it yields an empty set.
-
-Cases whose test file imports a module touched by the adaptation diff are
-ordered first (relevance tier); the rest follow, both tiers by upstream
-estimated time ascending so a bounded phase maximizes completed cases.
+In both modes, cases whose test file imports a module touched by the
+adaptation diff are ordered first (relevance tier); the rest follow, both
+tiers by upstream estimated time ascending so a bounded phase maximizes
+completed cases.
 """
 from __future__ import annotations
 
@@ -215,6 +219,47 @@ def order_cases(cases: list[str], tier1: list[str],
     return ordered
 
 
+def prune_fixed_set(
+    ascend_path: str | Path,
+    cases: list[str],
+    fixed_cases: list[str],
+) -> dict:
+    """Runtime guards for the curated fixed extended set.
+
+    Curation is offline (against a past tree); these guards keep a stale
+    list from wasting NPU time or lying: entries the per-step allowlist
+    already covers (policy drift — those ran every step), entries upstream
+    has since moved to ``skip_tests``, and files missing from the current
+    tree (2026-09-13 phantom-file lesson).
+    """
+    skip = load_upstream_skip_tests(ascend_path)
+    kept: list[str] = []
+    dropped_fixed: list[str] = []
+    dropped_skip: list[str] = []
+    dropped_missing: list[str] = []
+    for c in cases:
+        if covered_by_fixed(c, fixed_cases):
+            dropped_fixed.append(c)
+        elif c in skip:
+            dropped_skip.append(c)
+        elif not (Path(ascend_path) / _file_of(c)).exists():
+            dropped_missing.append(c)
+        else:
+            kept.append(c)
+    if dropped_fixed:
+        ts_print(f"[extended_e2e] fixed-set drift: "
+                 f"{len(dropped_fixed)} case(s) already covered by the "
+                 f"per-step allowlist, dropped")
+    if dropped_skip:
+        ts_print(f"[extended_e2e] upstream skip_tests now covers "
+                 f"{len(dropped_skip)} extended case(s), dropped")
+    if dropped_missing:
+        ts_print(f"[extended_e2e] {len(dropped_missing)} case(s) not on "
+                 f"the tree, dropped")
+    return {"cases": kept, "dropped_fixed": dropped_fixed,
+            "dropped_skip": dropped_skip, "dropped_missing": dropped_missing}
+
+
 def resolve_extended_cases(
     ascend_path: str | Path,
     fixed_cases: list[str],
@@ -223,12 +268,14 @@ def resolve_extended_cases(
     include_skipped: bool = False,
     override: list[str] | None = None,
 ) -> dict:
-    """Resolve the extended e2e case list.
+    """Resolve the FULL extended e2e case list (MODE=full opt-in).
 
-    MAIN2MAIN_EXTENDED_TEST_CASES (passed as *override*) replaces the
-    whole resolution.  Otherwise: tree scan − upstream skip_tests −
-    fixed-set coverage − blocklist − missing files.  Returns a dict with
-    the cases, tier1 membership, and everything dropped (evidence).
+    The default mode runs the curated fixed set instead (prune_fixed_set
+    over the ``extended_e2e`` policy key).  MAIN2MAIN_EXTENDED_TEST_CASES
+    (passed as *override*) replaces the whole resolution.  Otherwise: tree
+    scan − upstream skip_tests − fixed-set coverage − blocklist − missing
+    files.  Returns a dict with the cases, tier1 membership, and everything
+    dropped (evidence).
     """
     skipped = load_upstream_skip_tests(ascend_path)
     dropped_skip: list[str] = []

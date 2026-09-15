@@ -34,6 +34,7 @@ from main2main_flow.scripts.utils.extended_e2e import (
     changed_module_names,
     order_cases,
     partition_by_import_closure,
+    prune_fixed_set,
     resolve_extended_cases,
 )
 from main2main_flow.scripts.utils.commit_ref import run_update
@@ -185,6 +186,27 @@ def _resolve_release_smoke_cases() -> list[str]:
                     if isinstance(t, str) and t.strip()]
         except (json.JSONDecodeError, KeyError, OSError):
             ts_print("[test_policy] failed to parse release_smoke, ignoring")
+    return []
+
+
+def _resolve_extended_policy_cases() -> list[str]:
+    """Fixed extended-e2e selection for the post-gate phase.
+
+    The curated ``test_policy.json`` ``extended_e2e`` key — sized to the
+    allowlist's estimated-time scale (sum(est) ≈ 210min ≈ ~30min measured
+    wall), so per-run cost stays one bounded batch.  MAIN2MAIN_EXTENDED_
+    TEST_CASES overrides entirely (handled by the caller); an empty key
+    disables the phase — same fallback philosophy as _resolve_release_smoke_cases.
+    """
+    policy_path = Path(__file__).parent / "test_policy.json"
+    if policy_path.exists():
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            cases = policy.get("extended_e2e", [])
+            return [t.strip() for t in cases
+                    if isinstance(t, str) and t.strip()]
+        except (json.JSONDecodeError, KeyError, OSError):
+            ts_print("[test_policy] failed to parse extended_e2e, ignoring")
     return []
 
 
@@ -1371,14 +1393,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         The fixed 25-case policy set only proves the cases it contains —
         the 2026-09-15 run shipped PR 16575 green on pre_ci while upstream
         CI failed legs (dflash/dspark release lane, PCP spec decode) the
-        fixed set never touched.  This phase runs what upstream PR CI
-        would: every tests/e2e/pull_request test file on the tree minus
-        upstream skip_tests, the fixed set's coverage, and the blocklist
-        (see extended_e2e.resolve_extended_cases).  Failures enter
+        fixed set never touched.  Small fast steps + one bounded coverage
+        batch: the default source is the FIXED curated set
+        (test_policy.json "extended_e2e", allowlist-scale ≈ ~30min wall);
+        MAIN2MAIN_EXTENDED_MODE=full opts into the whole-label resolver
+        (extended_e2e.resolve_extended_cases, hours).  Failures enter
         adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS); a fix round
         re-runs ONLY the failed suites — the user's full-re-run decision
-        (2026-09-15) governs the per-step fixed set, not this phase, where
-        a full re-run costs hours.
+        (2026-09-15) governs the per-step fixed set, not this phase.
 
         Best-effort by design: exhausting the budgets never fails the run
         — the tree (with kept fixes) is pushed anyway and upstream PR CI
@@ -1402,6 +1424,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             phase_dir.mkdir(parents=True, exist_ok=True)
 
             # ---- case resolution ----
+            # Default: the FIXED extended set (test_policy.json
+            # "extended_e2e", curated to the allowlist's estimated-time
+            # scale ≈ ~30min wall — small fast steps, one bounded coverage
+            # batch per run).  MAIN2MAIN_EXTENDED_MODE=full opts into the
+            # whole-label resolver (hours).  MAIN2MAIN_EXTENDED_TEST_CASES
+            # overrides both.
             override_env = os.getenv("MAIN2MAIN_EXTENDED_TEST_CASES",
                                      "").strip()
             override = ([t.strip() for t in
@@ -1419,17 +1447,34 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             except (json.JSONDecodeError, KeyError, OSError):
                 ts_print("[extended_e2e] failed to parse test_policy.json "
                          "for subtraction lists")
-            include_skipped = (os.getenv(
-                "MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED", "0") == "1")
-            resolution = resolve_extended_cases(
-                ascend_path, fixed, blocked,
-                include_skipped=include_skipped, override=override)
-            cases = resolution["cases"]
+            mode = os.getenv("MAIN2MAIN_EXTENDED_MODE",
+                             "fixed").strip().lower()
+            if override is not None:
+                pruned = prune_fixed_set(ascend_path, override, fixed)
+                source = "override"
+            elif mode == "full":
+                include_skipped = (os.getenv(
+                    "MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED", "0") == "1")
+                resolution = resolve_extended_cases(
+                    ascend_path, fixed, blocked,
+                    include_skipped=include_skipped)
+                pruned = {"cases": resolution["cases"],
+                          "dropped_fixed": [],
+                          "dropped_skip": resolution["dropped_skip"],
+                          "dropped_missing": resolution["dropped_missing"]}
+                source = resolution["source"]
+            else:
+                pruned = prune_fixed_set(
+                    ascend_path, _resolve_extended_policy_cases(), fixed)
+                source = "test_policy.json extended_e2e"
+            cases = pruned["cases"]
             result_out.update({
+                "mode": mode if override is None else "override",
                 "cases_total": len(cases),
-                "dropped_missing": resolution["dropped_missing"],
-                "dropped_skip": resolution["dropped_skip"],
-                "source": resolution["source"],
+                "dropped_fixed": pruned["dropped_fixed"],
+                "dropped_missing": pruned["dropped_missing"],
+                "dropped_skip": pruned["dropped_skip"],
+                "source": source,
             })
             if not cases:
                 ts_print("[extended_e2e] no cases after subtraction, skipping")

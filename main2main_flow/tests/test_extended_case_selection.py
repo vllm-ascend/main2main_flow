@@ -213,3 +213,47 @@ def test_resolve_extended_cases_override_and_missing(tmp_path):
     assert out["dropped_missing"] == [
         "tests/e2e/pull_request/one_card/ghost.py"]
     assert out["source"] == "override"
+
+
+def test_prune_fixed_set_drops_drift_skip_missing(tmp_path):
+    from main2main_flow.scripts.utils.extended_e2e import prune_fixed_set
+
+    files = [
+        "tests/e2e/pull_request/one_card/test_free.py",
+        "tests/e2e/pull_request/one_card/test_drift.py",   # allowlist covers
+        "tests/e2e/pull_request/one_card/test_skipped.py",  # upstream skip
+    ]
+    ascend = _make_ascend(tmp_path, files)
+    cfg = tmp_path / "ascend/.github/workflows/scripts"
+    cfg.mkdir(parents=True)
+    (cfg / "test_config.yaml").write_text(yaml.safe_dump({
+        "skip_tests": ["tests/e2e/pull_request/one_card/test_skipped.py"],
+    }), encoding="utf-8")
+    # the stale curated list still names a file the tree no longer has
+    candidates = files + ["tests/e2e/pull_request/one_card/test_ghost.py"]
+    out = prune_fixed_set(
+        ascend,
+        candidates,
+        ["tests/e2e/pull_request/one_card/test_drift.py::some_node"])
+    # node-level allowlist coverage counts as drift — those cases already
+    # ran every step
+    assert out["cases"] == [
+        "tests/e2e/pull_request/one_card/test_free.py"]
+    assert out["dropped_fixed"] == [
+        "tests/e2e/pull_request/one_card/test_drift.py"]
+    assert out["dropped_skip"] == [
+        "tests/e2e/pull_request/one_card/test_skipped.py"]
+    assert out["dropped_missing"] == [
+        "tests/e2e/pull_request/one_card/test_ghost.py"]
+
+
+def test_prune_fixed_set_keeps_clean_list(tmp_path):
+    from main2main_flow.scripts.utils.extended_e2e import prune_fixed_set
+
+    ascend = _make_ascend(tmp_path, [
+        "tests/e2e/pull_request/one_card/test_a.py"])
+    out = prune_fixed_set(
+        ascend, ["tests/e2e/pull_request/one_card/test_a.py"], [])
+    assert out["cases"] == ["tests/e2e/pull_request/one_card/test_a.py"]
+    assert not any(out[k] for k in
+                   ("dropped_fixed", "dropped_skip", "dropped_missing"))

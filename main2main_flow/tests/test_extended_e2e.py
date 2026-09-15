@@ -32,7 +32,12 @@ CASE_C = "tests/e2e/pull_request/two_card/test_c.py"
 
 
 def _extended_flow(monkeypatch, tmp_path, cases=(CASE_A, CASE_B, CASE_C)):
-    """Flow with the case resolution and heavy collaborators scripted."""
+    """Flow with the case resolution and heavy collaborators scripted.
+
+    Both sources resolve to the same trio: the fixed policy key (default
+    mode) via _resolve_extended_policy_cases + prune_fixed_set, and the
+    whole-label resolver (MODE=full) via resolve_extended_cases.
+    """
     monkeypatch.setattr(flow_mod, "WORKSPACE_DIR", tmp_path)
     f = flow_mod.Main2MainFlow()
     f.state.steps = [{"id": "step-1", "start_commit": "aaa",
@@ -48,6 +53,12 @@ def _extended_flow(monkeypatch, tmp_path, cases=(CASE_A, CASE_B, CASE_C)):
     f.state.last_verified_commit = "bbb"
     f.state.original_ascend_ref = "base"
 
+    monkeypatch.setattr(flow_mod, "_resolve_extended_policy_cases",
+                        lambda: list(cases))
+    monkeypatch.setattr(flow_mod, "prune_fixed_set",
+                        lambda ascend, cs, fixed: {
+                            "cases": list(cs), "dropped_fixed": [],
+                            "dropped_skip": [], "dropped_missing": []})
     monkeypatch.setattr(flow_mod, "resolve_extended_cases", lambda *a, **k: {
         "cases": list(cases), "tier1": [],
         "dropped_missing": [], "dropped_skip": [], "source": "override"})
@@ -152,6 +163,70 @@ def test_empty_case_set(monkeypatch, tmp_path):
     assert out["status"] == "empty"
     assert calls == []
     assert _read_result(tmp_path)["status"] == "empty"
+
+
+def test_fixed_mode_reads_policy_key(monkeypatch, tmp_path):
+    # Default mode: the curated fixed set from test_policy.json, with the
+    # allowlist-drift/skip/missing guards applied (prune_fixed_set).
+    f = _extended_flow(monkeypatch, tmp_path)
+    calls = _script_run_tests(monkeypatch, f, [
+        _rt_result(dict([_suite(CASE_A, "passed"), _suite(CASE_B, "passed"),
+                         _suite(CASE_C, "passed")]))])
+    out = f._run_extended_e2e()
+    assert out["status"] == "passed"
+    assert out["mode"] == "fixed"
+    assert out["source"] == "test_policy.json extended_e2e"
+    assert calls[0]["test_cases"] == [CASE_A, CASE_B, CASE_C]
+
+
+def test_full_mode_uses_resolver(monkeypatch, tmp_path):
+    f = _extended_flow(monkeypatch, tmp_path)
+    _script_run_tests(monkeypatch, f, [
+        _rt_result(dict([_suite(CASE_A, "passed")]))])
+    monkeypatch.setenv("MAIN2MAIN_EXTENDED_MODE", "full")
+    out = f._run_extended_e2e()
+    assert out["status"] == "passed"
+    assert out["mode"] == "full"
+    assert out["source"] == "override"  # scripted resolver's source
+
+
+def test_override_env_skips_policy_and_resolver(monkeypatch, tmp_path):
+    # MAIN2MAIN_EXTENDED_TEST_CASES replaces both sources entirely; the
+    # drift guards still apply to it (stale overrides must not waste NPU).
+    f = _extended_flow(monkeypatch, tmp_path)
+    _script_run_tests(monkeypatch, f, [
+        _rt_result(dict([_suite(CASE_A, "passed")]))])
+    monkeypatch.setenv("MAIN2MAIN_EXTENDED_TEST_CASES", f"{CASE_B} {CASE_C}")
+    seen: dict = {}
+
+    def fake_prune(ascend, cs, fixed):
+        seen["cases"] = list(cs)
+        return {"cases": list(cs), "dropped_fixed": [],
+                "dropped_skip": [], "dropped_missing": []}
+
+    monkeypatch.setattr(flow_mod, "prune_fixed_set", fake_prune)
+    out = f._run_extended_e2e()
+    assert seen["cases"] == [CASE_B, CASE_C]
+    assert out["mode"] == "override"
+
+
+def test_drift_guard_drops_allowlist_covered(monkeypatch, tmp_path):
+    # A policy entry the per-step allowlist already covers is dropped at
+    # runtime (curation is offline; the two lists drift over time).
+    f = _extended_flow(monkeypatch, tmp_path,
+                       cases=[CASE_A, CASE_B, CASE_C])
+    calls = _script_run_tests(monkeypatch, f, [
+        _rt_result(dict([_suite(CASE_A, "passed")]))])
+    monkeypatch.setattr(flow_mod, "prune_fixed_set",
+                        lambda ascend, cs, fixed: {
+                            "cases": [CASE_A], "dropped_fixed": [CASE_B],
+                            "dropped_skip": [CASE_C],
+                            "dropped_missing": []})
+    out = f._run_extended_e2e()
+    assert out["status"] == "passed"
+    assert calls[0]["test_cases"] == [CASE_A]
+    assert out["dropped_fixed"] == [CASE_B]
+    assert out["dropped_skip"] == [CASE_C]
 
 
 def test_first_pass_green_no_adapter(monkeypatch, tmp_path):
