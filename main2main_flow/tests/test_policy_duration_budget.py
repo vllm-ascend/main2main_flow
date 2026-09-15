@@ -168,6 +168,22 @@ set now (flow._run_gate_e2e, same trigger as the old regression e2e,
 own-diff triage on failure, delta re-runs).  No pin numbers change: the
 per-step budget guards above stay binding, and the extended_e2e policy
 key only changes CONSUMER (gate e2e instead of a post-gate phase).
+User decision 2026-09-16 (fourth revision): trim extended 55 → 36 cases
+(24 one-card, 7 two-card, 5 four-card = 12 two/four-card entries).  All
+six failure-weighted anchors stay (extract_hidden_states, gumbel,
+mamba_hybrid, Kimi-K3, dspark, CP deepseek_v4).  The 19 drops take the
+expensive no-failure-history surfaces: both plain data_parallel lanes
+(530/520s — DP still guarded by spec_decode_data_parallel), gemma4,
+qwen3moe_lora, two_card qwen3_moe_eplb (EPLB still guarded by the
+four-card mrv2_eplb + the 30s eplb_map case), llama32/reranker loras
+(ilama + olmoe + qwen3_multi stay), draft_parallel/ngram/suffix spec
+variants (ngram_npu stays), batch_invariant_tp4, profiling_chunk
+(upstream CI owns profiling), minicpm, minimax sparse_attn one-card
+(the four-card minimax_m3 entry stays), xlite, multistream_overlap,
+npu_ipc_weight_transfer, graphex_norm_quant_fusion,
+completion_with_prompt_embeds.  Lane ests 69/24/28.7min → predicted
+~17min under the same 4/2/2-slot packing that gave ~31min for the
+55-case set.
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """

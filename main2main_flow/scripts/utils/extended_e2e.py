@@ -1,14 +1,14 @@
-"""Gate main-e2e case selection: a fixed ~30-35min set, or the full label scan.
+"""Gate main-e2e case selection: a fixed ~17min set, or the full label scan.
 
 The gate's main-lane e2e runs the EXTENDED coverage set (2026-09-15 merge:
 the former post-gate phase became the gate's regression e2e — the per-step
 set only proves the cases it contains, and the 2026-09-15 run shipped
 PR 16575 green on pre_ci while upstream CI failed legs the fixed set never
 touched).  The default source is the FIXED ``test_policy.json``
-``extended_e2e`` key (55 cases — the 2026-09-15 second revision weights
-the surfaces that recently failed CI (extract_hidden_states, gumbel,
-mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP) while keeping two/four-card
-coverage (19 entries) and excluding every ``_310p`` suite: the a3-16 pool
+``extended_e2e`` key (36 cases — the 2026-09-16 fourth revision trims
+the 55-case set to the failure-weighted core: extract_hidden_states,
+gumbel, mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP anchors stay, 12
+two/four-card entries) and excluding every ``_310p`` suite: the a3-16 pool
 absolutely cannot run 310P hardware paths, so they are dropped
 structurally in BOTH modes, not just omitted from curation).
 ``MAIN2MAIN_EXTENDED_MODE=full`` opts into the whole-label resolver instead

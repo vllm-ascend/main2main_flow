@@ -98,10 +98,11 @@ cases it contains (PR 16575 shipped green on pre_ci while upstream CI
 failed legs it never touched).
 
 Case source (`extended_e2e.py`): by default the FIXED curated
-`test_policy.json` `extended_e2e` key — 55 cases (2026-09-15) weighted
+`test_policy.json` `extended_e2e` key — 36 cases (2026-09-16 trim of the
+55-case set; 24 one-card, 7 two-card, 5 four-card) weighted
 toward the surfaces that recently failed CI (extract_hidden_states,
-gumbel, mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP), 19 two/four-card
-entries, and excluding every `_310p` suite (the a3-16 pool absolutely
+gumbel, mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP), and excluding
+every `_310p` suite (the a3-16 pool absolutely
 cannot run 310P hardware paths — the exclusion is structural, applied at
 runtime in BOTH modes, overrides included).
 Curation is offline; runtime guards drop entries the per-step allowlist
@@ -192,8 +193,8 @@ upstream CI stays the only test executor — the watcher runs no tests itself.
 | `MAIN2MAIN_PR_WATCH_POLL_SEC` | Check-run poll interval seconds (default: `300`). |
 | `MAIN2MAIN_PR_WATCH_BASELINE` | `0` skips the `main2main_baseline` write-back after an accepted fix (default: `1`). |
 | `MAIN2MAIN_PR_WATCH_COMMENT` | `0` skips the PR comment on exhausted/timeout/inherited (default: `1`). |
-| `MAIN2MAIN_EXTENDED_E2E` | `0` reverts the gate's main e2e to the legacy 23-case regression set (default: `1` runs the wide 55-case set with triage). |
-| `MAIN2MAIN_EXTENDED_MODE` | `fixed` (default) runs the curated `test_policy.json` `extended_e2e` set (~30min); `full` resolves the whole label minus subtraction (hours). |
+| `MAIN2MAIN_EXTENDED_E2E` | `0` reverts the gate's main e2e to the legacy 23-case regression set (default: `1` runs the wide 36-case set with triage). |
+| `MAIN2MAIN_EXTENDED_MODE` | `fixed` (default) runs the curated `test_policy.json` `extended_e2e` set (~17min); `full` resolves the whole label minus subtraction (hours). |
 | `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | Adapter-fix rounds for extended e2e failures after the first round (default: `2`). |
 | `MAIN2MAIN_EXTENDED_MAX_MIN` | Extended e2e wall-clock backstop in minutes, `0` = off (default: `360`). |
 | `MAIN2MAIN_EXTENDED_TEST_CASES` | Space/newline-separated extended e2e cases replacing both sources entirely (drift guards still apply). |
