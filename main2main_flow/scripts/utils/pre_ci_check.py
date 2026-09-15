@@ -15,6 +15,8 @@ Design note:
 from __future__ import annotations
 
 import ast
+import json
+import os
 import platform
 import re
 import shutil
@@ -25,8 +27,9 @@ from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import (run_format_sh, run_git,
                                                 pip_install_with_fallback,
-                                                ts_print)
-from main2main_flow.scripts.utils.ut_check import check_ut as _check_ut  # noqa: E402
+                                                ts_print, WORKSPACE_DIR)
+from main2main_flow.scripts.utils.ut_check import (check_ut as _check_ut,
+                                                   _triton_numpy_spec)  # noqa: E402
 
 _TEMP_PATTERNS = [
     ".log",
@@ -231,6 +234,81 @@ def _changed_test_py_files(repo: Path) -> list[str]:
             if f.endswith(".py") and f.startswith(("tests/", "examples/"))]
 
 
+_MYPY_VENV_ENV = "MAIN2MAIN_MYPY_VENV"
+_MYPY_VENV_MARKER = "m2m_meta.json"
+
+
+def _mypy_base_dir() -> Path:
+    """Home of the persistent mypy lint venv (mirrors ut_check's ut_venv)."""
+    env = os.environ.get(_MYPY_VENV_ENV, "")
+    return Path(env) if env else WORKSPACE_DIR / "mypy_venv"
+
+
+def _ensure_mypy_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
+    """Create-or-reuse the persistent lint venv; return (venv_dir, venv_python).
+
+    Mirrors ut_check's _ensure_ut_venv: the venv lives across pre_ci
+    attempts and steps (the runner is ephemeral, so no end-of-run cleanup
+    is needed).  Reuse requires bin/python to exist AND the numpy spec in
+    the marker to match triton-ascend's current constraint.  Any failure
+    falls back to the system mypy (returns (None, "")).
+    """
+    venv_dir = _mypy_base_dir()
+    venv_python = venv_dir / "bin" / "python"
+    if venv_python.exists():
+        try:
+            meta = json.loads((venv_dir / _MYPY_VENV_MARKER).read_text(
+                encoding="utf-8"))
+            if meta.get("numpy_spec") == target_numpy_spec:
+                ts_print(f"[pre_ci] mypy: reusing persistent venv at {venv_dir}")
+                return venv_dir, str(venv_python)
+            ts_print(f"[pre_ci] mypy: persistent venv numpy spec mismatch "
+                     f"({meta.get('numpy_spec')!r} != {target_numpy_spec!r}) "
+                     "— recreating")
+        except Exception:
+            ts_print("[pre_ci] mypy: persistent venv marker unreadable "
+                     "— recreating")
+        shutil.rmtree(venv_dir, ignore_errors=True)
+
+    ts_print(f"[pre_ci] mypy: creating persistent lint venv at {venv_dir} "
+             f"(numpy{target_numpy_spec} from triton-ascend, no vllm package)")
+    try:
+        venv_dir.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(
+            [sys.executable, "-m", "venv", str(venv_dir),
+             "--system-site-packages"],
+            capture_output=True, text=True, timeout=180,
+        )
+        if r.returncode != 0:
+            ts_print("[pre_ci] mypy: WARNING venv creation FAILED — "
+                     "falling back to system mypy")
+            return None, ""
+        if target_numpy_spec:
+            # A failed install silently leaves system numpy 2.x in the venv,
+            # reproducing the false positives — treat it as no venv.
+            try:
+                r2 = pip_install_with_fallback(
+                    venv_python,
+                    [f"numpy{target_numpy_spec}", "--no-build-isolation"])
+            except subprocess.TimeoutExpired:
+                ts_print("[pre_ci] mypy: WARNING numpy install TIMED OUT — "
+                         "falling back to system mypy")
+                r2 = None
+            if r2 is not None and r2.returncode != 0:
+                ts_print(f"[pre_ci] mypy: WARNING numpy install FAILED "
+                         f"({r2.stderr.strip()[:200]}) — falling back "
+                         "to system mypy")
+                return None, ""
+        (venv_dir / _MYPY_VENV_MARKER).write_text(
+            json.dumps({"numpy_spec": target_numpy_spec}),
+            encoding="utf-8")
+        return venv_dir, str(venv_python)
+    except subprocess.TimeoutExpired:
+        ts_print("[pre_ci] mypy: WARNING venv creation TIMED OUT (180s) — "
+                 "falling back to system mypy")
+        return None, ""
+
+
 def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
                 vllm_release_path: str | Path | None = None) -> dict:
     """Run mypy with the same core command and environment as vllm-ascend's CI.
@@ -265,8 +343,7 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
     if not mypy:
         return {"violations": [], "detail": "mypy not installed", "skipped": True}
 
-    import os as _os
-    base_env = _os.environ.copy()
+    base_env = os.environ.copy()
     if vllm_path:
         vllm_abs = str(Path(vllm_path).resolve())
         existing = base_env.get("PYTHONPATH", "")
@@ -290,122 +367,66 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
     # 2.x (workflow installs triton-ascend with --no-deps, skipping the numpy
     # constraint).  This causes ~68 spurious mypy errors.
     #
-    # Fix: create an isolated venv with --system-site-packages (inherits mypy,
-    # mypy.ini, triton-ascend, etc. from the system), install only the numpy
-    # version that triton-ascend constrains (dynamically read from metadata,
-    # not hardcoded), and DON'T install vllm (so mypy falls back to PYTHONPATH).
-    # This exactly reproduces the CI lint image's mypy environment.
-    # The venv is temporary and destroyed after the mypy run.
+    # Fix: run mypy inside a persistent venv with --system-site-packages
+    # (inherits mypy, mypy.ini, triton-ascend, etc. from the system) holding
+    # only the numpy version that triton-ascend constrains (dynamically read
+    # from metadata, not hardcoded), and NO vllm (so mypy falls back to
+    # PYTHONPATH).  This reproduces the CI lint image's mypy environment;
+    # unlike the temp venv it replaces, it is built once and reused across
+    # pre_ci attempts and steps (_ensure_mypy_venv).
     #
     # Verified: venv + numpy==1.26.4 + no vllm + PYTHONPATH=vllm source
     #   -> 0 errors (matches clean lint image exactly).
-    import tempfile
-    import importlib.metadata as _md
-
-    # Read numpy constraint from triton-ascend metadata (not hardcoded).
-    # Parse with packaging.requirements.Requirement so COMPOUND specifiers
-    # (e.g. "numpy>=1.26.4,<2.1") are handled - the old regex only captured
-    # the first comparator, turning ">=1.26.4,<2.1" into ">=1.26.4" which
-    # resolves to numpy 2.x and reproduces the false positives.
-    target_numpy_spec = ""
-    try:
-        from packaging.requirements import Requirement
-        reqs = _md.requires("triton-ascend") or []
-        for req in reqs:
-            if "extra" in req.lower():
-                continue
-            try:
-                r = Requirement(req)
-            except Exception:
-                continue
-            if r.name.lower() == "numpy":
-                # Reconstruct full spec: "numpy>=1.26.4,<2.1" -> ">=1.26.4,<2.1"
-                target_numpy_spec = ",".join(
-                    f"{s.operator}{s.version}" for s in r.specifier)
-                break
-    except Exception as e:
-        ts_print(f"[pre_ci] mypy: failed to read triton-ascend numpy constraint ({e})")
+    target_numpy_spec = _triton_numpy_spec(label="mypy")
 
     if not target_numpy_spec:
         ts_print("[pre_ci] mypy: WARNING no triton-ascend numpy constraint found - "
                  "using system numpy (may report spurious [var-annotated] errors, "
                  "see known numpy 2.x issue)")
 
-    # Create isolated venv to run mypy in CI-lint-equivalent environment.
-    venv_dir = None
+    # Persistent lint venv (created once, reused across attempts and steps).
     mypy_cmd = [mypy]  # default: use system mypy
+    venv_python = ""
     if vllm_path and target_numpy_spec:
-        venv_dir = Path(tempfile.mkdtemp(prefix="mypy_lint_venv_"))
-        ts_print(f"[pre_ci] mypy: creating lint-equivalent venv at {venv_dir} "
-                 f"(numpy{target_numpy_spec} from triton-ascend, no vllm package)")
+        _, venv_python = _ensure_mypy_venv(target_numpy_spec)
+    if venv_python:
+        # Verify the actual installed numpy version (reused venvs included —
+        # a stale install behind a matching marker must stay visible).
         try:
-            r = subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_dir), "--system-site-packages"],
-                capture_output=True, text=True, timeout=180,
+            vr = subprocess.run(
+                [venv_python, "-c", "import numpy; print(numpy.__version__)"],
+                capture_output=True, text=True, timeout=30,
             )
         except subprocess.TimeoutExpired:
-            ts_print("[pre_ci] mypy: WARNING venv creation TIMED OUT (180s) - "
-                     "falling back to system mypy (may report spurious numpy 2.x errors)")
-            # keep venv_dir set so finally cleans up the partial venv dir
-            r = None
-        if r and r.returncode == 0:
-            venv_python = venv_dir / "bin" / "python"
-            # Install numpy constraint in venv (overrides system numpy 2.x).
-            # Check returncode - a failed install silently leaves system
-            # numpy 2.x in the venv, reproducing the false positives.
+            vr = None
+        installed = vr.stdout.strip() if (vr and vr.returncode == 0) else "?"
+        ts_print(f"[pre_ci] mypy: venv numpy installed: {installed} "
+                 f"(expected spec numpy{target_numpy_spec})")
+        # Check spec satisfaction - a compound spec like ">=1.26.4,<2.1"
+        # may resolve to numpy 2.0.x which STILL triggers the spurious
+        # [var-annotated] errors (2.x has stricter type stubs).  Warn on
+        # any numpy 2.x regardless of spec satisfaction - the known-good
+        # state verified in the lint image was numpy 1.26.4.
+        if installed.startswith("2."):
+            ts_print(f"[pre_ci] mypy: WARNING installed numpy {installed} is 2.x - "
+                     f"results may contain spurious [var-annotated] errors "
+                     f"(lint image uses numpy 1.26.4)")
+        else:
             try:
-                r2 = pip_install_with_fallback(
-                    venv_python,
-                    [f"numpy{target_numpy_spec}", "--no-build-isolation"])
-            except subprocess.TimeoutExpired:
-                ts_print("[pre_ci] mypy: WARNING numpy install in venv TIMED OUT (180s) - "
-                         "falling back to system mypy")
-                r2 = None
-            if r2 is not None and r2.returncode != 0:
-                ts_print(f"[pre_ci] mypy: numpy install in venv FAILED "
-                         f"({r2.stderr.strip()[:300]}) - falling back to system mypy")
-                # keep venv_dir set so finally cleans up the venv dir
-            elif r2 is not None:
-                # Verify the actual installed numpy version satisfies the spec.
-                try:
-                    vr = subprocess.run(
-                        [str(venv_python), "-c", "import numpy; print(numpy.__version__)"],
-                        capture_output=True, text=True, timeout=30,
-                    )
-                except subprocess.TimeoutExpired:
-                    vr = None
-                installed = vr.stdout.strip() if (vr and vr.returncode == 0) else "?"
-                ts_print(f"[pre_ci] mypy: venv numpy installed: {installed} "
-                         f"(expected spec numpy{target_numpy_spec})")
-                # Check spec satisfaction - a compound spec like ">=1.26.4,<2.1"
-                # may resolve to numpy 2.0.x which STILL triggers the spurious
-                # [var-annotated] errors (2.x has stricter type stubs).  Warn on
-                # any numpy 2.x regardless of spec satisfaction - the known-good
-                # state verified in the lint image was numpy 1.26.4.
-                if installed.startswith("2."):
-                    ts_print(f"[pre_ci] mypy: WARNING installed numpy {installed} is 2.x - "
-                             f"results may contain spurious [var-annotated] errors "
-                             f"(lint image uses numpy 1.26.4)")
-                else:
-                    try:
-                        from packaging.specifiers import SpecifierSet
-                        if not SpecifierSet(target_numpy_spec).contains(installed):
-                            ts_print(f"[pre_ci] mypy: WARNING installed numpy {installed} "
-                                     f"does NOT satisfy numpy{target_numpy_spec} - "
-                                     f"results may contain spurious [var-annotated] errors")
-                    except Exception:
-                        pass
-                # venv inherits system-site-packages (mypy, mypy.ini, triton-ascend)
-                # but vllm is NOT installed in venv (system vllm is shadowed by
-                # venv's own site-packages which doesn't have it).
-                # Use `python -m mypy` (mypy's console script may not exist in
-                # venv/bin since it's inherited from system, not installed in venv).
-                mypy_cmd = [str(venv_python), "-m", "mypy"]
-                ts_print(f"[pre_ci] mypy: using venv mypy via {venv_python} -m mypy")
-        elif r is not None:
-            ts_print(f"[pre_ci] mypy: venv creation failed ({r.stderr.strip()[:200]}), "
-                     f"using system mypy")
-            # keep venv_dir set so finally cleans up the partial venv dir
+                from packaging.specifiers import SpecifierSet
+                if not SpecifierSet(target_numpy_spec).contains(installed):
+                    ts_print(f"[pre_ci] mypy: WARNING installed numpy {installed} "
+                             f"does NOT satisfy numpy{target_numpy_spec} - "
+                             f"results may contain spurious [var-annotated] errors")
+            except Exception:
+                pass
+        # venv inherits system-site-packages (mypy, mypy.ini, triton-ascend)
+        # but vllm is NOT installed in venv (system vllm is shadowed by
+        # venv's own site-packages which doesn't have it).
+        # Use `python -m mypy` (mypy's console script may not exist in
+        # venv/bin since it's inherited from system, not installed in venv).
+        mypy_cmd = [venv_python, "-m", "mypy"]
+        ts_print(f"[pre_ci] mypy: using venv mypy via {venv_python} -m mypy")
 
     # The incremental cache lives in MYPY_CACHE_DIR (~/.cache, persistent
     # volume) instead of the repo — nothing to clear between runs.
@@ -422,63 +443,56 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
         ts_print(f"[pre_ci] mypy: also checking {len(changed_extra)} "
                  f"changed tests/examples file(s)")
 
-    try:
-        all_violations: list[str] = []
-        all_output: list[str] = []
-        any_failed = False
-        failed_units: list[str] = []
+    all_violations: list[str] = []
+    all_output: list[str] = []
+    any_failed = False
+    failed_units: list[str] = []
 
-        # Type-check against each vllm tree: the pinned main checkout plus,
-        # when available, the release-tag worktree.  The release pass catches
-        # call-site signature drift that the main-only pass cannot see (a
-        # required release-only dataclass field reads as a normal keyword on
-        # main).  No "diff looks version-sensitive" heuristic: the
-        # max_seq_len_np class (PR #16296) is a plain call-site edit with no
-        # vllm_version_is string anywhere near it.
-        trees: list[tuple[str, dict[str, str], tuple[str, ...]]] = [
-            ("main", base_env, ("3.10", "3.11", "3.12"))]
-        if vllm_release_path:
-            release_abs = str(Path(vllm_release_path).resolve())
-            release_env = base_env.copy()
-            # Replace (not append) the vllm source in PYTHONPATH so mypy
-            # resolves symbols against the release tree only.
-            existing = base_env.get("PYTHONPATH", "")
-            if vllm_path:
-                vllm_abs = str(Path(vllm_path).resolve())
-                existing = existing.replace(vllm_abs, "").strip(":")
-            release_env["PYTHONPATH"] = (f"{release_abs}:{existing}"
-                                         if existing else release_abs)
-            trees.append((f"release({Path(vllm_release_path).name})",
-                          release_env, ("3.10",)))
-            ts_print(f"[pre_ci] mypy: also checking against release tree: "
-                     f"{release_abs}")
+    # Type-check against each vllm tree: the pinned main checkout plus,
+    # when available, the release-tag worktree.  The release pass catches
+    # call-site signature drift that the main-only pass cannot see (a
+    # required release-only dataclass field reads as a normal keyword on
+    # main).  No "diff looks version-sensitive" heuristic: the
+    # max_seq_len_np class (PR #16296) is a plain call-site edit with no
+    # vllm_version_is string anywhere near it.
+    trees: list[tuple[str, dict[str, str], tuple[str, ...]]] = [
+        ("main", base_env, ("3.10", "3.11", "3.12"))]
+    if vllm_release_path:
+        release_abs = str(Path(vllm_release_path).resolve())
+        release_env = base_env.copy()
+        # Replace (not append) the vllm source in PYTHONPATH so mypy
+        # resolves symbols against the release tree only.
+        existing = base_env.get("PYTHONPATH", "")
+        if vllm_path:
+            vllm_abs = str(Path(vllm_path).resolve())
+            existing = existing.replace(vllm_abs, "").strip(":")
+        release_env["PYTHONPATH"] = (f"{release_abs}:{existing}"
+                                     if existing else release_abs)
+        trees.append((f"release({Path(vllm_release_path).name})",
+                      release_env, ("3.10",)))
+        ts_print(f"[pre_ci] mypy: also checking against release tree: "
+                 f"{release_abs}")
 
-        for tree_label, tree_env, py_vers in trees:
-            for py_ver in py_vers:
-                ts_print(f"[pre_ci] === mypy [{tree_label}] --python-version "
-                         f"{py_ver} output begin ===")
-                r = subprocess.run(
-                    [*mypy_cmd, "--follow-imports", "skip", "--check-untyped-defs",
-                     "--python-version", py_ver,
-                     "--exclude", "_cann_ops_custom/",
-                     "vllm_ascend", *changed_extra],
-                    cwd=str(repo), capture_output=True, text=True, env=tree_env,
-                )
-                output = r.stdout + "\n" + r.stderr
-                ts_print(output.strip())
-                ts_print(f"[pre_ci] === mypy [{tree_label}] output end "
-                         f"(py={py_ver}, exit={r.returncode}) ===")
-                all_output.append(f"--- [{tree_label}] python {py_ver} "
-                                  f"(exit={r.returncode}) ---\n{output}")
-                if r.returncode != 0:
-                    any_failed = True
-                    failed_units.append(f"{tree_label}/{py_ver}")
-    finally:
-        # Destroy the temporary venv (no need to restore anything - the
-        # main environment was never touched).
-        if venv_dir and venv_dir.exists():
-            shutil.rmtree(venv_dir, ignore_errors=True)
-            ts_print(f"[pre_ci] mypy: destroyed temporary venv at {venv_dir}")
+    for tree_label, tree_env, py_vers in trees:
+        for py_ver in py_vers:
+            ts_print(f"[pre_ci] === mypy [{tree_label}] --python-version "
+                     f"{py_ver} output begin ===")
+            r = subprocess.run(
+                [*mypy_cmd, "--follow-imports", "skip", "--check-untyped-defs",
+                 "--python-version", py_ver,
+                 "--exclude", "_cann_ops_custom/",
+                 "vllm_ascend", *changed_extra],
+                cwd=str(repo), capture_output=True, text=True, env=tree_env,
+            )
+            output = r.stdout + "\n" + r.stderr
+            ts_print(output.strip())
+            ts_print(f"[pre_ci] === mypy [{tree_label}] output end "
+                     f"(py={py_ver}, exit={r.returncode}) ===")
+            all_output.append(f"--- [{tree_label}] python {py_ver} "
+                              f"(exit={r.returncode}) ---\n{output}")
+            if r.returncode != 0:
+                any_failed = True
+                failed_units.append(f"{tree_label}/{py_ver}")
 
     if not any_failed:
         trees_ran = "main + release" if vllm_release_path else "main"

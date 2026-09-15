@@ -209,3 +209,147 @@ def test_run_check_runs_mypy_ut_concurrently(monkeypatch, tmp_path: Path) -> Non
     by_name = {c["name"]: c for c in result["checks"]}
     assert by_name["mypy"]["detail"] == "mypy ok"
     assert by_name["ut"]["detail"] == "ut ok"
+
+
+# --- persistent mypy lint venv (_ensure_mypy_venv) -------------------------
+# Replaces the per-call temp venv (mkdtemp + rmtree): the lint venv is built
+# once under MAIN2MAIN_MYPY_VENV (default workspace/mypy_venv) and reused
+# while the marker's numpy_spec matches triton-ascend's constraint; every
+# failure path falls back to the system mypy ((None, "")).
+SPEC = ">=1.26.4,<2.1"
+
+
+def _make_venv(base: Path, spec: str = SPEC) -> None:
+    (base / "bin").mkdir(parents=True)
+    (base / "bin" / "python").write_text("", encoding="utf-8")
+    import json
+    (base / "m2m_meta.json").write_text(json.dumps({"numpy_spec": spec}),
+                                        encoding="utf-8")
+
+
+def _ok_run(monkeypatch, calls):
+    from types import SimpleNamespace
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pre_ci_check.subprocess, "run", fake_run)
+
+
+def _ok_pip(monkeypatch, calls):
+    def fake_pip(python, args):
+        calls.append(args)
+        from types import SimpleNamespace
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pre_ci_check, "pip_install_with_fallback", fake_pip)
+
+
+def test_mypy_venv_reused_when_marker_matches(monkeypatch, tmp_path):
+    base = tmp_path / "mypy_venv"
+    _make_venv(base)
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+
+    def no_run(*a, **k):  # reuse must not shell out at all
+        raise AssertionError("venv creation on the reuse path")
+
+    monkeypatch.setattr(pre_ci_check.subprocess, "run", no_run)
+    venv_dir, venv_python = pre_ci_check._ensure_mypy_venv(SPEC)
+    assert venv_dir == base
+    assert venv_python == str(base / "bin" / "python")
+
+
+def test_mypy_venv_rebuilt_on_spec_mismatch(monkeypatch, tmp_path):
+    base = tmp_path / "mypy_venv"
+    _make_venv(base, spec=">=2.0")  # stale spec
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+    run_calls, pip_calls = [], []
+    _ok_run(monkeypatch, run_calls)
+    _ok_pip(monkeypatch, pip_calls)
+
+    venv_dir, venv_python = pre_ci_check._ensure_mypy_venv(SPEC)
+    assert venv_dir == base and venv_python == str(base / "bin" / "python")
+    # old tree removed, venv re-created, numpy pinned, marker rewritten
+    assert any("venv" in c for c in run_calls)
+    assert any(f"numpy{SPEC}" in a for a in pip_calls)
+    import json
+    assert json.loads((base / "m2m_meta.json").read_text())["numpy_spec"] == SPEC
+
+
+def test_mypy_venv_unreadable_marker_recreates(monkeypatch, tmp_path):
+    base = tmp_path / "mypy_venv"
+    _make_venv(base)
+    (base / "m2m_meta.json").write_text(":::: [broken", encoding="utf-8")
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+    run_calls, pip_calls = [], []
+    _ok_run(monkeypatch, run_calls)
+    _ok_pip(monkeypatch, pip_calls)
+    venv_dir, _ = pre_ci_check._ensure_mypy_venv(SPEC)
+    assert venv_dir == base
+    assert run_calls  # went through creation, not reuse
+
+
+def test_mypy_venv_falls_back_when_creation_fails(monkeypatch, tmp_path):
+    base = tmp_path / "mypy_venv"
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        pre_ci_check.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="boom"))
+    assert pre_ci_check._ensure_mypy_venv(SPEC) == (None, "")
+    # no marker: a failed creation must not look reusable next call
+    assert not (base / "m2m_meta.json").exists()
+
+
+def test_mypy_venv_falls_back_when_numpy_install_fails(monkeypatch, tmp_path):
+    base = tmp_path / "mypy_venv"
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+    from types import SimpleNamespace
+    _ok_run(monkeypatch, [])
+
+    def bad_pip(python, args):
+        return SimpleNamespace(returncode=1, stdout="", stderr="no wheel")
+
+    monkeypatch.setattr(pre_ci_check, "pip_install_with_fallback", bad_pip)
+    # a broken numpy silently leaves system numpy 2.x -> treat as no venv
+    assert pre_ci_check._ensure_mypy_venv(SPEC) == (None, "")
+    assert not (base / "m2m_meta.json").exists()
+
+
+def test_mypy_venv_falls_back_on_timeout(monkeypatch, tmp_path):
+    base = tmp_path / "mypy_venv"
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+
+    def slow(*a, **k):
+        raise pre_ci_check.subprocess.TimeoutExpired(cmd="venv", timeout=180)
+
+    monkeypatch.setattr(pre_ci_check.subprocess, "run", slow)
+    assert pre_ci_check._ensure_mypy_venv(SPEC) == (None, "")
+
+
+def test_mypy_venv_no_temp_dir_residue(monkeypatch, tmp_path):
+    # The old implementation mkdtemp'ed into the system temp every call and
+    # destroyed it in a finally; the persistent venv must never touch it.
+    import tempfile
+
+    base = tmp_path / "mypy_venv"
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+
+    def no_mkdtemp(*a, **k):
+        raise AssertionError("temp venv created in system temp")
+
+    monkeypatch.setattr(tempfile, "mkdtemp", no_mkdtemp)
+    # fallback path (creation fails) — and the success path below
+    monkeypatch.setattr(
+        pre_ci_check.subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(
+            pre_ci_check.subprocess.TimeoutExpired(cmd="venv", timeout=180)))
+    assert pre_ci_check._ensure_mypy_venv(SPEC) == (None, "")
+
+    run_calls, pip_calls = [], []
+    _ok_run(monkeypatch, run_calls)
+    _ok_pip(monkeypatch, pip_calls)
+    venv_dir, _ = pre_ci_check._ensure_mypy_venv(SPEC)
+    assert venv_dir == base  # success path also stays under MAIN2MAIN_MYPY_VENV

@@ -190,11 +190,12 @@ def _ut_base_dir() -> Path:
     return Path(env) if env else WORKSPACE_DIR / "ut_venv"
 
 
-def _triton_numpy_spec() -> str:
+def _triton_numpy_spec(label: str = "ut") -> str:
     """numpy constraint from triton-ascend metadata (pins the UT venv).
 
     "" when triton-ascend is absent/unparseable — the venv then has no
-    numpy pin beyond --system-site-packages.
+    numpy pin beyond --system-site-packages.  *label* only names the log
+    prefix (pre_ci_check's mypy lint reuses this reader).
     """
     import importlib.metadata as _md
     try:
@@ -211,7 +212,7 @@ def _triton_numpy_spec() -> str:
                 return ",".join(
                     f"{s.operator}{s.version}" for s in r.specifier)
     except Exception as e:
-        ts_print(f"[pre_ci] ut: failed to read triton-ascend numpy "
+        ts_print(f"[pre_ci] {label}: failed to read triton-ascend numpy "
                  f"constraint ({e})")
     return ""
 
