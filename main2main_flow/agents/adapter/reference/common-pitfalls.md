@@ -31,7 +31,8 @@ Lines are relative to this file; read a section with `sed -n 'A,Bp' <this file>`
 | `device_index` must be explicit | NPU device APIs in version-guarded branches | 453-474 |
 | Variable name shadowing | `AttributeError`/wrong-type errors at a call site | 475-498 |
 | mypy error codes (final gate) | final quality gate mypy failures, fix per `[code]` | 499-530 |
-| Dual-version dataclass fields | release-only `TypeError: __init__() missing N required positional argument(s)` or release mypy `[call-arg]`, main green | 531-end |
+| Dual-version dataclass fields | release-only `TypeError: __init__() missing N required positional argument(s)` or release mypy `[call-arg]`, main green | 531-579 |
+| Forwarding shim loses deleted override's contract | quality metric below golden (spec-decode acceptance), no crash, NO vllm_ascend frames in traceback | 580-end |
 
 ## Version guard direction is inverted
 
@@ -577,3 +578,45 @@ Four-axis verification matrix (all must pass before you claim done):
 runtime then constructs with `None` silently — no crash, wrong behavior
 (latent; survives pre_ci and smoke e2e, surfaces as wrong outputs).
 
+
+## Forwarding shim loses a deleted override's contract
+
+**Symptom**: a quality METRIC degrades with no crash and no traceback frame
+in any vllm_ascend file — spec-decode `acceptance_per_pos` below golden
+(PR #16554: dflash pos0 0.39 vs golden 0.51, dspark ~halved at EVERY
+position; eagle/MTP green). Numbers identical across compilation modes
+(FULL vs PIECEWISE) — the damage is in metadata construction, which does
+not depend on graph mode. The assert text points only at the vllm test
+file; your own diff never appears anywhere.
+
+**Root cause**: upstream renamed a base method AND deleted a subclass
+override in the same window. The deleted override carried IMPLICIT
+contracts callers relied on — argument injection, None-guards, early
+returns. A new forwarding mixin placed in FRONT of the class in the MRO
+re-implements the rename but not the injections, so callers that
+"never passed" the argument now silently receive the shim's DEFAULT.
+Real case (vllm 62f3bf58→39545e47): deleted
+`DFlashSpeculator._build_draft_attn_metadata` injected
+`num_query_per_req=self.num_query_per_req` (and asserted callers passed
+None); the new `AscendDraftAttnMetadataMixin` uniform route forwarded its
+own default `num_query_per_req=1` → draft attention metadata claimed 1
+query token per request instead of 8 (dflash) / 7 (dspark). The Ascend
+`actual_seq_lengths_q` patch (`_update_draft_attn_metadata`) hides the FIA
+tiling crash that would otherwise announce the bug, leaving silently wrong
+attention.
+
+**Why it evades diff review**: the vllm-ascend side diff is +2/-1 (mixin
+inheritance) and correct in isolation. The contract lived in the OTHER
+repo at the OLD sha — an absence, invisible in the vllm-ascend diff and
+absent from the CI log.
+
+**Prevention**:
+1. When upstream renames/deletes a method you inherit from, fetch the OLD
+   upstream override (previous pinned vllm sha) and enumerate everything it
+   did beyond delegating: injected args, asserts, early returns.
+2. Re-implement each in the shim, or make the vllm-ascend call sites pass
+   the value explicitly — here: `num_query_per_req=self.num_query_per_req`
+   at BOTH `build_draft_attn_metadatas` call sites (dflash + dspark).
+3. Verify with a metric-bearing e2e (acceptance rate), never "it no longer
+   crashes" — silent mis-attention passes every smoke that only checks
+   termination.
