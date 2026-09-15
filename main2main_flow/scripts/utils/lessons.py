@@ -433,13 +433,20 @@ def _resolve_push_targets(report_dir: Path) -> list[str]:
             cwd=str(report_dir), capture_output=True, text=True)
         for line in r.stdout.splitlines():
             key, _, value = line.partition(" ")
-            if "github.com" not in value:
+            # Build the push URL exactly as git would rewrite it (base +
+            # original minus the matched prefix), then embed the token after
+            # the scheme.  Splicing base and repo_url together
+            # double-prefixes when the rewrite base itself ends with the
+            # value (a3-16 git-cdn: ".../https://github.com/").
+            if not value or not repo_url.startswith(value):
                 continue
             base = key[len("url."):-len(".insteadof")]
-            scheme, _, rest = base.partition("://")
-            targets.append(
-                f"{scheme}://x-access-token:{token}@{rest}{repo_url}")
-            break
+            rewritten = base + repo_url[len(value):]
+            scheme, _, remainder = rewritten.partition("://")
+            if scheme and remainder:
+                targets.append(
+                    f"{scheme}://x-access-token:{token}@{remainder}")
+                break
         # 2. The CI push proxy used by push_to_github._push_via_proxy.
         targets.append(
             f"https://x-access-token:{token}@gh-proxy.test.osinfra.cn/"
@@ -504,14 +511,26 @@ def persist_lessons(vllm_report_path: str) -> None:
                             cwd=str(report_dir), capture_output=True,
                             text=True)
         if fr.returncode == 0:
-            rb = subprocess.run(["git", "rebase", "FETCH_HEAD"],
-                                cwd=str(report_dir), capture_output=True,
-                                text=True)
+            # Identity must cover the rebase too, not just the commit: once
+            # a push fails, the stranded commits make the next submit's
+            # rebase fail with "Committer identity unknown" (runs
+            # 34500061924/34706495765), poisoning every later submit.
+            rb = subprocess.run(
+                ["git", "rebase", "FETCH_HEAD"], cwd=str(report_dir),
+                capture_output=True, text=True,
+                env=dict(os.environ,
+                         GIT_AUTHOR_NAME="main2main-bot",
+                         GIT_AUTHOR_EMAIL="main2main-bot@users.noreply.github.com",
+                         GIT_COMMITTER_NAME="main2main-bot",
+                         GIT_COMMITTER_EMAIL="main2main-bot@users.noreply.github.com"))
             if rb.returncode != 0:
                 subprocess.run(["git", "rebase", "--abort"],
                                cwd=str(report_dir), capture_output=True,
                                text=True)
-        last_err = ""
+        # Log EVERY route's error, not just the last one: the routes fail
+        # for different reasons (WAF rejection, firewall, anonymous-rewrite
+        # auth) and the last one alone misdirected the 09-12~09-15 diagnosis.
+        errors = []
         for target in targets:
             pr = subprocess.run(["git", "push", target, "main"],
                                 cwd=str(report_dir), capture_output=True,
@@ -519,8 +538,9 @@ def persist_lessons(vllm_report_path: str) -> None:
             if pr.returncode == 0:
                 ts_print("[lesson] pushed vllm-report lessons to remote")
                 return
-            last_err = pr.stderr.strip()[:300]
-        ts_print(f"[lesson] WARNING failed to push vllm-report lessons: "
-                 f"{last_err}")
+            label = "origin" if target == "origin" else target.split("@")[-1]
+            errors.append(f"{label}: {pr.stderr.strip()[:200]}")
+        ts_print(f"[lesson] WARNING failed to push vllm-report lessons "
+                 f"(all routes) — {' | '.join(errors)}")
     except subprocess.CalledProcessError as e:
         ts_print(f"[lesson] WARNING failed to persist lessons: {e}")

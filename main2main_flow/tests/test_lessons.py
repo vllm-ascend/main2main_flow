@@ -208,3 +208,67 @@ def test_submit_pre_ci_exhausted_lesson_marks_release_lane(monkeypatch):
     submit_pre_ci_exhausted_lesson("/tmp/vllm-report", "step-1",
                                    lane_result, [34], release_tag="")
     assert "release lane affected" not in captured["symptom"]
+
+
+class _R:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _mk_persist_env(monkeypatch, tmp_path, routes, push_rc=0, push_stderr=""):
+    """Common harness: a vllm-report clone with changes, git calls recorded."""
+    report_dir = tmp_path
+    (report_dir / "data" / "vllm-ascend" / "lessons").mkdir(parents=True)
+    calls = []
+
+    def fake_run(cmd, cwd=None, capture_output=False, text=False, env=None,
+                 check=False):
+        calls.append((list(cmd), env))
+        if cmd[:2] == ["git", "status"]:
+            return _R(stdout=" M data/vllm-ascend/lessons/x.json")
+        if cmd[:2] == ["git", "rev-list"]:
+            return _R(stdout="1\n")
+        if cmd[:2] == ["git", "push"]:
+            return _R(returncode=push_rc, stderr=push_stderr)
+        return _R()
+
+    monkeypatch.setattr(lessons.subprocess, "run", fake_run)
+    monkeypatch.setattr(lessons, "_resolve_push_targets",
+                        lambda d: list(routes))
+    return calls
+
+
+def test_persist_lessons_rebase_carries_identity(monkeypatch, tmp_path):
+    """A stranded commit (failed push earlier in the run) must not poison
+    later submits: the rebase — not only the commit — carries the bot
+    identity (runs 34500061924/34706495765 died at "Committer identity
+    unknown" on every submit after the first failed push)."""
+    routes = ["https://x-access-token:T@git-cdn/vllm-report.git", "origin"]
+    calls = _mk_persist_env(monkeypatch, tmp_path, routes)
+    lessons.persist_lessons(str(tmp_path))
+    rebases = [c for c in calls if c[0][:2] == ["git", "rebase"]
+               and "--abort" not in c[0]]
+    assert rebases, "rebase must run when fetch succeeded"
+    env = rebases[0][1]
+    assert env["GIT_AUTHOR_NAME"] == "main2main-bot"
+    assert env["GIT_COMMITTER_NAME"] == "main2main-bot"
+
+
+def test_persist_lessons_reports_every_route_error_without_token(
+        monkeypatch, tmp_path, capsys):
+    """All-route failure logs every route's error — the last route alone
+    (anonymous git-cdn rewrite) misdirected the 09-12~09-15 diagnosis —
+    and never echoes the embedded token."""
+    routes = ["https://x-access-token:SECRETTOKEN@gh-proxy.test.osinfra.cn/"
+              "https://github.com/vllm-ascend/vllm-report.git", "origin"]
+    calls = _mk_persist_env(
+        monkeypatch, tmp_path, routes, push_rc=128,
+        push_stderr="fatal: could not read Username for "
+                    "'http://git-cdn': No such device or address")
+    lessons.persist_lessons(str(tmp_path))
+    pushes = [c for c in calls if c[0][:2] == ["git", "push"]]
+    assert len(pushes) == len(routes), "every route must be attempted"
+    out = capsys.readouterr().out
+    assert "all routes" in out
+    assert "gh-proxy.test.osinfra.cn" in out and "origin" in out
+    assert "SECRETTOKEN" not in out
