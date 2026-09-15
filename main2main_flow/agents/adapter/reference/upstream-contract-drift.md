@@ -18,7 +18,8 @@ the round budget (run 33976675052 step-1: 41 → 8 → 9 UT failures over
 | §5 Fix top-down | editing | 75-84 |
 | §6 Close the loop from evidence | after each edit batch | 85-101 |
 | §7 Worked example | you want to see the whole playbook applied | 102-118 |
-| §8 Release-lane dataclass field drift | release lane: `TypeError: __init__() missing N required positional argument(s)` (main green) | 119-end |
+| §8 Release-lane dataclass field drift | release lane: `TypeError: __init__() missing N required positional argument(s)` (main green) | 120-147 |
+| §9 Silent metric degradation — no own frames | e2e assert/golden failure whose traceback has NO vllm_ascend frame | 147-end |
 
 ## 1. Recognition signals
 
@@ -144,3 +145,50 @@ Playbook (this is §3/§4 specialized to dataclasses):
    structure tests).
 4. Do NOT write the fix against one direction ("release added it") —
    verify both trees and keep the write direction-symmetric.
+
+## 9. Silent metric degradation — no vllm_ascend frame in the traceback
+
+Trigger: an e2e failure that is an assert on a computed metric (spec-decode
+`acceptance_per_pos` below golden, token-distribution mismatch, accuracy
+below threshold) whose traceback names NO vllm_ascend file — only the vllm
+test and its assert. No crash, no EngineDeadError, often identical numbers
+across compilation modes. PR #16554 (vllm 62f3bf58→39545e47): dflash pos0
+0.39 vs golden 0.51, dspark ~halved at every position, eagle/MTP green.
+
+**The log cannot root-cause this failure** — the evidence is not in it.
+The cause is an OMISSION in the adaptation, and three facts locate it:
+
+- The vllm-ascend diff for the failing surface can be innocent-looking
+  (+2/-1 mixin inheritance) — the bug is something that is NOT there.
+- Upstream usually got here by RENAMING a base method AND DELETING a
+  subclass override. A deleted override's body is a contract callers
+  relied on: injected arguments, asserts, early returns.
+- A NEW mixin/base class inserted in FRONT of the subclass (MRO) silently
+  changes which override answers legacy call sites — the forwarding
+  shim's DEFAULTS replace the deleted injections.
+
+Bounded path — 4 commands, each one decisive; do not broaden the search:
+
+1. Map the failing surface to its vllm-ascend file(s) and read the
+   vllm-ascend side of the diff (`git diff` in {ascend_path}) — note any
+   class whose MRO gained a new mixin/base in this step.
+2. Find what upstream DELETED: grep the step patch (`{patch_path}`) for
+   `-    def <method>(` blocks in the upstream file that owns the
+   surface; if the deletion predates this step's range,
+   `git -C {vllm_path} log/diff <older-sha>..<newer-sha> -- <file>`.
+   Each deleted body = enumerate its implicit contract items.
+3. Grep the vllm-ascend call sites that used to route through the deleted
+   override; for each contract item decide: re-implement it in the shim,
+   or pass it explicitly at every call site (PR #16554 fix:
+   `num_query_per_req=self.num_query_per_req` at both
+   `build_draft_attn_metadatas` call sites — the shim had defaulted it
+   to 1, so draft metadata claimed 1 query token/req instead of 8/7,
+   and the Ascend `actual_seq_lengths_q` patch hid the tiling crash,
+   leaving silently wrong attention).
+4. Verify against the METRIC, not against "no crash" — silently wrong
+   attention passes every smoke that only checks termination. State in
+   `analysis.md` which contract item each edit restores.
+
+If step 2 shows no deletion, this is NOT §9 — go to §2 and re-read the
+new contract source. Timebox: the whole path is ≤4 tool calls; a session
+that improvises here instead is the run-34018086282 shape (80min, killed).

@@ -60,7 +60,10 @@ these rules to stay on the critical path:
    step_summary.md. What burns the budget is NOT doing too little — it
    is exploring: re-reading files, single-line edits repeated per
    violation, linting, or trying to run tests. None of that is part
-   of the job; skip it.
+   of the job; skip it. The single most budget-burning failure shape is
+   a metric assert with no vllm_ascend traceback frame — improvising it
+   is open-ended, and its bounded 4-command path is
+   `reference/upstream-contract-drift.md` §9.
 
 
 ## Repositories
@@ -106,7 +109,8 @@ these rules to stay on the critical path:
   NPU/GPU, never import vllm/vllm-ascend in a REPL.
 - Use `rg` for symbol search (installed) — one call covers what a loop of `grep` calls would take; batch related lookups into a single invocation
 - Reference docs (`adaptation-patterns.md`, `common-pitfalls.md`,
-  `code-structure-guide.md`) are **index-first**: each starts with a `## Index`
+  `upstream-contract-drift.md`, `code-structure-guide.md`) are
+  **index-first**: each starts with a `## Index`
   table mapping sections to line ranges. Read ONLY the index and the sections
   whose trigger matches your change — e.g. `sed -n 'A,Bp' <file>`. Never read a
   whole reference file. Content you already read in this session stays in your
@@ -365,6 +369,17 @@ violation = the exact line; family = the whole subsystem.
 **E2E test failures**: open `round-N-result.json` → if `code_bugs_count` > 0,
 open failed tests from `suite_results[test_name]`. Read both `-summary.json`
 (structured code_bugs/env_flakes) and `.log` (raw traceback):
+0. **Classify the evidence shape FIRST — it routes everything else:**
+   - traceback names vllm_ascend frames → steps 1-4 below apply.
+   - >3 failures in one subsystem, or one name repeated across files →
+     upstream contract drift: `reference/upstream-contract-drift.md`
+     (whole playbook, §2 onward).
+   - assert on a computed metric (acceptance_per_pos, accuracy, golden
+     values) with NO vllm_ascend frame in the traceback → the log cannot
+     root-cause this; the cause is an OMISSION in the adaptation. Go
+     straight to `reference/upstream-contract-drift.md` §9 — a bounded
+     4-command path (what upstream DELETED, what the deleted body
+     injected, which MRO change intercepted it).
 1. Read the FULL traceback first — identify the exact failing path (normal
    vs cache, with-data vs no-data, batch vs single). Do NOT guess.
 2. **MUST call `get_adaptation_lessons(keywords=["<error message / test
