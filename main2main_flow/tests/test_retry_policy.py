@@ -124,8 +124,13 @@ def test_budgets_are_hardcoded(monkeypatch):
 
 
 def _gate_flow(monkeypatch, tmp_path, e2e_results):
-    """Gate flow with static checks always green and scripted e2e results."""
+    """Gate flow with static checks always green and scripted e2e results.
+
+    MAIN2MAIN_EXTENDED_E2E=0 pins the LEGACY e2e fallback path (same-tree
+    retry + revert semantics) — these tests document that escape hatch.
+    """
     monkeypatch.setattr(flow_mod, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setenv("MAIN2MAIN_EXTENDED_E2E", "0")
     f = _make_flow()
     f.state.vllm_ascend_path = str(tmp_path)
     f.state.last_step_e2e_passed = False

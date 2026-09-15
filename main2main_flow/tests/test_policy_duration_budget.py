@@ -162,6 +162,12 @@ smoke gains the extract_hidden_states dense_eager + hybrid_dummy_eager
 nodes — the MRV2-unsupported release-lane class crashes at engine init,
 so either node is a sentinel, and both are 1-card cheap enough to hide
 under test_hang's wall.
+User decision 2026-09-15 (third revision, same day): the separate
+post-gate extended phase is GONE — the gate's main e2e IS the extended
+set now (flow._run_gate_e2e, same trigger as the old regression e2e,
+own-diff triage on failure, delta re-runs).  No pin numbers change: the
+per-step budget guards above stay binding, and the extended_e2e policy
+key only changes CONSUMER (gate e2e instead of a post-gate phase).
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """

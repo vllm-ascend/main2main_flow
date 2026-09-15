@@ -103,7 +103,8 @@ def test_gate_smoke_own_failure_triggers_adapter_then_converges(
                            _smoke_result(True)])
     payloads = _capture_adapter(monkeypatch)
     # Each adapter round re-arms the regression e2e (fixes_applied).
-    monkeypatch.setattr(f, "_run_e2e_test_for_final_gate", lambda: True)
+    monkeypatch.setattr(f, "_run_gate_e2e",
+                        lambda gate_dir: {"status": "passed"})
     monkeypatch.setattr(f, "_classify_smoke_failure",
                         lambda smoke: ("own", ["vllm_ascend/worker/x.py"]))
     assert f._final_quality_gate() is True
@@ -116,19 +117,19 @@ def test_gate_smoke_own_failure_triggers_adapter_then_converges(
 
 def test_gate_smoke_own_failure_exhausts_budget(monkeypatch, tmp_path):
     # Deterministic own-diff failure: every round costs two smoke calls
-    # (initial + flake retry) and one adapter round.  Iteration 1 skips
-    # the e2e leg (last step passed); iterations 2-5 each burn one of the
-    # 4 e2e attempts re-verifying the fix, so the 6th round breaks on the
-    # e2e budget before the shared 5-round budget can be exceeded again.
+    # (initial + flake retry) and one adapter round.  The tree-sha memo
+    # keeps the gate e2e from burning attempts on an unchanged tree, so
+    # the shared 5-round budget itself exhausts: 6 smoke rounds × 2 calls.
     f = _gate_flow(monkeypatch, tmp_path)
     calls = _script_smoke(monkeypatch, f, [_smoke_result(False)] * 12)
     payloads = _capture_adapter(monkeypatch)
-    monkeypatch.setattr(f, "_run_e2e_test_for_final_gate", lambda: True)
+    monkeypatch.setattr(f, "_run_gate_e2e",
+                        lambda gate_dir: {"status": "passed"})
     monkeypatch.setattr(f, "_classify_smoke_failure",
                         lambda smoke: ("own", ["vllm_ascend/worker/x.py"]))
     assert f._final_quality_gate() is False
     assert len(payloads) == 5
-    assert len(calls) == 10
+    assert len(calls) == 12
 
 
 def test_gate_smoke_inherited_records_and_does_not_block(monkeypatch, tmp_path):
@@ -156,14 +157,14 @@ def test_gate_smoke_inherited_records_and_does_not_block(monkeypatch, tmp_path):
 
 def test_gate_smoke_never_runs_when_e2e_regression_blocks(monkeypatch, tmp_path):
     # Ordering pin: the smoke only runs after the main-lane e2e is green
-    # on that tree; a deterministic e2e regression reverts and loops
-    # before the smoke is ever reached.
+    # on that tree; a failed (own-diff unresolved) e2e verdict breaks the
+    # gate before the smoke is ever reached.
     f = _gate_flow(monkeypatch, tmp_path)
     f.state.last_step_e2e_passed = False
-    monkeypatch.setattr(f, "_run_e2e_test_for_final_gate", lambda: False)
+    monkeypatch.setattr(f, "_run_gate_e2e",
+                        lambda gate_dir: {"status": "exhausted"})
     calls = _script_smoke(monkeypatch, f, [_smoke_result(False)])
     _capture_adapter(monkeypatch)
-    # e2e burns 4 attempts as two fail+retry pairs, then the gate breaks.
     assert f._final_quality_gate() is False
     assert len(calls) == 0
 

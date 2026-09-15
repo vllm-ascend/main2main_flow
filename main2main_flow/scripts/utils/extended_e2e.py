@@ -1,10 +1,10 @@
-"""Extended e2e case selection: a fixed ~30-35min set, or the full label scan.
+"""Gate main-e2e case selection: a fixed ~30-35min set, or the full label scan.
 
-After the final quality gate passes, the flow runs the extended e2e phase —
-the per-step set only proves the cases it contains (the 2026-09-15 run
-shipped PR 16575 green on pre_ci while upstream CI failed legs the fixed
-set never touched).  Small fast steps (~20min per-step e2e) + one bounded
-coverage batch: the default source is the FIXED ``test_policy.json``
+The gate's main-lane e2e runs the EXTENDED coverage set (2026-09-15 merge:
+the former post-gate phase became the gate's regression e2e — the per-step
+set only proves the cases it contains, and the 2026-09-15 run shipped
+PR 16575 green on pre_ci while upstream CI failed legs the fixed set never
+touched).  The default source is the FIXED ``test_policy.json``
 ``extended_e2e`` key (55 cases — the 2026-09-15 second revision weights
 the surfaces that recently failed CI (extract_hidden_states, gumbel,
 mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP) while keeping two/four-card
@@ -21,8 +21,7 @@ yields an empty set.
 
 In both modes, cases whose test file imports a module touched by the
 adaptation diff are ordered first (relevance tier); the rest follow, both
-tiers by upstream estimated time ascending so a bounded phase maximizes
-completed cases.
+tiers by upstream estimated time ascending.
 """
 from __future__ import annotations
 
@@ -36,8 +35,8 @@ from main2main_flow.scripts.utils.run_tests import (
 )
 from main2main_flow.scripts.utils.utils import ts_print
 
-# step_id used for run_tests log/result paths within the extended phase.
-EXTENDED_E2E_STEP_ID = "extended-e2e"
+# step_id used for run_tests log/result paths within the gate's main e2e.
+GATE_E2E_STEP_ID = "gate-e2e"
 
 # Directories whose changes never map to imported vllm_ascend modules.
 _IGNORED_CHANGE_PREFIXES = (".github/", "docs/", "csrc/")

@@ -46,9 +46,9 @@ FINAL_CODE_STRUCTURE_GUIDE_FILE = "final_code-structure-guide.md"
 # PR CI closed-loop watcher evidence (pr_ci_monitor.py), workspace-scoped.
 PR_CI_WATCH_DIR = "pr_ci_watch"
 PR_CI_WATCH_RESULT_FILE = "pr_ci_watch_result.json"
-# Extended e2e phase (extended_e2e.py + flow._run_extended_e2e), workspace-scoped.
-EXTENDED_E2E_DIR = "extended_e2e"
-EXTENDED_E2E_RESULT_FILE = "extended_e2e_result.json"
+# Gate main e2e evidence (flow._run_gate_e2e), written into quality_gate/.
+GATE_E2E_RESULT_FILE = "gate_e2e_result.json"
+GATE_E2E_INHERITED_FILE = "gate_e2e_inherited.json"
 
 def run_git(repo: Path | str, *args: str) -> str:
     result = subprocess.run(
