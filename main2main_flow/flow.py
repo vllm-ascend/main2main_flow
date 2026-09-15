@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -23,9 +24,17 @@ from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, reso
 from main2main_flow.scripts.utils.pr_ci_monitor import watch_and_fix
 from main2main_flow.scripts.utils.run_tests import (
     PASS_RESULTS,
+    _load_estimated_times,
     build_test_errors_detail,
     pin_free_npu_chips,
     run_tests,
+)
+from main2main_flow.scripts.utils.extended_e2e import (
+    EXTENDED_E2E_STEP_ID,
+    changed_module_names,
+    order_cases,
+    partition_by_import_closure,
+    resolve_extended_cases,
 )
 from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
@@ -34,7 +43,8 @@ from main2main_flow.scripts.utils.utils import (
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
-    FINAL_CODE_STRUCTURE_GUIDE_FILE, GENERATED_ARTIFACT_DIRS, run_git, ts_print
+    FINAL_CODE_STRUCTURE_GUIDE_FILE, GENERATED_ARTIFACT_DIRS, run_git, ts_print,
+    EXTENDED_E2E_DIR, EXTENDED_E2E_RESULT_FILE,
 )
 
 # Files that are tracking/metadata, not real adaptation changes — excluded
@@ -176,6 +186,38 @@ def _resolve_release_smoke_cases() -> list[str]:
         except (json.JSONDecodeError, KeyError, OSError):
             ts_print("[test_policy] failed to parse release_smoke, ignoring")
     return []
+
+
+def _extended_e2e_summary() -> str:
+    """One-line extended-e2e status for the PR body / final summary.
+
+    Empty when the phase didn't run (disabled/skipped/error) or produced
+    no evidence file — the description must not promise coverage that
+    never executed.
+    """
+    try:
+        data = json.loads(
+            (WORKSPACE_DIR / EXTENDED_E2E_DIR / EXTENDED_E2E_RESULT_FILE)
+            .read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if data.get("status") in ("disabled", "skipped", "error", None, ""):
+        return ""
+    cases = data.get("cases_total") or 0
+    if not cases:
+        return ""
+    line = (f"Extended e2e: {cases} case(s) covering the full main2main "
+            f"label set, {len(data.get('rounds') or [])} round(s), "
+            f"status **{data.get('status')}**")
+    final = data.get("final") or {}
+    n_fail = len(final.get("failing") or [])
+    n_coll = len(data.get("collection_errors") or [])
+    if n_fail:
+        line += (f", {n_fail} suite(s) still failing — upstream PR CI is "
+                 f"the verifier")
+    if n_coll:
+        line += f", {n_coll} collection-error suite(s) excluded"
+    return line
 
 
 def _resolve_test_timeouts() -> dict[str, int] | None:
@@ -529,6 +571,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             gate_passed = self._final_quality_gate()
             if not gate_passed:
                 self.state.final_status = UpgradeFailed
+            else:
+                # Extended e2e: run the full main2main-label set (with
+                # adapter-fix rounds) while the tree is final and the NPUs
+                # would otherwise idle until push.  Best-effort — never
+                # fails the run (see _run_extended_e2e).
+                self._run_extended_e2e()
         self.generate_final_post()
         # Persist adaptation lessons (E2E fix rounds) back to vllm-report
         # before push — the clone is recreated every run, so unsaved
@@ -1316,6 +1364,323 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # on the same errors the adapter had already fixed.  With the tree
         # kept, remaining failures stay visible in the PR CI.
         return False
+
+    def _run_extended_e2e(self) -> dict:
+        """Post-gate, pre-push extended e2e: run the full main2main-label set.
+
+        The fixed 25-case policy set only proves the cases it contains —
+        the 2026-09-15 run shipped PR 16575 green on pre_ci while upstream
+        CI failed legs (dflash/dspark release lane, PCP spec decode) the
+        fixed set never touched.  This phase runs what upstream PR CI
+        would: every tests/e2e/pull_request test file on the tree minus
+        upstream skip_tests, the fixed set's coverage, and the blocklist
+        (see extended_e2e.resolve_extended_cases).  Failures enter
+        adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS); a fix round
+        re-runs ONLY the failed suites — the user's full-re-run decision
+        (2026-09-15) governs the per-step fixed set, not this phase, where
+        a full re-run costs hours.
+
+        Best-effort by design: exhausting the budgets never fails the run
+        — the tree (with kept fixes) is pushed anyway and upstream PR CI
+        (plus pr_ci_watch) remains the verifier.  The phase must never
+        turn a green gate into a failed run, so the whole body is guarded.
+        """
+        if os.getenv("MAIN2MAIN_EXTENDED_E2E", "1") != "1":
+            return {"status": "disabled"}
+        if os.getenv("SKIP_E2E_TEST", "false").lower() == "true":
+            ts_print("[extended_e2e] SKIP_E2E_TEST=true, skipping")
+            return {"status": "skipped", "reason": "SKIP_E2E_TEST"}
+        if self.state.current_step == 0:
+            return {"status": "skipped", "reason": "no steps completed"}
+
+        phase_dir = WORKSPACE_DIR / EXTENDED_E2E_DIR
+        result_out: dict = {"enabled": True, "rounds": [], "fix_actions": [],
+                            "statics": [], "collection_errors": []}
+        try:
+            ascend_path = self.state.vllm_ascend_path
+            vllm_path = self.state.vllm_path
+            phase_dir.mkdir(parents=True, exist_ok=True)
+
+            # ---- case resolution ----
+            override_env = os.getenv("MAIN2MAIN_EXTENDED_TEST_CASES",
+                                     "").strip()
+            override = ([t.strip() for t in
+                         override_env.replace("\n", " ").split()
+                         if t.strip()] if override_env else None)
+            policy_path = Path(__file__).parent / "test_policy.json"
+            fixed: list[str] = []
+            blocked: list[str] = []
+            try:
+                policy = json.loads(policy_path.read_text(encoding="utf-8"))
+                fixed = [t for t in policy.get("allowlist", [])
+                         if isinstance(t, str) and t.strip()]
+                blocked = [t for t in policy.get("blocklist", [])
+                           if isinstance(t, str) and t.strip()]
+            except (json.JSONDecodeError, KeyError, OSError):
+                ts_print("[extended_e2e] failed to parse test_policy.json "
+                         "for subtraction lists")
+            include_skipped = (os.getenv(
+                "MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED", "0") == "1")
+            resolution = resolve_extended_cases(
+                ascend_path, fixed, blocked,
+                include_skipped=include_skipped, override=override)
+            cases = resolution["cases"]
+            result_out.update({
+                "cases_total": len(cases),
+                "dropped_missing": resolution["dropped_missing"],
+                "dropped_skip": resolution["dropped_skip"],
+                "source": resolution["source"],
+            })
+            if not cases:
+                ts_print("[extended_e2e] no cases after subtraction, skipping")
+                result_out["status"] = "empty"
+                self._write_extended_result(phase_dir, result_out)
+                return result_out
+
+            # Relevance tiering: test files importing modules touched by
+            # the cumulative adaptation diff go first, then upstream
+            # estimated-time ascending — maximize completed cases in a
+            # bounded phase.
+            subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                           capture_output=True)
+            changed_files = run_git(ascend_path, "diff", "--name-only",
+                                    self.state.original_ascend_ref
+                                    ).split()
+            changed_modules = changed_module_names(changed_files)
+            tier1, _tier2 = partition_by_import_closure(
+                cases, changed_modules, ascend_path)
+            ordered = order_cases(
+                cases, tier1,
+                _load_estimated_times(Path(ascend_path)))
+            result_out["tier1"] = tier1
+            ts_print(f"[extended_e2e] {len(cases)} case(s) "
+                     f"({len(tier1)} in the diff's import closure), "
+                     f"running ordered")
+
+            static_passed_sha = self._working_tree_diff_sha(ascend_path)
+            try:
+                fix_rounds_left = max(
+                    0, int(os.getenv("MAIN2MAIN_EXTENDED_FIX_ROUNDS", "2")))
+            except ValueError:
+                fix_rounds_left = 2
+            try:
+                max_min = max(0.0,
+                              float(os.getenv("MAIN2MAIN_EXTENDED_MAX_MIN",
+                                              "360")))
+            except ValueError:
+                max_min = 360.0
+            deadline = (time.monotonic() + max_min * 60
+                        if max_min > 0 else None)
+
+            # Same env shape as the gate's regression e2e: vllm didn't
+            # change, skip the reinstall; keep the ascend tree (setup_env
+            # would otherwise reset it and discard gate/extended fixes).
+            saved_skip_pip = os.environ.get("SKIP_PIP_INSTALL", "")
+            saved_keep_branch = os.environ.get("MAIN2MAIN_KEEP_BRANCH", "")
+            os.environ["SKIP_PIP_INSTALL"] = "true"
+            os.environ["MAIN2MAIN_KEEP_BRANCH"] = "true"
+            pending = ordered
+            round_no = 0
+            prev_failing: set[str] | None = None
+            status = "unknown"
+            try:
+                while True:
+                    if deadline and time.monotonic() > deadline:
+                        status = "time_budget"
+                        ts_print("[extended_e2e] wall-clock budget "
+                                 "reached, stopping")
+                        break
+                    round_no += 1
+                    ext_patch = phase_dir / "extended.patch"
+                    ext_patch.write_text(
+                        run_git(ascend_path, "diff", "HEAD"),
+                        encoding="utf-8")
+                    ts_print(f"\n[extended_e2e] round {round_no}: "
+                             f"{len(pending)} suite(s)")
+                    result = run_tests(
+                        vllm_path=vllm_path,
+                        vllm_commit=(self.state.last_verified_commit
+                                     or self.state.cur_vllm_commit),
+                        ascend_path=ascend_path,
+                        ascend_commit=self.state.cur_ascend_commit,
+                        patch_path=str(ext_patch),
+                        step_id=EXTENDED_E2E_STEP_ID,
+                        test_cases=pending,
+                        test_timeouts=_resolve_test_timeouts(),
+                        remote=(os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE")
+                                or None),
+                        round_number=round_no,
+                        log_dir=str(phase_dir),
+                        preserve_order=True,
+                    )
+                    result_path = (phase_dir / EXTENDED_E2E_STEP_ID
+                                   / "tests"
+                                   / f"round-{round_no}-result.json")
+                    suites = result.get("suite_results", {})
+                    failing = sorted(
+                        t for t, r in suites.items()
+                        if r.get("ci_result") not in PASS_RESULTS)
+                    new_collection = [
+                        t for t in failing
+                        if suites[t].get("run_suite_exit_code") == 4]
+                    collection_errors = sorted(
+                        set(result_out["collection_errors"])
+                        | set(new_collection))
+                    result_out["collection_errors"] = collection_errors
+                    for t in new_collection:
+                        ts_print(f"[extended_e2e] {t}: collection error "
+                                 f"(pytest exit 4) — excluded from fix "
+                                 f"rounds (adapter cannot fix imports)")
+                    result_out["rounds"].append({
+                        "round": round_no,
+                        "cases": list(pending),
+                        "failing": failing,
+                        "collection_errors": new_collection,
+                        "ci_result": result.get("ci_result"),
+                        "elapsed_s": result.get("elapsed_s"),
+                        "result_path": str(result_path),
+                    })
+                    real_failing = [t for t in failing
+                                    if t not in set(collection_errors)]
+                    if not real_failing:
+                        status = "passed"
+                        break
+                    if fix_rounds_left <= 0:
+                        status = "exhausted"
+                        break
+                    cur_failing = set(real_failing)
+                    if cur_failing == prev_failing:
+                        status = "stop_loss_no_progress"
+                        ts_print("[extended_e2e] identical failing set as "
+                                 "the previous round — fix not converging, "
+                                 "stop-loss before burning another round")
+                        break
+                    prev_failing = cur_failing
+
+                    # ---- adapter fix round ----
+                    detail = build_test_errors_detail(
+                        {t: suites[t] for t in real_failing},
+                        round_no, phase_dir / EXTENDED_E2E_STEP_ID / "tests",
+                        result_path)
+                    error_logs = ([str(detail), str(result_path)]
+                                  if detail else [str(result_path)])
+                    self._gate_adapter_fix("adapter-fix", error_logs,
+                                           phase_dir)
+                    fix_rounds_left -= 1
+                    result_out["fix_actions"].append({
+                        "round": round_no, "error_logs": error_logs})
+
+                    # ---- statics re-check (the fix edited the tree) ----
+                    tree_sha = self._working_tree_diff_sha(ascend_path)
+                    if tree_sha == static_passed_sha:
+                        pending = real_failing
+                        continue
+                    static_ok, static_logs = run_final_quality_gate(
+                        ascend_path=ascend_path, vllm_path=vllm_path,
+                        log_dir=phase_dir / "statics",
+                        release_tag=self.state.release_tag,
+                        vllm_release_path=self._release_gate_path())
+                    result_out["statics"].append(
+                        {"tree_sha": tree_sha, "passed": static_ok})
+                    if not static_ok and fix_rounds_left > 0:
+                        # One adapter round on the static failures, then a
+                        # verification re-check (the gate's rule: a fix
+                        # that never gets re-checked is indistinguishable
+                        # from failure).
+                        self._gate_adapter_fix("adapter-fix", static_logs,
+                                               phase_dir)
+                        fix_rounds_left -= 1
+                        result_out["fix_actions"].append({
+                            "round": round_no, "static_fix": True,
+                            "error_logs": static_logs})
+                        static_ok, _ = run_final_quality_gate(
+                            ascend_path=ascend_path, vllm_path=vllm_path,
+                            log_dir=phase_dir / "statics",
+                            release_tag=self.state.release_tag,
+                            vllm_release_path=self._release_gate_path())
+                        result_out["statics"].append({
+                            "tree_sha": self._working_tree_diff_sha(
+                                ascend_path), "passed": static_ok})
+                    if not static_ok:
+                        status = "static_failed"
+                        ts_print("[extended_e2e] statics failing after the "
+                                 "fix round — keeping the fixes in the "
+                                 "tree, upstream PR CI verifies")
+                        break
+                    static_passed_sha = self._working_tree_diff_sha(
+                        ascend_path)
+                    pending = real_failing
+            finally:
+                if saved_skip_pip:
+                    os.environ["SKIP_PIP_INSTALL"] = saved_skip_pip
+                else:
+                    os.environ.pop("SKIP_PIP_INSTALL", None)
+                if saved_keep_branch:
+                    os.environ["MAIN2MAIN_KEEP_BRANCH"] = saved_keep_branch
+                else:
+                    os.environ.pop("MAIN2MAIN_KEEP_BRANCH", None)
+
+            # ---- persist the fixes + regenerate the cumulative patch ----
+            committed = False
+            if result_out["fix_actions"]:
+                run_git(ascend_path, "add", "-A")
+                c = subprocess.run(
+                    ["git", "commit", "-s", "-m",
+                     f"main2main: extended e2e fixes (round {round_no})"],
+                    cwd=ascend_path, capture_output=True, text=True)
+                committed = c.returncode == 0
+                if not committed:
+                    ts_print(f"[extended_e2e] nothing to commit "
+                             f"({(c.stderr or c.stdout).strip()[:120]})")
+                else:
+                    # generate_final_post only squashes when >1 step
+                    # commits exist; with a single step commit the
+                    # extended-fix commit would otherwise ship alone and
+                    # gate_final_patch would miss these fixes in the PR
+                    # description.
+                    subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                                   capture_output=True)
+                    gate_patch = run_git(ascend_path, "diff",
+                                         self.state.original_ascend_ref)
+                    (WORKSPACE_DIR / "gate_final_patch").write_text(
+                        gate_patch, encoding="utf-8")
+                    ts_print(f"[extended_e2e] committed fixes and "
+                             f"regenerated gate_final_patch "
+                             f"({len(gate_patch.splitlines())} lines)")
+            result_out["final"] = {
+                "failing": (result_out["rounds"][-1]["failing"]
+                            if result_out["rounds"] else []),
+                "committed": committed,
+                "gate_final_patch_regenerated": committed,
+                "budgets": {"fix_rounds": fix_rounds_left,
+                            "max_min": max_min},
+            }
+            result_out["status"] = status
+            self._write_extended_result(phase_dir, result_out)
+            ts_print(f"\n[extended_e2e] {status}: {len(cases)} case(s), "
+                     f"{round_no} round(s), "
+                     f"{len(result_out['final']['failing'])} suite(s) "
+                     f"failing")
+            return result_out
+        except Exception as exc:  # noqa: BLE001 — the phase never fails the run
+            ts_print(f"[extended_e2e] watcher-style error: {exc}")
+            result_out["status"] = "error"
+            result_out["error"] = str(exc)
+            try:
+                self._write_extended_result(phase_dir, result_out)
+            except Exception:
+                pass
+            return result_out
+
+    @staticmethod
+    def _write_extended_result(phase_dir: Path, result_out: dict) -> None:
+        try:
+            phase_dir.mkdir(parents=True, exist_ok=True)
+            (phase_dir / EXTENDED_E2E_RESULT_FILE).write_text(
+                json.dumps(result_out, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+        except OSError as exc:
+            ts_print(f"[extended_e2e] failed to write result json: {exc}")
 
     def _run_e2e_test_for_final_gate(self) -> bool:
         """Re-run e2e after final-quality-gate fixes to confirm no regression.
@@ -2649,6 +3014,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # header-only, which renders as a broken empty PR description.
             parts.append("| (no vllm-ascend adaptation in this range) | — | — |")
         parts.append("")
+
+        # Extended e2e evidence: one short section for the PR body and the
+        # final summary (they share `parts`) — what upstream PR CI would
+        # run was executed locally first, with the residual risk stated.
+        extended_line = _extended_e2e_summary()
+        if extended_line:
+            parts.extend(["### Extended e2e", "", extended_line, ""])
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")
 

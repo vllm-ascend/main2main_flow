@@ -181,13 +181,20 @@ def _detect_device_overriders(test_files: list[str],
 def _schedule_rounds(tests: list[str], total_cards: int,
                      estimated_times: dict[str, int] | None = None,
                      device_overriders: set[str] | None = None,
-                     pair_aligned: bool = False) -> list[list[str]]:
+                     pair_aligned: bool = False,
+                     preserve_order: bool = False) -> list[list[str]]:
     # Sort by card count descending, then estimated time descending (longest
     # first — a greedy bin-packing heuristic that shortens makespan).
+    # preserve_order skips that re-sort: the caller's order is scheduling
+    # relevant (extended e2e's relevance tiering) and first-fit packing
+    # still applies, just on the given sequence.
     times = estimated_times or {}
     overriders = device_overriders or set()
-    ordered = sorted(tests, key=lambda t: (-_test_cards(t),
-                                            -_lookup_time(t, times), t))
+    if preserve_order:
+        ordered = list(tests)
+    else:
+        ordered = sorted(tests, key=lambda t: (-_test_cards(t),
+                                                -_lookup_time(t, times), t))
     rounds: list[list[str]] = []
     usage: list[int] = []
     for t in ordered:
@@ -1201,6 +1208,7 @@ def run_tests(
     skip_setup: bool = False,
     card_overrides: dict[str, int] | None = None,
     pair_aligned_devices: bool = False,
+    preserve_order: bool = False,
 ) -> dict:
     """Run end-to-end tests for a main2main step.
 
@@ -1362,7 +1370,7 @@ def run_tests(
         sys.exit(1)
     rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
         test_files, capacity, est_times, device_overriders=overriders,
-        pair_aligned=pair_aligned)
+        pair_aligned=pair_aligned, preserve_order=preserve_order)
     if pair_aligned:
         ts_print(f"  Dual-die pairing: enforcing pair-aligned device assignment "
                  f"(usable pool {usable_pool})", flush=True)
