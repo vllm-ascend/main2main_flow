@@ -1439,6 +1439,45 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         except OSError:
             return ""
 
+    def _release_lane_probe(self, tag: str, release_path: str) -> tuple[bool, str]:
+        """Assert the env the smoke just exported resolves the release lane.
+
+        Runs the same interpreter run_tests will spawn for pytest with the
+        same env, and checks two things: ``import vllm`` resolves into the
+        release worktree (PYTHONPATH shadowing is what puts the tree on
+        sys.path — if it regresses, the engine silently runs main vllm) and
+        ``vllm_version_is`` reports the release tag (it reads VLLM_VERSION
+        first; if that export is lost it falls back to the worktree's
+        source-tree version, which reports "dev", and every lane guard
+        takes the main branch).  Either failure means the smoke would
+        exercise the wrong lane and prove nothing — return False so the
+        caller skips loudly instead of burning ~10min of NPU time.
+        """
+        version = tag.lstrip("v")
+        code = (
+            "import vllm\n"
+            "from vllm_ascend.utils import vllm_version_is\n"
+            "print(vllm.__file__)\n"
+            f"print(vllm_version_is('{version}'))\n"
+        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True, text=True, timeout=120,
+                env={**os.environ, "VLLM_VERSION": version},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"probe did not run: {exc}"
+        lines = (proc.stdout or "").strip().splitlines()
+        vllm_file = lines[0].strip() if lines else ""
+        predicate = lines[1].strip() if len(lines) > 1 else ""
+        in_tree = os.path.realpath(vllm_file).startswith(
+            os.path.realpath(release_path) + os.sep)
+        ok = proc.returncode == 0 and in_tree and predicate == "True"
+        detail = (f"vllm={vllm_file or '<import failed>'} "
+                  f"version_is={predicate or (proc.stderr or '').strip()[-120:]}")
+        return ok, detail
+
     def _run_release_smoke(self, gate_dir: Path) -> dict:
         """Run the release-tag e2e smoke against the pinned release tree.
 
@@ -1486,6 +1525,18 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # take the main-vllm branch.
         os.environ["VLLM_VERSION"] = tag.lstrip("v")
         try:
+            # A smoke on the wrong lane proves nothing (same philosophy as
+            # the remote-mode skip above): probe before spending NPU time.
+            probe_ok, probe_detail = self._release_lane_probe(tag, release_path)
+            if not probe_ok:
+                ts_print(f"[final_quality_gate] release smoke SKIPPED: "
+                         f"lane probe failed (want {tag.lstrip('v')}): "
+                         f"{probe_detail}")
+                return {"skipped": True,
+                        "reason": f"release-lane probe: {probe_detail}",
+                        "passed": False, "detail_files": [], "result": {}}
+            ts_print(f"[final_quality_gate] release smoke lane probe ok: "
+                     f"{probe_detail}")
             result = run_tests(
                 vllm_path=self.state.vllm_path,
                 # Unused under skip_setup (no checkout happens); recorded

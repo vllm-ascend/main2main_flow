@@ -8,6 +8,8 @@
   adaptation diff — the PR 16382 shape) are recorded, not blocking
 - remote e2e mode / missing release worktree / no smoke cases all
   self-skip without touching the main-lane env
+- the lane probe (env + tree identity) runs before any NPU time is
+  spent; a mis-resolved lane skips loudly instead of proving nothing
 - env injection: PYTHONPATH points at the release worktree and
   VLLM_VERSION at the release tag for the duration of run_tests only
 """
@@ -232,6 +234,9 @@ def test_release_smoke_injects_and_restores_env(monkeypatch, tmp_path):
         return {"can_commit": True, "suite_results": {}}
 
     monkeypatch.setattr(flow_mod, "run_tests", fake_run_tests)
+    monkeypatch.setattr(f, "_release_lane_probe",
+                        lambda tag, path: (True, f"vllm={path}/vllm/__init__.py"
+                                                " version_is=True"))
     smoke = f._run_release_smoke(tmp_path / "gate")
     assert smoke["passed"] is True
     assert not smoke["skipped"]
@@ -247,6 +252,75 @@ def test_release_smoke_injects_and_restores_env(monkeypatch, tmp_path):
     assert kw["test_cases"] == ["t.py::c"]
     assert kw["step_id"] == "final-quality-gate-release-smoke"
     assert kw["log_dir"] == str(tmp_path / "gate")
+
+
+def test_release_smoke_lane_probe_skip(monkeypatch, tmp_path):
+    # A mis-resolved lane (wrong tree or lost VLLM_VERSION) must skip
+    # loudly instead of running a meaningless smoke: run_tests is never
+    # called and the main-lane env is restored.
+    f = _gate_flow(monkeypatch, tmp_path)
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "vllm-release-tag.commit").write_text(
+        "v0.28.0\n", encoding="utf-8")
+    monkeypatch.setattr(f, "_release_gate_path", lambda: "/tmp/vllm-release")
+    monkeypatch.setattr(flow_mod, "_resolve_release_smoke_cases",
+                        lambda: ["t.py::c"])
+    monkeypatch.setenv("PYTHONPATH", "/orig")
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.setattr(f, "_release_lane_probe",
+                        lambda tag, path: (False, "vllm=/usr/lib/vllm "
+                                                 "version_is=False"))
+    called: list = []
+    monkeypatch.setattr(flow_mod, "run_tests", lambda **kw: called.append(kw))
+    smoke = f._run_release_smoke(tmp_path / "gate")
+    assert smoke["skipped"] is True
+    assert smoke["passed"] is False
+    assert "release-lane probe" in smoke["reason"]
+    assert called == []
+    # The env the smoke exported is restored even on the skip path.
+    assert os.environ["PYTHONPATH"] == "/orig"
+    assert "VLLM_VERSION" not in os.environ
+
+
+def test_release_lane_probe_contract(monkeypatch, tmp_path):
+    # Probe contract: ok iff the subprocess exits 0, vllm.__file__ is
+    # inside the release worktree, AND vllm_version_is is True.
+    f = _gate_flow(monkeypatch, tmp_path)
+    release_path = str(tmp_path / "vllm-release")
+    in_tree = str(tmp_path / "vllm-release" / "vllm" / "__init__.py")
+
+    def fake_run(args, **kw):
+        assert args[0].endswith("python") or "python" in args[0]
+        env = kw["env"]
+        assert env["VLLM_VERSION"] == "0.28.0"
+        out = SimpleNamespace(stdout="", stderr="", returncode=0)
+        if probe_outcome[0] == "ok":
+            out.stdout = f"{in_tree}\nTrue\n"
+        elif probe_outcome[0] == "wrong-tree":
+            out.stdout = "/usr/lib/python3/site-packages/vllm/__init__.py\nTrue\n"
+        elif probe_outcome[0] == "predicate-false":
+            out.stdout = f"{in_tree}\nFalse\n"
+        else:  # import failure
+            out.returncode = 1
+            out.stderr = "ModuleNotFoundError: No module named 'vllm_ascend'"
+        return out
+
+    probe_outcome = ["ok"]
+    monkeypatch.setattr(flow_mod.subprocess, "run", fake_run)
+    ok, detail = f._release_lane_probe("v0.28.0", release_path)
+    assert ok and "version_is=True" in detail and in_tree in detail
+
+    probe_outcome[0] = "wrong-tree"
+    ok, detail = f._release_lane_probe("v0.28.0", release_path)
+    assert not ok and "site-packages" in detail
+
+    probe_outcome[0] = "predicate-false"
+    ok, detail = f._release_lane_probe("v0.28.0", release_path)
+    assert not ok and "version_is=False" in detail
+
+    probe_outcome[0] = "import-failed"
+    ok, detail = f._release_lane_probe("v0.28.0", release_path)
+    assert not ok and "ModuleNotFoundError" in detail
 
 
 def test_release_smoke_failure_builds_detail_files(monkeypatch, tmp_path):
@@ -267,6 +341,9 @@ def test_release_smoke_failure_builds_detail_files(monkeypatch, tmp_path):
 
     monkeypatch.setattr(flow_mod, "run_tests", fake_run_tests)
     monkeypatch.setattr(flow_mod, "build_test_errors_detail", fake_detail)
+    monkeypatch.setattr(f, "_release_lane_probe",
+                        lambda tag, path: (True, f"vllm={path}/vllm/__init__.py"
+                                                " version_is=True"))
     smoke = f._run_release_smoke(tmp_path / "gate")
     assert smoke["passed"] is False
     assert smoke["detail_files"] == [str(detail),
@@ -286,7 +363,7 @@ def test_release_raw_tag_reads_tag_file(monkeypatch, tmp_path):
 
 def test_resolve_release_smoke_cases_env_overrides_policy(monkeypatch):
     monkeypatch.delenv("MAIN2MAIN_RELEASE_TEST_CASES", raising=False)
-    assert len(flow_mod._resolve_release_smoke_cases()) == 4
+    assert len(flow_mod._resolve_release_smoke_cases()) == 6
     monkeypatch.setenv("MAIN2MAIN_RELEASE_TEST_CASES",
                        "a.py::x\n  b.py::y  ")
     assert flow_mod._resolve_release_smoke_cases() == ["a.py::x", "b.py::y"]
@@ -347,8 +424,8 @@ def test_release_smoke_policy_is_pinned_to_allowlist():
     policy_path = Path(inspect.getfile(flow_mod)).parent / "test_policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     cases = policy["release_smoke"]
-    assert len(cases) == 4
-    # Three basic nodes are proven main-lane cases (allowlist members).
+    assert len(cases) == 6
+    # Five basic nodes are proven main-lane cases (allowlist members).
     # test_hang is deliberately RELEASE-ONLY: it is not in the allowlist
     # (the main lane's 25min wall has no room for it) but it is the case
     # that caught PR 16483's own-diff break on the v0.28.0 leg — the
@@ -358,7 +435,7 @@ def test_release_smoke_policy_is_pinned_to_allowlist():
     # smoke needs one mrope case of its own.
     allowlist_only = [c for c in cases if c in policy["allowlist"]]
     release_only = [c for c in cases if c not in policy["allowlist"]]
-    assert len(allowlist_only) == 3
+    assert len(allowlist_only) == 5
     assert release_only == [
         "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py"
         "::test_hang"]
@@ -366,3 +443,13 @@ def test_release_smoke_policy_is_pinned_to_allowlist():
     assert any("test_qwen3_dense_graph_mode" in c for c in cases)
     assert any("test_mtp_spec_decoding" in c for c in cases)
     assert any("test_hang" in c for c in cases)
+    # 2026-09-15 (PR 16575): the dflash/dspark `build_draft_attn_metadatas`
+    # overrides call main-only `_build_uniform_attn_metadata` directly,
+    # bypassing the lane-aware shim — any dflash/dspark engine start
+    # crashes on the v0.28.0 leg.  MTP does not reach that call-site
+    # shape, so the pre-16575 4-case smoke was blind to it while upstream
+    # CI failed both release legs.  These two sentinels execute PR-tree
+    # adapter code against the release worktree.
+    assert any("test_dflash_spec_decoding" in c for c in cases)
+    assert any("test_dspark_spec_decoding" in c and "w4a8" in c
+               for c in cases)

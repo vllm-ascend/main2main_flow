@@ -68,8 +68,8 @@ per-case pytest start/end timestamps.  Two levers, no round-cap change:
 Upstream's own main2main_tests.json union also leaked two strays into the
 run (22 cases → 52 slot-units → an unwanted 4th round of gumbel+uva), so
 one_card/test_qwen3_0_6b.py and two_card/test_qwen3_vl_30b_a3b_instruct.py
-join the blocklist.  18 cases, 44/48 slot-units (4 spare — the next case
-added must swap one out), 3 rounds measured 1048s wall (17.5min).
+join the blocklist.  25 cases (51 slot-units, needs 4 rounds), measured
+1437s wall (24.0min) — inside the 1500s phase-wall pin.
 
 User requirement 2026-09-13: diff-driven test selection is retired — the
 fixed set is the only source, and it should cover as many modules as
