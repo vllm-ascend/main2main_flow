@@ -141,6 +141,27 @@ two_card test_data_parallel / model_runner_v2 test_data_parallel added
 entries, predicted ~37min (zero-sample estimate: calibrated est×0.69 for
 entries without recorded durations; the first real run's elapsed_s is the
 calibration point).
+
+User requirement 2026-09-15 (second revision, same day): 15min was too
+tight — the per-step phase may expand to 20min — while extended was
+re-weighted toward the surfaces that actually failed CI recently
+(vllm-report pr_ci_results/2026-09-15-failure-analysis.json, window
+09-08→09-15): extract_hidden_states (3 PRs, incl. the release-lane MRV2
+unsupported class), gumbel_sample, mamba copy-funcs, Kimi-K3 DSpark
+drafter, DSparkSpeculator draft_watermarker, the PCP NPU-op crash family
+(already per-step since 09-14).  Five demotions return per-step
+(disaggregated_encoder, prefix_caching, deepseek_v3_2_w8a8_pruning, vlm,
+the graph_mode node) — brute-forced max subset under the 1200s pin:
+23 cases, 4 rounds, recorded wall 1164s (19.4min).  mrv2_eplb stays
+extended-only (eplb also guarded there by two_card/test_qwen3_moe_eplb +
+the 30s eplb_map case).  Extended drops pipeline_parallel (524s, no
+failure history, PP topology covered by upstream PR CI) and adds
+one_card/spec_decode/test_extract_hidden_states.py: 55 cases, 19
+two/four-card, predicted ~31min (zero-sample est×0.69).  The release
+smoke gains the extract_hidden_states dense_eager + hybrid_dummy_eager
+nodes — the MRV2-unsupported release-lane class crashes at engine init,
+so either node is a sentinel, and both are 1-card cheap enough to hide
+under test_hang's wall.
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """
@@ -236,16 +257,20 @@ _BUDGET_S = 1200  # 20min per round
 _MAX_ROUNDS = 4   # was 3 (2026-09-07); the 2026-09-13 module-coverage
                   # expansion packs to 4 rounds — the phase-wall pin below
                   # is the binding budget now
-_PHASE_WALL_S = 900  # 15min per-step e2e phase (user requirement
-                     # 2026-09-15; was 25min under the 2026-09-10 set)
+_PHASE_WALL_S = 1200  # 20min per-step e2e phase (user requirement
+                      # 2026-09-15 second revision; 15min was too tight —
+                      # was 25min under the 2026-09-10 set)
 
 # disaggregated_encoder and deepseek_v3_2_w8a8_pruning both hardcode
 # physical devices 0..N-1 in their sources (Remote*Server /
 # ASCEND_RT_VISIBLE_DEVICES assignment), so the runtime scheduler gives
-# each a private round.  Both were demoted to extended on 2026-09-15, so
-# nothing in the current allowlist needs an overrider — re-add entries
-# here if either (or another physical-device case) returns per-step.
-_OVERRIDERS: set[str] = set()
+# each a private round; simulate that here (the pin must count the rounds
+# the same way run_tests will build them).  Demoted 2026-09-15 first
+# revision, re-admitted by the second revision the same day.
+_OVERRIDERS = {
+    "tests/e2e/pull_request/two_card/test_disaggregated_encoder.py",
+    "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py",
+}
 
 
 def _allowlist() -> list[str]:
@@ -272,13 +297,13 @@ def test_selected_set_packs_into_at_most_4_rounds():
         f"{_MAX_ROUNDS}-round cap; drop or swap cases")
 
 
-def test_whole_phase_within_15min():
+def test_whole_phase_within_20min():
     # Sequential rounds: phase wall = Σ per-round makespan (longest case).
     # This is the binding budget since the 2026-09-13 expansion.
     rounds = _scheduled()
     wall = sum(max(_RECORDED_S.get(t, 0) for t in r) for r in rounds)
     assert wall <= _PHASE_WALL_S, (
-        f"phase wall {wall}s exceeds the {_PHASE_WALL_S}s (15min) budget; "
+        f"phase wall {wall}s exceeds the {_PHASE_WALL_S}s (20min) budget; "
         f"drop or swap cases")
 
 

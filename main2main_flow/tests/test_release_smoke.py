@@ -363,7 +363,7 @@ def test_release_raw_tag_reads_tag_file(monkeypatch, tmp_path):
 
 def test_resolve_release_smoke_cases_env_overrides_policy(monkeypatch):
     monkeypatch.delenv("MAIN2MAIN_RELEASE_TEST_CASES", raising=False)
-    assert len(flow_mod._resolve_release_smoke_cases()) == 6
+    assert len(flow_mod._resolve_release_smoke_cases()) == 8
     monkeypatch.setenv("MAIN2MAIN_RELEASE_TEST_CASES",
                        "a.py::x\n  b.py::y  ")
     assert flow_mod._resolve_release_smoke_cases() == ["a.py::x", "b.py::y"]
@@ -424,28 +424,33 @@ def test_release_smoke_policy_is_pinned_to_allowlist():
     policy_path = Path(inspect.getfile(flow_mod)).parent / "test_policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     cases = policy["release_smoke"]
-    assert len(cases) == 6
-    # Four basic nodes are proven main-lane cases (allowlist members).
-    # test_hang is deliberately RELEASE-ONLY: it is not in the allowlist
-    # (the mrope version-compat class it guards is invisible on the main
-    # lane) but it is the case that caught PR 16483's own-diff break on
-    # the v0.28.0 leg — the drafter init reads ModelConfig.mrope_num_dims,
-    # a property that only exists on vllm main, and only a uses_mrope
-    # drafter model reaches that branch.  Every allowlist node runs a
-    # non-mrope model, so the smoke needs one mrope case of its own.
+    assert len(cases) == 8
+    # Five basic nodes are proven main-lane cases (allowlist members —
+    # graph_mode returned to the allowlist in the 2026-09-15 second
+    # revision, the 20min pin).  test_hang is deliberately RELEASE-ONLY:
+    # it is not in the allowlist (the mrope version-compat class it
+    # guards is invisible on the main lane) but it is the case that
+    # caught PR 16483's own-diff break on the v0.28.0 leg — the drafter
+    # init reads ModelConfig.mrope_num_dims, a property that only exists
+    # on vllm main, and only a uses_mrope drafter model reaches that
+    # branch.  Every allowlist node runs a non-mrope model, so the smoke
+    # needs one mrope case of its own.
     allowlist_only = [c for c in cases if c in policy["allowlist"]]
     release_only = [c for c in cases if c not in policy["allowlist"]]
-    assert len(allowlist_only) == 4
-    # graph_mode joined test_hang as release-only on 2026-09-15: demoted
-    # from the per-step allowlist to hit the 15min phase pin (it still
-    # runs once per run in extended_e2e on the MAIN lane), but the smoke
-    # keeps it — the release-lane graph-mode capture path is only ever
-    # exercised here.
+    assert len(allowlist_only) == 5
+    # The two extract_hidden_states nodes are the 2026-09-15 release-lane
+    # sentinels for the MRV2-unsupported class (engine-init pydantic
+    # ValidationError, PRs 16296/16382): both are 1-card cheap enough to
+    # hide under test_hang's wall.
     assert release_only == [
-        "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py"
-        "::test_qwen3_dense_graph_mode",
         "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py"
-        "::test_hang"]
+        "::test_hang",
+        "tests/e2e/pull_request/one_card/spec_decode/"
+        "test_extract_hidden_states.py::test_extract_hidden_states"
+        "[dense_eager]",
+        "tests/e2e/pull_request/one_card/spec_decode/"
+        "test_extract_hidden_states.py::test_extract_hidden_states"
+        "[hybrid_dummy_eager]"]
     # The graph-mode node is the 16382 crash site (spec-decode capture).
     assert any("test_qwen3_dense_graph_mode" in c for c in cases)
     assert any("test_mtp_spec_decoding" in c for c in cases)

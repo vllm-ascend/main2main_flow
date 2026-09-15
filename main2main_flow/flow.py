@@ -192,9 +192,10 @@ def _resolve_release_smoke_cases() -> list[str]:
 def _resolve_extended_policy_cases() -> list[str]:
     """Fixed extended-e2e selection for the post-gate phase.
 
-    The curated ``test_policy.json`` ``extended_e2e`` key — 60 cases
-    (2026-09-15 revision) maximizing two/four-card coverage (23 entries),
-    free of ``_310p`` suites, sized to one bounded ~30-35min batch.
+    The curated ``test_policy.json`` ``extended_e2e`` key — 55 cases
+    (2026-09-15 second revision) weighted toward recently-failing CI
+    surfaces, two/four-card coverage (19 entries), free of ``_310p``
+    suites, sized to one bounded ~30-35min batch.
     MAIN2MAIN_EXTENDED_TEST_CASES overrides entirely (handled by the
     caller); an empty key disables the phase — same fallback philosophy
     as _resolve_release_smoke_cases.
@@ -1394,10 +1395,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         The per-step policy set only proves the cases it contains — the
         2026-09-15 run shipped PR 16575 green on pre_ci while upstream CI
         failed legs (dflash/dspark release lane, PCP spec decode) the fixed
-        set never touched.  Small fast steps (~15min per-step e2e) + one
+        set never touched.  Small fast steps (~20min per-step e2e) + one
         bounded coverage batch (~30-35min): the default source is the FIXED
-        curated set (test_policy.json "extended_e2e", 60 cases maximizing
-        two/four-card coverage, _310p suites structurally excluded);
+        curated set (test_policy.json "extended_e2e", 55 cases weighted
+        toward recently-failing CI surfaces, two/four-card coverage, _310p
+        suites structurally excluded);
         MAIN2MAIN_EXTENDED_MODE=full opts into the whole-label resolver
         (extended_e2e.resolve_extended_cases, hours).  Failures enter
         adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS); a fix round
@@ -1427,7 +1429,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
             # ---- case resolution ----
             # Default: the FIXED extended set (test_policy.json
-            # "extended_e2e", 60 cases ≈ ~30-35min wall — small fast
+            # "extended_e2e", 55 cases ≈ ~30-35min wall — small fast
             # steps, one bounded coverage batch per run).
             # MAIN2MAIN_EXTENDED_MODE=full opts into the whole-label
             # resolver (hours).  MAIN2MAIN_EXTENDED_TEST_CASES overrides

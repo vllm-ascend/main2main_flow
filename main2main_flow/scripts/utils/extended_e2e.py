@@ -3,11 +3,13 @@
 After the final quality gate passes, the flow runs the extended e2e phase —
 the per-step set only proves the cases it contains (the 2026-09-15 run
 shipped PR 16575 green on pre_ci while upstream CI failed legs the fixed
-set never touched).  Small fast steps (~15min per-step e2e) + one bounded
+set never touched).  Small fast steps (~20min per-step e2e) + one bounded
 coverage batch: the default source is the FIXED ``test_policy.json``
-``extended_e2e`` key (60 cases — the 2026-09-15 revision maximizes two/four
-card coverage (23 entries) and excludes every ``_310p`` suite: the a3-16
-pool absolutely cannot run 310P hardware paths, so they are dropped
+``extended_e2e`` key (55 cases — the 2026-09-15 second revision weights
+the surfaces that recently failed CI (extract_hidden_states, gumbel,
+mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP) while keeping two/four-card
+coverage (19 entries) and excluding every ``_310p`` suite: the a3-16 pool
+absolutely cannot run 310P hardware paths, so they are dropped
 structurally in BOTH modes, not just omitted from curation).
 ``MAIN2MAIN_EXTENDED_MODE=full`` opts into the whole-label resolver instead
 (hours): tree scan of ``tests/e2e/pull_request/**/test_*.py`` minus
