@@ -136,7 +136,7 @@ SKIP_AI_ANALYSIS=true kickoff \
 | `MAIN2MAIN_RELEASE_UT_BASELINE` | 设为 `0` 关闭 `release_ut_baseline.json` allowlist——release-lane UT 失败将阻塞 push | `1` |
 | `MAIN2MAIN_RELEASE_TEST_CASES` | 空白分隔的 e2e node 列表，覆盖 gate 的 release-tag smoke 测试集（默认取 `test_policy.json` 的 `release_smoke` 键；设为空则整体禁用 smoke） | policy |
 | `MAIN2MAIN_EXTENDED_E2E` | 设为 `0` 关闭 gate 后的扩展 e2e 阶段（见 Step 3d） | `1` |
-| `MAIN2MAIN_EXTENDED_MODE` | `fixed`（默认）跑 `test_policy.json` `extended_e2e` 固定集（~30min）；`full` 解析 label 全集减去各类扣除（数小时） | `fixed` |
+| `MAIN2MAIN_EXTENDED_MODE` | `fixed`（默认）跑 `test_policy.json` `extended_e2e` 固定集（60 例、2/4 卡优先、无 310p，~30-35min）；`full` 解析 label 全集减去各类扣除（数小时） | `fixed` |
 | `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | 扩展 e2e 首轮失败后的 adapter-fix 轮数（每轮只重跑失败 suite） | `2` |
 | `MAIN2MAIN_EXTENDED_MAX_MIN` | 扩展 e2e 阶段墙钟兜底（分钟），`0` 关闭 | `360` |
 | `MAIN2MAIN_EXTENDED_TEST_CASES` | 空白分隔的扩展 e2e 用例列表，整体替代两种来源（漂移护栏仍生效） | — |
@@ -310,7 +310,7 @@ release worktree 缺失（构建失败或 `MAIN2MAIN_RELEASE_GATE=0`）时，`ru
 2. `main2main_flow/test_policy.json` 的 `allowlist`（总是包含）与 `blocklist`（总是排除）
 3. 若合并结果为空，回退到按 `changed_files` 自动选择相关测试文件
 
-当前 allowlist 固定 25 个用例（one_card 13 + two_card 5 + four_card 7，含节点级条目），blocklist 7 项（不稳定的超大模型用例与 one_card 的 dspark spec decoding 节点——dspark 由 four_card 的 w4a8 节点代表）。用例集由 `tests/test_policy_duration_budget.py` 钉住（makespan pin）：每个用例必须带上游实测时长快照（`_RECORDED_S`，取自 vllm-ascend `test_config.yaml` 的 `estimated_times`），且整个集合满足硬约束——贪心调度不超过 **4 轮**、任一单用例时长不超过 **20 分钟**（1200s）、全部用例总 wall 不超过 **25 分钟**（1500s）。改选集必须同步更新 `_RECORDED_S` 快照并复算 makespan（CI 自动校验）。
+当前 allowlist 固定 18 个用例（one_card 11 + two_card 3 + four_card 4，含节点级条目），blocklist 7 项（不稳定的超大模型用例与 one_card 的 dspark spec decoding 节点——dspark 由 four_card 的 w4a8 节点代表）。用例集由 `tests/test_policy_duration_budget.py` 钉住（makespan pin）：每个用例必须带上游实测时长快照（`_RECORDED_S`，取自 vllm-ascend `test_config.yaml` 的 `estimated_times`），且整个集合满足硬约束——贪心调度不超过 **4 轮**、任一单用例时长不超过 **20 分钟**（1200s）、全部用例总 wall 不超过 **15 分钟**（900s；2026-09-15 收紧，此前 25min/1500s）。2026-09-15 把重用例（pipeline_parallel、deepseek_v3_2_w8a8_pruning、disaggregated_encoder、prefix_caching、qwen3_mrv2_eplb、vlm、test_basic graph_mode 节点）降级进 extended_e2e——每 run 仍覆盖一次，每步 e2e 实测从 ~24min 压到 ~13.4min（记录墙钟 807s、3 轮），dspark V2 节点（401s）留守作 V2 哨兵。改选集必须同步更新 `_RECORDED_S` 快照并复算 makespan（CI 自动校验）。
 
 #### 测试调度
 
@@ -375,9 +375,9 @@ release-lane 失败的价值：vllm-ascend PR CI 的 mypy/cpu-ut 只跑 main pin
 
 ### Step 3d — `_run_extended_e2e`（gate 后扩展 e2e）
 
-门禁通过后、push 之前执行（`MAIN2MAIN_EXTENDED_E2E`，默认开启）。整体节奏是**小步快跑 + 一次有界覆盖**：每步跑固定 allowlist（快速迭代），gate 后在树已定稿、NPU 在 push 前空闲的窗口里追加**一次约 30min 的覆盖 batch**，上游 PR CI 兜底其余覆盖。背景：固定 25 例 allowlist 只能证明它包含的用例——2026-09-15 的 run 在 pre_ci 全绿下送出 PR 16575，上游 CI 却在固定集从未触及的腿上失败（dflash/dspark release lane、PCP spec decode）。
+门禁通过后、push 之前执行（`MAIN2MAIN_EXTENDED_E2E`，默认开启）。整体节奏是**小步快跑 + 一次有界覆盖**：每步跑固定 allowlist（~15min，快速迭代），gate 后在树已定稿、NPU 在 push 前空闲的窗口里追加**一次约 30-35min 的覆盖 batch**，上游 PR CI 兜底其余覆盖。背景：每步固定集只能证明它包含的用例——2026-09-15 的 run 在 pre_ci 全绿下送出 PR 16575，上游 CI 却在固定集从未触及的腿上失败（dflash/dspark release lane、PCP spec decode）。
 
-**用例源**（`extended_e2e.py`，默认 `MAIN2MAIN_EXTENDED_MODE=fixed`）：`test_policy.json` 的 **`extended_e2e` 固定键**——从 label 全集（树扫描 `tests/e2e/pull_request/**/test_*.py` − 上游 `skip_tests` − allowlist 覆盖 − blocklist，共 89 例）中**按预估时长从便宜到贵**装填到 allowlist 同量级预算（sum(est) ≈ 210min ≈ 实测墙钟 ~30min），55 例，覆盖 74 个不同 `vllm_ascend.*` 模块、16 个目录（spec decode 各算法、量化各方案、lora、compile 融合、pooling、rlhf、2/4 卡拓扑）。离线筛选用例，运行时有三个护栏兜住列表过期：allowlist 已覆盖（策略漂移，那些每步都跑）、上游 `skip_tests` 新收入、树上已消失（2026-09-13 幻影文件教训），命中即剔除并记录。`MAIN2MAIN_EXTENDED_MODE=full` 切换为全集解析器（89 例、数小时），`MAIN2MAIN_EXTENDED_TEST_CASES` 整体覆盖两种来源（护栏仍生效）。排序（两种模式相同）：测试文件 import 的 `vllm_ascend.*`/`tests.*` 模块与适配 diff 相交的为 tier1 先跑，其余随后，两层内部按预估时长升序（`run_tests` 以 `preserve_order=True` 调用，调度器不再重排）。注意 `main2main_tests.json` 不是来源：它是定时回归子集（18 条）且全部 ⊆ 固定集，用它减固定集得到空集。
+**用例源**（`extended_e2e.py`，默认 `MAIN2MAIN_EXTENDED_MODE=fixed`）：`test_policy.json` 的 **`extended_e2e` 固定键**——60 例（2026-09-15 修订），**尽多覆盖 2/4 卡用例（23 条）**且**结构性排除全部 `_310p` 套件**（a3-16 池绝对跑不了 310P 硬件路径，两种模式下运行时都剔除，override 也不例外）；每步降级下来的 7 个重用例也在这里，每 run 仍覆盖一次。预测墙钟 ~37min（零样本估计：无实测时长的条目按 est×0.69 校准——文件级 est/实测 中位比 1.44；首轮实跑的 elapsed_s 是校准点，偏了再裁）。离线筛选用例，运行时有四个护栏兜住列表过期：allowlist 已覆盖（策略漂移，那些每步都跑）、上游 `skip_tests` 新收入、`_310p` 套件、树上已消失（2026-09-13 幻影文件教训），命中即剔除并记录。`MAIN2MAIN_EXTENDED_MODE=full` 切换为全集解析器（89 例、数小时），`MAIN2MAIN_EXTENDED_TEST_CASES` 整体覆盖两种来源（护栏仍生效）。排序（两种模式相同）：测试文件 import 的 `vllm_ascend.*`/`tests.*` 模块与适配 diff 相交的为 tier1 先跑，其余随后，两层内部按预估时长升序（`run_tests` 以 `preserve_order=True` 调用，调度器不再重排）。注意 `main2main_tests.json` 不是来源：它是定时回归子集（18 条）且全部 ⊆ 固定集，用它减固定集得到空集。
 
 **修复循环**：首轮跑完整扩展集；失败 suite 进 adapter-fix 轮（`MAIN2MAIN_EXTENDED_FIX_ROUNDS`，默认 2），每轮**只重跑失败的 suite**（2026-09-15 拍板的全量重跑决策只约束 per-step 固定集与 gate 回归 e2e，不约束此阶段）。pytest exit 4（collection error）的 suite 永久移出修复轮（adapter 修不了 import 层损坏）。预算：修复轮数 + 墙钟兜底（`MAIN2MAIN_EXTENDED_MAX_MIN`，默认 360）+ 失败集合与上轮相同即 stop-loss。修复使树 sha 变化时先重跑 gate 静态（静态失败 → 1 轮 adapter → 仍败则阶段以 static_failed 结束但**保留修复**）。
 

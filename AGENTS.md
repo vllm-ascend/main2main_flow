@@ -32,7 +32,7 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
   - `final_quality_gate.py` — push-time gate: format + mypy (both vllm trees) + CPU-UT (`ut_check.py`, main batch + release batch with `VLLM_VERSION=<tag>`, known-failure baseline allowlist; per-file isolation with fake npu-smi)
   - `release_ut_baseline.json` — CPU-UT node IDs known to fail on the release lane independent of the current adaptation (never block; `MAIN2MAIN_RELEASE_UT_BASELINE=0` shows all)
   - `run_tests.py` — e2e test runner with parallel scheduling (`preserve_order=True` hands the caller's case order to the scheduler untouched; default LPT re-sort unchanged)
-  - `extended_e2e.py` — post-gate extended e2e case selection: the fixed curated `extended_e2e` policy key (runtime guards against allowlist drift/upstream skip_tests/missing files), the `MODE=full` tree-scan resolver (`tests/e2e/pull_request/**/test_*.py` minus `skip_tests`/fixed-set/blocklist), and import-closure tiering + estimated-time ordering
+  - `extended_e2e.py` — post-gate extended e2e case selection: the fixed curated `extended_e2e` policy key (runtime guards against allowlist drift/upstream skip_tests/`_310p` suites/missing files), the `MODE=full` tree-scan resolver (`tests/e2e/pull_request/**/test_*.py` minus `skip_tests`/fixed-set/`_310p`/blocklist), and import-closure tiering + estimated-time ordering
   - `push_to_github.py` — push branch + create PR + add labels
   - `ci_log_summary.py` — test log parsing
   - `lessons.py` — submit/persist adaptation lessons to vllm-report
@@ -91,21 +91,22 @@ list; empty list disables the smoke.
 
 After the gate passes, `_run_extended_e2e` adds ONE bounded e2e batch
 beyond the per-step fixed set, while the tree is final and the NPUs would
-otherwise idle until push — small fast steps, then a single ~30min
-coverage sweep (the 2026-09-15 revision of the earlier full-scan design).
-The fixed 25-case per-step set only proves the cases it contains (PR 16575
-shipped green on pre_ci while upstream CI failed legs it never touched).
+otherwise idle until push — small fast steps (~15min per-step e2e), then a
+single ~30-35min coverage sweep (the 2026-09-15 revision).  The per-step
+set only proves the cases it contains (PR 16575 shipped green on pre_ci
+while upstream CI failed legs it never touched).
 
 Case source (`extended_e2e.py`): by default the FIXED curated
-`test_policy.json` `extended_e2e` key — 55 cases picked cheapest-first
-from the label scan to the allowlist's estimated-time scale (sum(est)
-≈ 210min ≈ ~30min measured wall), maximizing distinct covered
-`vllm_ascend.*` modules and feature areas.  Curation is offline; runtime
-guards drop entries the per-step allowlist already covers (drift), upstream
-`skip_tests` has since claimed, or files missing from the tree.
+`test_policy.json` `extended_e2e` key — 60 cases (2026-09-15) maximizing
+two/four-card coverage (23 entries) and excluding every `_310p` suite
+(the a3-16 pool absolutely cannot run 310P hardware paths — the exclusion
+is structural, applied at runtime in BOTH modes, overrides included).
+Curation is offline; runtime guards drop entries the per-step allowlist
+already covers (drift), upstream `skip_tests` has since claimed, `_310p`
+suites, or files missing from the tree.
 `MAIN2MAIN_EXTENDED_MODE=full` opts into the whole-label resolver instead
 (tree scan of `tests/e2e/pull_request/**/test_*.py` − `skip_tests` −
-fixed-set coverage − blocklist, hours).  In both modes, cases whose test
+fixed-set coverage − `_310p` − blocklist, hours).  In both modes, cases whose test
 file imports a module touched by the adaptation diff run first
 (import-closure tier); the rest follow, both by estimated time ascending
 (`run_tests` is called with `preserve_order=True`).  Failures enter
