@@ -221,8 +221,11 @@ def order_cases(cases: list[str], tier1: list[str],
                 estimated_times: dict[str, int]) -> list[str]:
     """tier1 first, both tiers by estimated seconds ascending.
 
-    Note: run_tests' LPT scheduler re-sorts internally, so the phase must
-    pass ``preserve_order=True`` for this ordering to reach execution.
+    The order reaches execution only under the rounds scheduler (or a
+    rolling dispatch with ``preserve_order=True``).  The gate e2e relies
+    on the rolling scheduler's LPT priority instead (no preserve_order):
+    the tier ordering would queue the four-card giants behind every
+    one-card suite, and triage runs after all suites complete anyway.
     """
     t1 = set(tier1)
     ordered = sorted(t1, key=lambda c: _est_key(c, estimated_times))

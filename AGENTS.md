@@ -31,7 +31,7 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
   - `pre_ci_check.py` — per-step: version strings, temp files, format, broken imports (module + symbol against BOTH vllm trees: main + pinned release worktree), mypy (main 3.10/3.11/3.12 + release 3.10), CPU-UT (main batch); a missing release worktree emits a skipped `release_lane` entry instead of failing
   - `final_quality_gate.py` — push-time gate: format + mypy (both vllm trees) + CPU-UT (`ut_check.py`, main batch + release batch with `VLLM_VERSION=<tag>`, known-failure baseline allowlist; per-file isolation with fake npu-smi)
   - `release_ut_baseline.json` — CPU-UT node IDs known to fail on the release lane independent of the current adaptation (never block; `MAIN2MAIN_RELEASE_UT_BASELINE=0` shows all)
-  - `run_tests.py` — e2e test runner with parallel scheduling (`preserve_order=True` hands the caller's case order to the scheduler untouched; default LPT re-sort unchanged)
+  - `run_tests.py` — e2e test runner with two schedulers: `rolling` (default) dispatches a suite the moment enough cards are free and re-dispatches on every completion — no round barrier for idle cards to wait behind; dispatch priority is LPT (more cards, then longer estimate, first), or the caller's order under `preserve_order=True`. `rounds` is the legacy batch scheduler (`MAIN2MAIN_TEST_SCHEDULER=rounds` restores it). Device-overriding tests get an exclusive reserved window (their hardcoded physical 0..N-1); pair alignment still applies
   - `extended_e2e.py` — gate main-e2e case selection: the fixed curated `extended_e2e` policy key (runtime guards against allowlist drift/upstream skip_tests/`_310p` suites/missing files), the `MODE=full` tree-scan resolver (`tests/e2e/pull_request/**/test_*.py` minus `skip_tests`/fixed-set/`_310p`/blocklist), and import-closure tiering + estimated-time ordering
   - `push_to_github.py` — push branch + create PR + add labels
   - `ci_log_summary.py` — test log parsing
@@ -60,6 +60,14 @@ Inside `_ai_analysis`, the attempt loop (up to 3×):
 2. `run_check` — per-step pre-CI: version_strings, temp_files, broken_imports, format, and (when a vllm checkout is available) mypy + CPU-UT
 3. **adapter-qa** — independent AI review (separate opencode session, no generator context)
 4. All pass → break. Any fail → retry with **adapter-fix** (role=adapter-fix, with error_logs inlined).
+
+Every e2e run (per-step, gate, release smoke) uses the same ROLLING
+scheduler by default (2026-09-16): a suite launches the moment enough
+cards are free and the next fitting suite starts as soon as devices are
+released — idle cards never wait behind the slowest suite of a batch
+(run 34994732545's gate e2e: five barrier rounds turned ~20 min of
+device-time into 42 min of wall).  `MAIN2MAIN_TEST_SCHEDULER=rounds`
+restores the batch scheduler.
 
 The same checks re-run once at push time in the final quality gate
 (`final_quality_gate.py`) on the CUMULATIVE diff, fixing failures via
@@ -199,6 +207,7 @@ upstream CI stays the only test executor — the watcher runs no tests itself.
 | `MAIN2MAIN_EXTENDED_MAX_MIN` | Extended e2e wall-clock backstop in minutes, `0` = off (default: `360`). |
 | `MAIN2MAIN_EXTENDED_TEST_CASES` | Space/newline-separated extended e2e cases replacing both sources entirely (drift guards still apply). |
 | `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | `1` keeps upstream `skip_tests` files in the `full`-mode set (default: `0`; no effect in `fixed` mode). |
+| `MAIN2MAIN_TEST_SCHEDULER` | `rounds` restores the legacy round-barrier e2e scheduler (default: `rolling` — suites dispatch as devices free up). |
 | `MAIN2MAIN_MYPY_VENV` | Persistent mypy lint venv directory (default: `<workspace>/mypy_venv`; built once, rebuilt when triton-ascend's numpy constraint moves). |
 
 ## Conventions

@@ -1632,7 +1632,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                 or None),
                         round_number=round_no,
                         log_dir=str(gate_dir),
-                        preserve_order=True,
+                        # No preserve_order: the rolling scheduler dispatches
+                        # LPT (biggest/longest first) — the tier ordering
+                        # would queue the four-card giants behind every
+                        # one-card suite and stretch the makespan (triage
+                        # runs after all suites complete anyway).
                     )
                     result_path = (gate_dir / GATE_E2E_STEP_ID / "tests"
                                    / f"round-{round_no}-result.json")

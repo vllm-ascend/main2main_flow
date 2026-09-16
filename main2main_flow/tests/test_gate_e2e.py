@@ -184,7 +184,10 @@ def test_fixed_mode_reads_policy_key(monkeypatch, tmp_path):
     assert out["mode"] == "fixed"
     assert out["source"] == "test_policy.json extended_e2e"
     assert calls[0]["test_cases"] == [CASE_A, CASE_B, CASE_C]
-    assert calls[0]["preserve_order"] is True
+    # No preserve_order (2026-09-16): the rolling scheduler dispatches LPT —
+    # the tier ordering would queue the four-card giants behind every
+    # one-card suite and stretch the makespan.
+    assert calls[0]["preserve_order"] is None
 
 
 def test_full_mode_uses_resolver(monkeypatch, tmp_path):

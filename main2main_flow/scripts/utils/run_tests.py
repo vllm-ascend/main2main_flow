@@ -2,13 +2,22 @@
 """Run main2main tests with resource-aware parallel scheduling.
 
 Runs pytest on individual test files (matching vllm-ascend's PR CI pattern),
-scheduling them into rounds based on NPU card requirements inferred from the
-test path (e.g. one_card → 1, two_card → 2, four_card → 4).
+dispatching them onto NPU cards inferred from the test path (e.g. one_card →
+1, two_card → 2, four_card → 4).
+
+Two schedulers (``scheduler`` param / ``MAIN2MAIN_TEST_SCHEDULER``):
+  - ``rolling`` (default): a suite launches the moment enough cards are free
+    and the next fitting suite starts as soon as devices are released — no
+    round barrier for idle cards to wait behind (run 34994732545's gate e2e
+    spent 42 min behind five barrier rounds for ~20 min of device-time).
+    Dispatch priority is LPT (more cards, then longer estimate, first).
+  - ``rounds``: the legacy batch scheduler — suites are packed into rounds
+    and every round waits for its slowest member.
 
 Both local and remote executions parallelize tests across the available NPU
-cards within each round: a one_card test takes 1 card, so up to ``total_cards``
-of them run concurrently; a two_card test takes 2, so two can share a 4-card
-runner. Each test gets its own ``ASCEND_RT_VISIBLE_DEVICES`` so processes do not
+cards: a one_card test takes 1 card, so up to ``total_cards`` of them run
+concurrently; a two_card test takes 2, so two can share a 4-card runner.
+Each test gets its own ``ASCEND_RT_VISIBLE_DEVICES`` so processes do not
 collide on the same device. Pass ``--sequential`` to force one-test-per-round.
 On dual-die NPUs (A3: dies 0-1, 2-3, ... live on one physical card and must
 be used together) pass ``--pair-aligned-devices`` — every test then starts on
@@ -40,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import ts_print
@@ -314,6 +324,167 @@ def _assign_devices(rounds: list[list[str]],
             assigned.append((test, devices))
         result.append(assigned)
     return result
+
+
+# =============================================================================
+# rolling scheduler (default): dispatch suites as devices free up
+# =============================================================================
+
+class _RollingAllocator:
+    """Hand device windows out of the free pool as suites start and finish.
+
+    The rounds scheduler can reuse the same device sequence every round
+    because rounds are barriers; a rolling executor needs real
+    bookkeeping — a window is marked busy at dispatch and released when
+    the suite exits, and the next fitting suite starts immediately (no
+    round boundary for idle cards to wait behind).  Two constraints
+    carry over from ``_schedule_rounds``/``_assign_devices``:
+
+    - pair alignment: a window may only START on an even position of the
+      usable-pool sequence (complete dual-die pairs), mirroring
+      ``_assign_devices``' odd-offset skip;
+    - device-overriders hardcode physical devices 0..N-1, so the first
+      max-overrider-need positions of the pool are RESERVED — no other
+      suite may occupy them and an overrider only launches when its exact
+      hardcoded window is free.  Two overriders therefore serialize
+      naturally (both need position 0), matching "one per round".
+    """
+
+    def __init__(self, pool: list[int], pair_aligned: bool = False,
+                 overriders: set[str] | None = None) -> None:
+        self.pool = list(pool)
+        self.pair_aligned = pair_aligned
+        self.overriders = set(overriders or ())
+        self._free: set[int] = set(self.pool)
+        self._reserved: set[int] = set()
+        if self.overriders:
+            max_need = max(_test_cards(t) for t in self.overriders)
+            self._reserved = set(self.pool[:max_need])
+
+    def allocate(self, test: str) -> list[int] | None:
+        """First-fit free window for *test*, or None when nothing fits."""
+        need = _test_cards(test)
+        overrider = test in self.overriders
+        for start in range(0, len(self.pool) - need + 1):
+            if self.pair_aligned and start % 2:
+                continue
+            window = self.pool[start:start + need]
+            if overrider:
+                if window != self.pool[:need]:
+                    continue
+            elif any(d in self._reserved for d in window):
+                continue
+            if all(d in self._free for d in window):
+                self._free.difference_update(window)
+                return window
+        return None
+
+    def release(self, window: list[int]) -> None:
+        self._free.update(window)
+
+    def busy_cards(self) -> int:
+        return len(self.pool) - len(self._free)
+
+
+def _rolling_priority(tests: list[str], est_times: dict[str, int],
+                      preserve_order: bool) -> list[str]:
+    """Dispatch priority for the rolling executor.
+
+    LPT (more cards, then longer estimate, first) shortens the makespan —
+    the giants claim their cards before the small suites fill the pool
+    behind them.  ``preserve_order`` hands the caller's sequence through
+    untouched (same contract as the rounds scheduler).
+    """
+    if preserve_order:
+        return list(tests)
+    return sorted(tests, key=lambda t: (-_test_cards(t),
+                                        -_lookup_time(t, est_times), t))
+
+
+def _print_suite_result(r: dict) -> None:
+    """Per-suite done line + failure log tail (shared by both executors)."""
+    ts_print(f"  [{r['test']}] done: exit={r['run_suite_exit_code']}, "
+             f"result={r['ci_result']}, bugs={r['code_bugs_count']}, "
+             f"flakes={r['env_flakes_count']}", flush=True)
+    if r["run_suite_exit_code"] != 0:
+        log_path = Path(r["log_path"])
+        if log_path.exists():
+            log_content = _read_text_capped(log_path)
+            tail = "\n".join(log_content.splitlines()[-40:])
+            ts_print(f"  [FAILED] log tail ({r['test']}):\n{tail}", flush=True)
+
+
+def _execute_rolling(
+    tests: list[str],
+    *,
+    capacity: int,
+    pool: list[int],
+    est_times: dict[str, int],
+    overriders: set[str],
+    pair_aligned: bool,
+    preserve_order: bool,
+    launch: Callable[[str, list[int]], dict],
+) -> tuple[list[dict], list[dict], int]:
+    """Dispatch suites as devices free up; no round barriers.
+
+    After every completion the pending queue is rescanned and every suite
+    that fits launches immediately, best-priority first — idle cards never
+    wait for the slowest suite of a batch (run 34994732545's gate e2e:
+    five barrier rounds turned ~20 min of device-time into 42 min of wall).
+
+    *launch* runs one suite on the given devices and returns its result
+    dict (built by the caller over ``_run_one_test``, same payload as the
+    rounds loop).  Returns ``(results, launch_records, peak_concurrent_cards)``
+    with results in completion order.
+    """
+    allocator = _RollingAllocator(pool, pair_aligned=pair_aligned,
+                                  overriders=overriders)
+    pending = _rolling_priority(tests, est_times, preserve_order)
+    results: list[dict] = []
+    launches: list[dict] = []
+    launch_no = 0
+    peak_cards = 0
+    t0 = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, capacity)) as executor:
+        running: dict[concurrent.futures.Future, tuple[str, list[int]]] = {}
+        while pending or running:
+            # Launch every pending suite that fits, best-priority first;
+            # one allocation changes the free set, so rescan from the top.
+            while True:
+                for test in list(pending):
+                    devices = allocator.allocate(test)
+                    if devices is None:
+                        continue
+                    pending.remove(test)
+                    launch_no += 1
+                    fut = executor.submit(launch, test, devices)
+                    running[fut] = (test, devices)
+                    launches.append({
+                        "launch": launch_no, "test": test,
+                        "devices": list(devices),
+                        "cards": _test_cards(test),
+                        "start_offset_s": round(time.monotonic() - t0, 1),
+                    })
+                    peak_cards = max(peak_cards, allocator.busy_cards())
+                    ts_print(f"  [{test}] started ({_test_cards(test)} card(s), "
+                             f"devs={','.join(map(str, devices))})", flush=True)
+                    break
+                else:
+                    break  # nothing pending fits (or pending is empty)
+            if not running:
+                raise ValueError(
+                    f"'{pending[0]}' needs {_test_cards(pending[0])} cards but "
+                    f"no free window exists in pool {pool} — "
+                    f"_apply_device_constraints should have skipped it")
+            done, _ = concurrent.futures.wait(
+                list(running), return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in done:
+                test, devices = running.pop(fut)
+                allocator.release(devices)
+                results.append(fut.result())
+                _print_suite_result(results[-1])
+    return results, launches, peak_cards
 
 
 # =============================================================================
@@ -1209,6 +1380,7 @@ def run_tests(
     card_overrides: dict[str, int] | None = None,
     pair_aligned_devices: bool = False,
     preserve_order: bool = False,
+    scheduler: str = "rolling",
 ) -> dict:
     """Run end-to-end tests for a main2main step.
 
@@ -1236,6 +1408,16 @@ def run_tests(
     _CARD_OVERRIDES.clear()
     if card_overrides:
         _CARD_OVERRIDES.update(card_overrides)
+
+    # Escape hatch: MAIN2MAIN_TEST_SCHEDULER=rounds restores the round-
+    # barrier scheduler without a code change (rolling is the default
+    # since 2026-09-16 — see the module docstring for why).
+    scheduler = (os.getenv("MAIN2MAIN_TEST_SCHEDULER", "").strip().lower()
+                 or scheduler).lower()
+    if scheduler not in {"rolling", "rounds"}:
+        ts_print(f"Error: scheduler '{scheduler}' is not one of "
+                 "rolling|rounds", file=sys.stderr)
+        sys.exit(1)
 
     # ---- step 1: resolve tests ----
     # Diff-driven selection is retired (see TestSelectionError): the fixed
@@ -1358,8 +1540,8 @@ def run_tests(
               f"total: {total_est // 60} min for {len(test_files)} tests)")
     overriders = _detect_device_overriders(test_files, ascend_path)
     if overriders:
-        ts_print(f"Device-overriding tests (own physical 0..N-1, one per round): "
-                 f"{sorted(overriders)}", flush=True)
+        ts_print(f"Device-overriding tests (own physical 0..N-1, exclusive "
+                 f"window): {sorted(overriders)}", flush=True)
     test_files, device_skipped = _apply_device_constraints(
         test_files, capacity, usable_pool[0], overriders)
     for s in device_skipped:
@@ -1368,24 +1550,37 @@ def run_tests(
         ts_print("Error: no test can run on the usable device pool "
                  f"(capacity {capacity})", file=sys.stderr)
         sys.exit(1)
-    rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
-        test_files, capacity, est_times, device_overriders=overriders,
-        pair_aligned=pair_aligned, preserve_order=preserve_order)
-    if pair_aligned:
-        ts_print(f"  Dual-die pairing: enforcing pair-aligned device assignment "
-                 f"(usable pool {usable_pool})", flush=True)
-    device_rounds = _assign_devices(rounds, usable_pool,
-                                    pair_aligned=pair_aligned)
 
-    parallel_count = sum(1 for r in rounds if len(r) > 1)
-    ts_print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {capacity}):")
-    for i, rnd in enumerate(device_rounds):
-        usage = sum(_test_cards(t) for t, _ in rnd)
-        mode = "parallel" if len(rnd) > 1 else "serial"
-        ts_print(f"  Round {i+1} ({mode}, using {usage}/{capacity} cards):")
-        for t, d in rnd:
-            ts_print(f"    {t}  ({_test_cards(t)}c, devs={d})")
-    ts_print(flush=True)
+    use_rolling = scheduler == "rolling" and not sequential
+    if use_rolling:
+        # Rolling dispatch needs no precomputed rounds — print the priority
+        # list (launch order) instead of a round plan.
+        priority = _rolling_priority(test_files, est_times, preserve_order)
+        ts_print(f"Schedule (rolling dispatch, {len(priority)} suite(s), "
+                 f"total cards: {capacity}):")
+        for t in priority:
+            ts_print(f"  {t}  ({_test_cards(t)}c, "
+                     f"est={_lookup_time(t, est_times)}s)")
+        ts_print(flush=True)
+    else:
+        rounds = [[t] for t in test_files] if sequential else _schedule_rounds(
+            test_files, capacity, est_times, device_overriders=overriders,
+            pair_aligned=pair_aligned, preserve_order=preserve_order)
+        if pair_aligned:
+            ts_print(f"  Dual-die pairing: enforcing pair-aligned device assignment "
+                     f"(usable pool {usable_pool})", flush=True)
+        device_rounds = _assign_devices(rounds, usable_pool,
+                                        pair_aligned=pair_aligned)
+
+        parallel_count = sum(1 for r in rounds if len(r) > 1)
+        ts_print(f"Schedule ({len(rounds)} round(s), {parallel_count} parallel, total cards: {capacity}):")
+        for i, rnd in enumerate(device_rounds):
+            usage = sum(_test_cards(t) for t, _ in rnd)
+            mode = "parallel" if len(rnd) > 1 else "serial"
+            ts_print(f"  Round {i+1} ({mode}, using {usage}/{capacity} cards):")
+            for t, d in rnd:
+                ts_print(f"    {t}  ({_test_cards(t)}c, devs={d})")
+        ts_print(flush=True)
 
     if dry_run:
         ts_print("[dry-run] Skipping execution.", flush=True)
@@ -1397,58 +1592,89 @@ def run_tests(
     t0 = time.monotonic()
     all_results: list[dict] = []
     rounds_info: list[dict] = []
+    launches_info: list[dict] = []
+    peak_cards = 0
 
-    for round_idx, rnd in enumerate(device_rounds, start=1):
-        round_t0 = time.monotonic()
-        ts_print(f"\n== Round {round_idx}/{len(rounds)}: {len(rnd)} test(s) ==", flush=True)
+    if use_rolling:
+        def _launch(test: str, devices: list[int]) -> dict:
+            slug = test.replace("/", "__").replace(".py", "").replace("::", "--")
+            lp = ci_dir / f"round-{round_number}-{slug}.log"
+            sp = ci_dir / f"round-{round_number}-{slug}-summary.json"
+            dev_str = ",".join(map(str, devices))
+            cmd = _build_test_cmd(test, dev_str, ascend_path=ascend_path,
+                                  remote_host=remote_host,
+                                  remote_container=remote_container,
+                                  remote_ascend=remote_ascend,
+                                  mock=mock, mock_scale=mock_scale, s_env=env)
+            return _run_one_test(cmd, lp, sp, test, dev_str, ci_log_summary,
+                                 ascend_path, step_id, round_number, env.copy(),
+                                 is_remote=bool(remote_host), is_mock=mock,
+                                 timeout_s=(test_timeouts.get(test)
+                                            if test_timeouts else None))
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(rnd)) as executor:
-            futs = {}
-            for test, devices in rnd:
-                slug = test.replace("/", "__").replace(".py", "").replace("::", "--")
-                lp = ci_dir / f"round-{round_number}-{slug}.log"
-                sp = ci_dir / f"round-{round_number}-{slug}-summary.json"
-                cmd = _build_test_cmd(test, devices, ascend_path=ascend_path,
-                                      remote_host=remote_host, remote_container=remote_container,
-                                      remote_ascend=remote_ascend,
-                                      mock=mock, mock_scale=mock_scale, s_env=env)
-                fut = executor.submit(_run_one_test, cmd, lp, sp, test, devices,
-                                      ci_log_summary, ascend_path,
-                                      step_id, round_number, env.copy(),
-                                      is_remote=bool(remote_host), is_mock=mock,
-                                      timeout_s=test_timeouts.get(test) if test_timeouts else None)
-                futs[fut] = test
-                ts_print(f"  [{test}] started ({_test_cards(test)} card(s))", flush=True)
+        all_results, launches_info, peak_cards = _execute_rolling(
+            test_files, capacity=capacity, pool=usable_pool,
+            est_times=est_times, overriders=overriders,
+            pair_aligned=pair_aligned, preserve_order=preserve_order,
+            launch=_launch)
+    else:
+        for round_idx, rnd in enumerate(device_rounds, start=1):
+            round_t0 = time.monotonic()
+            ts_print(f"\n== Round {round_idx}/{len(rounds)}: {len(rnd)} test(s) ==", flush=True)
 
-            round_results = []
-            printed_failure = False
-            for fut in concurrent.futures.as_completed(futs):
-                r = fut.result()
-                round_results.append(r)
-                ts_print(f"  [{futs[fut]}] done: exit={r['run_suite_exit_code']}, "
-                      f"result={r['ci_result']}, bugs={r['code_bugs_count']}, "
-                      f"flakes={r['env_flakes_count']}", flush=True)
-                if not printed_failure and r['run_suite_exit_code'] != 0:
-                    printed_failure = True
-                    log_path = Path(r['log_path'])
-                    if log_path.exists():
-                        log_content = _read_text_capped(log_path)
-                        tail = "\n".join(log_content.splitlines()[-40:])
-                        ts_print(f"  [FAILED] log tail ({r['test']}):\n{tail}", flush=True)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(rnd)) as executor:
+                futs = {}
+                for test, devices in rnd:
+                    slug = test.replace("/", "__").replace(".py", "").replace("::", "--")
+                    lp = ci_dir / f"round-{round_number}-{slug}.log"
+                    sp = ci_dir / f"round-{round_number}-{slug}-summary.json"
+                    cmd = _build_test_cmd(test, devices, ascend_path=ascend_path,
+                                          remote_host=remote_host, remote_container=remote_container,
+                                          remote_ascend=remote_ascend,
+                                          mock=mock, mock_scale=mock_scale, s_env=env)
+                    fut = executor.submit(_run_one_test, cmd, lp, sp, test, devices,
+                                          ci_log_summary, ascend_path,
+                                          step_id, round_number, env.copy(),
+                                          is_remote=bool(remote_host), is_mock=mock,
+                                          timeout_s=test_timeouts.get(test) if test_timeouts else None)
+                    futs[fut] = test
+                    ts_print(f"  [{test}] started ({_test_cards(test)} card(s))", flush=True)
 
-        round_elapsed = time.monotonic() - round_t0
-        all_results.extend(round_results)
-        rounds_info.append({"round": round_idx, "tests": [r["test"] for r in round_results],
-                            "cards_used": sum(_test_cards(t) for t, _ in rnd),
-                            "total_cards": capacity, "elapsed_s": round(round_elapsed, 1)})
-        ts_print(f"  Round {round_idx} elapsed: {round_elapsed:.1f}s", flush=True)
+                round_results = []
+                printed_failure = False
+                for fut in concurrent.futures.as_completed(futs):
+                    r = fut.result()
+                    round_results.append(r)
+                    ts_print(f"  [{futs[fut]}] done: exit={r['run_suite_exit_code']}, "
+                          f"result={r['ci_result']}, bugs={r['code_bugs_count']}, "
+                          f"flakes={r['env_flakes_count']}", flush=True)
+                    if not printed_failure and r['run_suite_exit_code'] != 0:
+                        printed_failure = True
+                        log_path = Path(r['log_path'])
+                        if log_path.exists():
+                            log_content = _read_text_capped(log_path)
+                            tail = "\n".join(log_content.splitlines()[-40:])
+                            ts_print(f"  [FAILED] log tail ({r['test']}):\n{tail}", flush=True)
 
-        if remote_host:
-            remote_ci = f"{remote_log_dir}/{step_id}/tests"
-            ts_print(f"  Pulling remote logs: {remote_host}:{remote_ci} -> {ci_dir}", flush=True)
-            _sync_remote_dir(remote_host, remote_ci, ci_dir)
+            round_elapsed = time.monotonic() - round_t0
+            all_results.extend(round_results)
+            rounds_info.append({"round": round_idx, "tests": [r["test"] for r in round_results],
+                                "cards_used": sum(_test_cards(t) for t, _ in rnd),
+                                "total_cards": capacity, "elapsed_s": round(round_elapsed, 1)})
+            ts_print(f"  Round {round_idx} elapsed: {round_elapsed:.1f}s", flush=True)
+
+            if remote_host:
+                remote_ci = f"{remote_log_dir}/{step_id}/tests"
+                ts_print(f"  Pulling remote logs: {remote_host}:{remote_ci} -> {ci_dir}", flush=True)
+                _sync_remote_dir(remote_host, remote_ci, ci_dir)
 
     total_elapsed = time.monotonic() - t0
+    if use_rolling:
+        rounds_info = [{
+            "round": round_number, "tests": [r["test"] for r in all_results],
+            "cards_used": peak_cards, "total_cards": capacity,
+            "elapsed_s": round(total_elapsed, 1),
+        }]
     if remote_host:
         ts_print("\n=== Final log sync ===", flush=True)
         _sync_remote_dir(remote_host, f"{remote_log_dir}/{step_id}/tests", ci_dir)
@@ -1461,6 +1687,9 @@ def run_tests(
     )
     if device_skipped:
         result["device_skipped"] = device_skipped
+    if use_rolling:
+        result["scheduler"] = "rolling"
+        result["launches"] = launches_info
     result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     ts_print(f"\nmain2main CI aggregated: {result['ci_result']}  "
              f"(can_commit={result['can_commit']})", flush=True)
@@ -1617,6 +1846,12 @@ def main() -> None:
                         "closed under pairing before scheduling.")
     p.add_argument("--mock", action="store_true")
     p.add_argument("--mock-scale", type=float, default=0.1)
+    p.add_argument("--scheduler", choices=["rolling", "rounds"],
+                   default=os.getenv("MAIN2MAIN_TEST_SCHEDULER", "rolling"),
+                   help="rolling (default): dispatch suites as devices free "
+                        "up, no round barriers; rounds: legacy batch "
+                        "scheduler where every round waits for its slowest "
+                        "member.")
     args = p.parse_args()
 
     test_cases: list[str] | None = None
@@ -1644,6 +1879,7 @@ def main() -> None:
         sequential=args.sequential, mock=args.mock, mock_scale=args.mock_scale,
         skip_setup=args.skip_setup,
         pair_aligned_devices=args.pair_aligned_devices,
+        scheduler=args.scheduler,
     )
     sys.exit(0 if result.get("can_commit", False) else 1)
 
