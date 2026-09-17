@@ -184,6 +184,22 @@ npu_ipc_weight_transfer, graphex_norm_quant_fusion,
 completion_with_prompt_embeds.  Lane ests 69/24/28.7min → predicted
 ~17min under the same 4/2/2-slot packing that gave ~31min for the
 55-case set.
+Demotion 2026-09-17: both PCP nodes leave the allowlist and enter the
+blocklist.  Baseline probe on nv-action run 35200996925 (vllm@cf1584f3,
+main2main_baseline tree with NO step-1 adaptation): neither node reaches
+a test body —
+test_mtp_mla_spec_decode_with_pcp dies at engine init
+(TypeError: _deepseek_v2_mla_attention_init() got an unexpected keyword
+argument 'index_group_builder'), test_eagle3_gqa_spec_decode_with_pcp at
+KV-cache init (TypeError: PCPManager.__init__() got an unexpected
+keyword argument 'req_states', after which pytest never exits and the
+suite hangs to the timeout).  I.e. the 561002 aclnn failures that made
+two 09-16 runs stop-loss were the ADAPTED tree getting further than the
+baseline ever could — the CANN-level break is target-inherent, not an
+adaptation regression, and no adapter fix round can reach it.  Node
+granularity in the blocklist keeps the file's two passing dsv3 PCP
+nodes eligible for the extended tree-scan.  22 cases remain; the wall
+pin stays binding and only loosens.
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """
@@ -248,6 +264,9 @@ _RECORDED_S = {
     "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test]": 401,
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py": 32,
     "tests/e2e/pull_request/four_card/test_pipeline_parallel.py": 524,
+    # 2026-09-17 removal: the two PCP nodes entered 2026-09-14 with
+    # crash-terminated lower-bound durations (221s / 181s) and are now
+    # demoted to the blocklist — see the module docstring.
     # 2026-09-13 module-coverage expansion (user: maximize module coverage,
     # diff-driven selection retired).  Kept additions, all measured in the
     # same 34745454795 run: test_simple_cpu_offload (KV-connector
@@ -261,17 +280,6 @@ _RECORDED_S = {
     # vllm@62f3bf58; two adapter-fix rounds did not converge — root-cause
     # before re-adding).
     "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py": 300,
-    # 2026-09-14 additions from PR 16466's CI (nv-action run 34788679070,
-    # job a3-4card-2-4, vllm@c377114636): both nodes died with
-    # aclnnInterleaveRope error 561002 -> EngineDeadError — a surface no
-    # fixed case covered (context_parallel / PCP spec decode).  Durations
-    # are crash-terminated wall times (per-node engine-init to failure),
-    # so they are LOWER bounds of a passing run — re-sync from the first
-    # run where the nodes go green.
-    "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::"
-    "test_mtp_mla_spec_decode_with_pcp": 221,
-    "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::"
-    "test_eagle3_gqa_spec_decode_with_pcp": 181,
 }
 
 _A3_CARDS = 16
