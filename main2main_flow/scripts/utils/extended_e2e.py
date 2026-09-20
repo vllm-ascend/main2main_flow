@@ -5,10 +5,11 @@ the former post-gate phase became the gate's regression e2e — the per-step
 set only proves the cases it contains, and the 2026-09-15 run shipped
 PR 16575 green on pre_ci while upstream CI failed legs the fixed set never
 touched).  The default source is the FIXED ``test_policy.json``
-``extended_e2e`` key (36 cases — the 2026-09-16 fourth revision trims
-the 55-case set to the failure-weighted core: extract_hidden_states,
-gumbel, mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP anchors stay, 12
-two/four-card entries) and excluding every ``_310p`` suite: the a3-16 pool
+``extended_e2e`` key (34 cases — the 2026-09-16 fourth revision trims
+the 55-case set to the failure-weighted core, and 2026-09-20 removes
+test_dspark.py / test_kimi_k3.py as deterministic target-side failures
+demoted to the blocklist: extract_hidden_states, gumbel, mamba, PCP
+anchors stay) and excluding every ``_310p`` suite: the a3-16 pool
 absolutely cannot run 310P hardware paths, so they are dropped
 structurally in BOTH modes, not just omitted from curation).
 ``MAIN2MAIN_EXTENDED_MODE=full`` opts into the whole-label resolver instead

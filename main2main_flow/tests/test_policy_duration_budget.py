@@ -198,8 +198,18 @@ two 09-16 runs stop-loss were the ADAPTED tree getting further than the
 baseline ever could — the CANN-level break is target-inherent, not an
 adaptation regression, and no adapter fix round can reach it.  Node
 granularity in the blocklist keeps the file's two passing dsv3 PCP
-nodes eligible for the extended tree-scan.  22 cases remain; the wall
+nodes eligible for the extended tree-scan.  21 cases remain; the wall
 pin stays binding and only loosens.
+User decision 2026-09-20 (fifth revision): extended_e2e drops
+test_dspark.py and test_kimi_k3.py (36 → 34 cases), both demoted to the
+blocklist.  Run 35483028393: dspark's
+test_dspark_kv_sliding_window is a hand-rolled golden-comparison
+assertion failing deterministically with byte-identical values across
+rounds and targets (the future precision-classifier's case), and all
+three kimi_k3 nodes die at APIServer startup (pydantic ValidationError
+on SpeculativeConfig with MoE+EP).  Same day the gate e2e stops
+blocking PR creation once its fix rounds (now default 3) exhaust —
+upstream PR CI is the verifier.
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """

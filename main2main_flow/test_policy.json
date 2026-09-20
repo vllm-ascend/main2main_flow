@@ -31,7 +31,9 @@
     "tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py",
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_dspark_spec_decoding",
     "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::test_mtp_mla_spec_decode_with_pcp",
-    "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::test_eagle3_gqa_spec_decode_with_pcp"
+    "tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py::test_eagle3_gqa_spec_decode_with_pcp",
+    "tests/e2e/pull_request/four_card/test_kimi_k3.py",
+    "tests/e2e/pull_request/one_card/spec_decode/test_dspark.py"
   ],
   "release_smoke": [
     "tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py::test_qwen3_dense_eager_mode",
@@ -45,7 +47,6 @@
   ],
   "extended_e2e": [
     "tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py",
-    "tests/e2e/pull_request/four_card/test_kimi_k3.py",
     "tests/e2e/pull_request/four_card/test_minimax_m3.py",
     "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py",
     "tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py",
@@ -57,7 +58,6 @@
     "tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8B.py",
     "tests/e2e/pull_request/one_card/pooling/test_classification.py",
     "tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py",
-    "tests/e2e/pull_request/one_card/spec_decode/test_dspark.py",
     "tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py",
     "tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py",
     "tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py",

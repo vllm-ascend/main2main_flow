@@ -157,12 +157,13 @@ def test_gate_smoke_inherited_records_and_does_not_block(monkeypatch, tmp_path):
 
 def test_gate_smoke_never_runs_when_e2e_regression_blocks(monkeypatch, tmp_path):
     # Ordering pin: the smoke only runs after the main-lane e2e is green
-    # on that tree; a failed (own-diff unresolved) e2e verdict breaks the
-    # gate before the smoke is ever reached.
+    # on that tree; a BLOCKING e2e verdict (static_failed breaks the
+    # statics — exhausted/stop-loss are tolerated since 2026-09-20)
+    # breaks the gate before the smoke is ever reached.
     f = _gate_flow(monkeypatch, tmp_path)
     f.state.last_step_e2e_passed = False
     monkeypatch.setattr(f, "_run_gate_e2e",
-                        lambda gate_dir: {"status": "exhausted"})
+                        lambda gate_dir: {"status": "static_failed"})
     calls = _script_smoke(monkeypatch, f, [_smoke_result(False)])
     _capture_adapter(monkeypatch)
     assert f._final_quality_gate() is False

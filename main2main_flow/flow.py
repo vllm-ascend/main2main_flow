@@ -192,8 +192,10 @@ def _resolve_release_smoke_cases() -> list[str]:
 def _resolve_gate_e2e_policy_cases() -> list[str]:
     """Fixed case selection for the gate's main e2e.
 
-    The curated ``test_policy.json`` ``extended_e2e`` key — 36 cases
-    (2026-09-16 trim of the 55-case second revision) weighted toward
+    The curated ``test_policy.json`` ``extended_e2e`` key — 34 cases
+    (2026-09-16 trim of the 55-case second revision; 2026-09-20 removal of
+    the deterministic-failing test_dspark.py and test_kimi_k3.py) weighted
+    toward
     recently-failing CI surfaces, two/four-card coverage (12 entries),
     free of ``_310p`` suites, sized to one bounded ~17min batch.  Formerly
     the post-gate "extended e2e" phase; it IS the gate's main e2e now
@@ -243,6 +245,10 @@ def _gate_e2e_summary() -> str:
                  "), recorded not blocking")
     elif n_fail:
         line += f", {n_fail} own-diff suite(s) failing"
+        if data.get("status") in ("exhausted", "stop_loss_no_progress",
+                                  "time_budget", "collection_error_own"):
+            line += (" — fix budget spent, not blocking: upstream PR CI "
+                     "is the verifier")
     if n_coll:
         line += f", {n_coll} collection-error suite(s)"
     return line
@@ -1210,12 +1216,16 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
           31691299310's attempt-3 fix was correct and PR CI passed, but the
           gate had already exhausted).
         - 4 gate-e2e entries.  The gate's main e2e IS the extended
-          coverage set now (2026-09-15 merge, _run_gate_e2e): 36 cases
+          coverage set now (2026-09-15 merge, _run_gate_e2e): 34 cases
           whose failures are triaged — one delta re-run absorbs flakes;
           tracebacks entirely outside the adaptation diff are
           upstream-inherited (recorded, not blocking); own-diff failures
-          enter adapter-fix rounds that re-run ONLY the failed suites and
-          block the gate when the fix budgets exhaust.
+          enter adapter-fix rounds that re-run ONLY the failed suites.
+          Once the fix budget exhausts (MAIN2MAIN_EXTENDED_FIX_ROUNDS,
+          default 3) the failing set is RECORDED, NOT BLOCKING (2026-09-20
+          decision) — the PR body's Gate e2e line carries the evidence and
+          upstream PR CI is the verifier; only static_failed / error still
+          block the gate.
           MAIN2MAIN_EXTENDED_E2E=0 falls back to the legacy 23-case
           regression e2e (same-tree flake retry + revert on determinism).
           Static checks are memoized by working-tree diff sha (HEAD never
@@ -1357,11 +1367,35 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                             else:
                                 gate_e2e_passed_sha = (
                                     self._working_tree_diff_sha(ascend_path))
+                        elif verdict in ("exhausted", "stop_loss_no_progress",
+                                         "time_budget",
+                                         "collection_error_own"):
+                            # 2026-09-20 decision: the fix budget is spent
+                            # with own-diff failures still standing —
+                            # record and keep pushing.  Memoized like the
+                            # inherited verdict so a re-armed loop doesn't
+                            # re-burn the wide set on the same tree; the
+                            # failing suites stay visible in the PR body's
+                            # Gate e2e line and upstream PR CI is the
+                            # verifier.
+                            ts_print(
+                                f"[final_quality_gate] gate e2e {verdict} "
+                                f"— own-diff failures unresolved after fix "
+                                f"rounds; recorded, NOT blocking PR "
+                                f"creation")
+                            error_logs = (e2e.get("last_error_logs") or [
+                                str(Path(gate_dir) / GATE_E2E_RESULT_FILE)])
+                            if e2e.get("fixes_applied"):
+                                fixes_applied = True
+                                verified = e2e.get("statics_verified_sha")
+                                if verified:
+                                    static_passed_sha = verified
+                            gate_e2e_suppressed_sha = cur_sha
+                            need_regression_e2e = False
                         else:
                             ts_print(
                                 f"[final_quality_gate] gate e2e {verdict} "
-                                f"— own-diff failures unresolved, gate "
-                                f"fails")
+                                f"— gate fails")
                             error_logs = (e2e.get("last_error_logs") or [
                                 str(Path(gate_dir) / GATE_E2E_RESULT_FILE)])
                             break
@@ -1458,7 +1492,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         PR 16575 shipped green on pre_ci while upstream CI failed legs
         (dflash/dspark release lane, PCP spec decode) it never touched.
         The default source is the FIXED curated set (test_policy.json
-        "extended_e2e", 36 cases weighted toward recently-failing CI
+        "extended_e2e", 34 cases weighted toward recently-failing CI
         surfaces); MAIN2MAIN_EXTENDED_MODE=full opts into the whole-label
         resolver; MAIN2MAIN_EXTENDED_TEST_CASES overrides both.
 
@@ -1467,18 +1501,20 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         failure whose traceback files all sit OUTSIDE the cumulative
         adaptation diff is upstream-inherited (the PR 16382 shape) —
         recorded in gate_e2e_inherited.json, NOT blocking.  Own-diff
-        failures enter adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS)
-        that re-run ONLY the failed suites, with a wall-clock backstop
-        (MAIN2MAIN_EXTENDED_MAX_MIN), a stop-loss on an identical failing
-        set, and a statics re-check when a fix edited the tree.  Unlike
-        the old post-gate phase this runs INSIDE the gate: exhausting the
-        budgets on an own-diff failing set blocks the push — upstream CI
-        verifies the inherited risk, not a proven own regression.
+        failures enter adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS,
+        default 3) that re-run ONLY the failed suites, with a wall-clock
+        backstop (MAIN2MAIN_EXTENDED_MAX_MIN), a stop-loss on an identical
+        failing set, and a statics re-check when a fix edited the tree.
+        Unlike the old post-gate phase this runs INSIDE the gate, but
+        since 2026-09-20 exhausting the budgets on an own-diff failing set
+        is RECORDED, NOT BLOCKING — the PR body's Gate e2e line carries
+        the failing-suite evidence and upstream PR CI is the verifier.
 
         Returns a dict whose "status" the gate loop routes on:
         passed / inherited / empty / skipped are non-blocking;
-        exhausted / stop_loss_no_progress / time_budget / static_failed /
-        collection_error_own / error block the gate.
+        exhausted / stop_loss_no_progress / time_budget /
+        collection_error_own are tolerated (recorded, not blocking since
+        2026-09-20); static_failed / error block the gate.
         """
         if not self.state.steps:
             return {"status": "skipped", "reason": "no steps"}
@@ -1495,7 +1531,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
             # ---- case resolution (same sources as the old post-gate phase) ----
             # Default: the FIXED extended set (test_policy.json
-            # "extended_e2e", 36 cases ≈ ~17min wall).  MODE=full opts
+            # "extended_e2e", 34 cases ≈ ~17min wall).  MODE=full opts
             # into the whole-label resolver (hours).
             # MAIN2MAIN_EXTENDED_TEST_CASES overrides both.
             override_env = os.getenv("MAIN2MAIN_EXTENDED_TEST_CASES",
@@ -1573,10 +1609,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
             static_passed_sha = self._working_tree_diff_sha(ascend_path)
             try:
+                # 2026-09-20: raised 2 → 3 (best-effort fix budget before
+                # the tolerated-exhausted verdict).
                 fix_rounds_left = max(
-                    0, int(os.getenv("MAIN2MAIN_EXTENDED_FIX_ROUNDS", "2")))
+                    0, int(os.getenv("MAIN2MAIN_EXTENDED_FIX_ROUNDS", "3")))
             except ValueError:
-                fix_rounds_left = 2
+                fix_rounds_left = 3
             try:
                 max_min = max(0.0,
                               float(os.getenv("MAIN2MAIN_EXTENDED_MAX_MIN",

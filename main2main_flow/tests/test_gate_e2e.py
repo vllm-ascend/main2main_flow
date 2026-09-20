@@ -12,8 +12,10 @@ now (2026-09-15 merge) — the wide coverage set with gate semantics:
 - triage (release-smoke philosophy): traceback files entirely outside the
   cumulative adaptation diff are upstream-inherited — recorded in
   gate_e2e_inherited.json, NOT blocking; own-diff failures enter
-  adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS) and BLOCK the gate
-  when the budgets exhaust (unlike the old best-effort phase)
+  adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS, default 3) and, once
+  the budgets exhaust, are RECORDED, NOT BLOCKING (2026-09-20 decision:
+  the PR body carries the failing-suite evidence, upstream PR CI is the
+  verifier); only static_failed / error still block the gate
 - pytest exit 4 (collection error) suites are excluded from fix rounds
   permanently; when only they remain, the triage verdict decides blocking
 - budgets: fix rounds, wall-clock backstop (MAIN2MAIN_EXTENDED_MAX_MIN),
@@ -328,8 +330,8 @@ def test_inherited_failure_records_and_does_not_block(monkeypatch, tmp_path):
 
 
 def test_own_diff_exhausted_blocks(monkeypatch, tmp_path):
-    # Zero fix budget: flake re-run still failing, own diff -> exhausted,
-    # which the gate loop treats as BLOCKING.
+    # Zero fix budget: flake re-run still failing, own diff -> exhausted
+    # (the status itself; the gate loop tolerates it since 2026-09-20).
     f = _gate_e2e_flow(monkeypatch, tmp_path, diff_files=f"{OWN_FILE}\n")
     calls = _script_run_tests(monkeypatch, f, [
         _rt_result(dict([_suite(CASE_A, "failed")]))])
@@ -363,7 +365,8 @@ def test_identical_failing_set_stop_loss(monkeypatch, tmp_path):
 def test_collection_error_only_own_blocks(monkeypatch, tmp_path):
     # The ONLY failure is a collection error (pytest exit 4) and its
     # traceback touches the diff — the adapter cannot fix imports, so no
-    # fix round exists: blocking.
+    # fix round exists: the collection_error_own status (tolerated by the
+    # gate loop since 2026-09-20).
     f = _gate_e2e_flow(monkeypatch, tmp_path, diff_files=f"{OWN_FILE}\n")
     calls = _script_run_tests(monkeypatch, f, [
         _rt_result(dict([_suite(CASE_A, "failed", exit_code=4),
@@ -409,7 +412,8 @@ def test_collection_error_plus_real_failure_fixes_real_only(
     monkeypatch.setenv("MAIN2MAIN_EXTENDED_FIX_ROUNDS", "2")
     out = f._run_gate_e2e(tmp_path / "quality_gate")
     # The real failure passed its delta re-run, but the exit-4 suite on
-    # the own diff remains -> blocking with no fix round spent on it.
+    # the own diff remains -> collection_error_own with no fix round
+    # spent on it.
     assert out["status"] == "collection_error_own"
     assert calls[1]["test_cases"] == [CASE_B]  # exit-4 suite NOT re-run
     assert payloads == []
@@ -597,12 +601,63 @@ def test_gate_loop_inherited_verdict_is_not_blocking(monkeypatch, tmp_path):
     assert len(smoke_calls) == 1  # the smoke still runs after e2e
 
 
-def test_gate_loop_own_verdict_blocks_before_smoke(monkeypatch, tmp_path):
+def test_gate_loop_exhausted_verdict_is_not_blocking(monkeypatch, tmp_path):
+    # 2026-09-20: exhausting the gate-e2e fix budget on own-diff failures
+    # records the evidence and keeps pushing — the smoke still runs and
+    # the gate passes.
+    f, smoke_calls = _loop_flow(monkeypatch, tmp_path)
+    e2e_calls: list[int] = []
+    monkeypatch.setattr(f, "_run_gate_e2e",
+                        lambda gate_dir: e2e_calls.append(gate_dir) or
+                        {"status": "exhausted"})
+    assert f._final_quality_gate() is True
+    assert len(e2e_calls) == 1
+    assert len(smoke_calls) == 1  # the smoke still runs after the e2e
+
+
+def test_gate_loop_static_failed_verdict_blocks(monkeypatch, tmp_path):
+    # static_failed / error remain the blocking verdicts: a gate e2e that
+    # broke the statics must not ship.
     f, smoke_calls = _loop_flow(monkeypatch, tmp_path)
     monkeypatch.setattr(f, "_run_gate_e2e",
-                        lambda gate_dir: {"status": "exhausted"})
+                        lambda gate_dir: {"status": "static_failed"})
     assert f._final_quality_gate() is False
     assert smoke_calls == []
+
+
+def test_gate_loop_exhausted_memoizes_tree(monkeypatch, tmp_path):
+    # A tolerated-exhausted tree is memoized like the inherited verdict:
+    # a smoke fix round re-arms the regression e2e, but the same tree
+    # must not re-burn the wide set.
+    f, smoke_calls = _loop_flow(monkeypatch, tmp_path)
+    e2e_calls: list[int] = []
+    monkeypatch.setattr(f, "_run_gate_e2e",
+                        lambda gate_dir: e2e_calls.append(1) or
+                        {"status": "exhausted"})
+    # Smoke fails twice (initial + flake retry, triaged own), then passes
+    # on the same tree after one adapter round.
+    smoke = [{"skipped": False, "reason": "", "passed": False,
+              "detail_files": ["d.json"], "result": {}}] * 2 + \
+        [{"skipped": False, "reason": "", "passed": True,
+          "detail_files": [], "result": {}}]
+
+    def fake_smoke(gate_dir):
+        smoke_calls.append(1)
+        return smoke[min(len(smoke), len(smoke_calls)) - 1].copy()
+
+    monkeypatch.setattr(f, "_run_release_smoke", fake_smoke)
+    monkeypatch.setattr(f, "_classify_smoke_failure",
+                        lambda smoke: ("own", [OWN_FILE]))
+    payloads: list[int] = []
+    monkeypatch.setattr(f, "_gate_adapter_fix",
+                        lambda role, error_logs, gate_dir:
+                        payloads.append(1) or SimpleNamespace(session_id=None))
+    assert f._final_quality_gate() is True
+    # One e2e entry despite the smoke fix re-arming the regression e2e:
+    # the tree never changed (statics memo + e2e suppressed memo hits).
+    assert len(e2e_calls) == 1
+    assert len(smoke_calls) == 3  # fail + flake retry + pass on same tree
+    assert len(payloads) == 1
 
 
 def test_gate_loop_memoizes_passed_tree(monkeypatch, tmp_path):
