@@ -91,6 +91,15 @@ these rules to stay on the critical path:
 ## Rules
 
 - Only modify vllm-ascend at {ascend_path} (never vLLM at {vllm_path})
+- **The flow's own checkout (the repo containing `main2main_flow/` — your
+  process's working directory, NOT {ascend_path}) is READ-ONLY.** It is the
+  grading harness that judges this work. Never create, modify, or delete any
+  file there — especially the grading inputs
+  `main2main_flow/scripts/utils/release_ut_baseline.json` (release-lane UT
+  known-failure baseline) and `main2main_flow/test_policy.json` (e2e case
+  scope). Editing test scope or pass/fail leniency to make a check green is
+  tampering, not fixing — fix the `vllm_ascend/` code instead. Your only
+  write targets are {ascend_path} and the output paths this prompt names.
 - Do NOT run git add, git commit, git reset, or git checkout in vllm-ascend
 - Use `vllm_version_is("{release_tag}")` for version boundaries — never `hasattr` or `try/except`
 - All branches of a version guard must have identical function signatures

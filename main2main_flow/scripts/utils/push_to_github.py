@@ -36,6 +36,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from main2main_flow.scripts.utils import ci_config_guard
 from main2main_flow.scripts.utils.utils import run_git, ts_print
 
 DEFAULT_WORKSPACE_DIR = Path(__file__).parent.parent.parent / "workspace"
@@ -383,6 +384,9 @@ def _force_squash(ascend_path: Path, base_ref: str, branch: str) -> None:
             return
         subprocess.run(["git", "reset", "--soft", base_ref],
                        cwd=str(ascend_path), capture_output=True)
+        # Backstop: a .github/workflows edit must never reach the pushed
+        # commit (run 35513059821's PAT-scope rejection).
+        ci_config_guard.strip(ascend_path, "push force-squash")
         subprocess.run(["git", "add", "-A"], cwd=str(ascend_path), capture_output=True)
         # -s: upstream requires DCO on every commit; the squash commit is
         # the PR's only commit, so it must carry the sign-off itself
@@ -414,6 +418,17 @@ def _git_push(ascend_path: Path, branch: str, base_ref: str = "") -> None:
         return
 
     _force_squash(ascend_path, base_ref, branch)
+    # Preflight: if a committed forbidden .github change somehow survived
+    # the two squash strips, abort LOUDLY instead of burning the push
+    # retries on GitHub's PAT-scope rejection (run 35513059821).  Only the
+    # two flow-owned pointer files may change under .github/.
+    bad = ci_config_guard.committed_violations(ascend_path, base_ref)
+    if bad:
+        raise SystemExit(
+            f"[push] refusing to push: the commit contains forbidden "
+            f".github edit(s) ({', '.join(bad[:3])}) — only "
+            f"vllm-main-verified.commit and vllm-release-tag.commit may "
+            f"change; fix the task in code")
     _push_with_lease(ascend_path, branch)
 
 

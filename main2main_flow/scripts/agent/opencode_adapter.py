@@ -22,6 +22,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from main2main_flow.scripts.agent.toolguard import guard_env
+from main2main_flow.scripts.utils import ci_config_guard as ci_guard
 from main2main_flow.scripts.utils.utils import ts_print
 
 _AGENT_DIR = Path(__file__).parent.parent.parent / "agents"
@@ -239,83 +240,84 @@ def run_opencode_adapter(inputs: dict[str, Any],
     raw_path = step_path / "opencode_raw.jsonl" if step_path else None
     stderr_path = step_path / "opencode_stderr.log" if step_path else None
     new_session_id = session_id
-
-    if log_path:
-        log_path.write_text("")
-    if raw_path:
-        raw_path.write_text("")
-    if stderr_path:
-        stderr_path.write_text("")
-
+    # CI-config guard: bracket the session so a .github/workflows edit
+    # (the "remove failing tests from the nightly config" cheat) never
+    # survives to be verified green — see scripts/utils/ci_config_guard.py.
+    ascend_path = inputs.get("ascend_path", "")
+    ci_snap = ci_guard.snapshot(ascend_path) if ascend_path else {}
     all_lines: list[str] = []
     last_reason: _StopReason | None = None
+    try:
+        for attempt in range(_MAX_STALE_RETRIES + 1):
+            _print_prompt(prompt, attempt, refs_loaded)
+            if log_path:
+                _log_prompt(prompt, attempt, log_path)
 
-    for attempt in range(_MAX_STALE_RETRIES + 1):
-        _print_prompt(prompt, attempt, refs_loaded)
-        if log_path:
-            _log_prompt(prompt, attempt, log_path)
+            lines, reason, sid, rc = _run_once(prompt, log_path, raw_path, stderr_path,
+                                               session_id, model=role_model)
+            all_lines.extend(lines)
+            last_reason = reason
+            if sid:
+                new_session_id = sid
+                session_id = sid  # retries also use the same session
 
-        lines, reason, sid, rc = _run_once(prompt, log_path, raw_path, stderr_path,
-                                           session_id, model=role_model)
-        all_lines.extend(lines)
-        last_reason = reason
-        if sid:
-            new_session_id = sid
-            session_id = sid  # retries also use the same session
+            # A session-budget kill is final: the retry loop must not re-enter
+            # (that is how a "60min cap" became an 80min attempt-1 in run
+            # 34018086282 — the kill's rc=-9 was retried as a hard failure).
+            if reason == "total_timeout":
+                ts_print(f"\n[opencode] SESSION BUDGET exhausted "
+                         f"({_TIMEOUT_MINUTES}min) — stopping; partial edits "
+                         f"are kept for pre_ci / the next fix round", flush=True)
+                break
 
-        # A session-budget kill is final: the retry loop must not re-enter
-        # (that is how a "60min cap" became an 80min attempt-1 in run
-        # 34018086282 — the kill's rc=-9 was retried as a hard failure).
-        if reason == "total_timeout":
-            ts_print(f"\n[opencode] SESSION BUDGET exhausted "
-                     f"({_TIMEOUT_MINUTES}min) — stopping; partial edits "
-                     f"are kept for pre_ci / the next fix round", flush=True)
-            break
+            # Treat opencode exit != 0 or zero JSON events as a hard failure,
+            # not a "no-op" (prevents silent false-success when the agent
+            # crashes on launch, e.g. bad API key or model not available).
+            if rc != 0 or not lines:
+                ts_print(f"\n[opencode] HARD FAILURE: exit={rc}, events={len(lines)}", flush=True)
+                # Print the command that was run (redact prompt content — it's in log)
+                ts_print(f"[opencode] cmd: opencode run --format json --model {role_model or _DEFAULT_MODEL} "
+                         f"--auto {'--session ' + (session_id or '') if session_id else ''}"
+                         f" '<prompt {len(prompt)} chars>'", flush=True)
+                if stderr_path and stderr_path.exists():
+                    err_text = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+                    if err_text.strip():
+                        ts_print(f"[opencode] stderr tail:\n{err_text.strip()}", flush=True)
+                last_reason = last_reason or "hard_failure"
+                if attempt < _MAX_STALE_RETRIES:
+                    if session_id:
+                        # Session exists - continue it with a short prompt.
+                        prompt = _build_continue_prompt(inputs, attempt + 1)
+                    else:
+                        # No session was ever established (launch crash before
+                        # sessionID event).  A continue prompt would tell the model
+                        # to "re-read from session history" that doesn't exist.
+                        # Re-send the full base prompt so the model has context.
+                        ts_print(f"\n[opencode] no session established - re-sending full prompt "
+                                 f"(retry {attempt + 1})", flush=True)
+                        prompt = base_prompt
+                    continue
+                break
 
-        # Treat opencode exit != 0 or zero JSON events as a hard failure,
-        # not a "no-op" (prevents silent false-success when the agent
-        # crashes on launch, e.g. bad API key or model not available).
-        if rc != 0 or not lines:
-            ts_print(f"\n[opencode] HARD FAILURE: exit={rc}, events={len(lines)}", flush=True)
-            # Print the command that was run (redact prompt content — it's in log)
-            ts_print(f"[opencode] cmd: opencode run --format json --model {role_model or _DEFAULT_MODEL} "
-                     f"--auto {'--session ' + (session_id or '') if session_id else ''}"
-                     f" '<prompt {len(prompt)} chars>'", flush=True)
-            if stderr_path and stderr_path.exists():
-                err_text = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
-                if err_text.strip():
-                    ts_print(f"[opencode] stderr tail:\n{err_text.strip()}", flush=True)
-            last_reason = last_reason or "hard_failure"
-            if attempt < _MAX_STALE_RETRIES:
-                if session_id:
-                    # Session exists - continue it with a short prompt.
-                    prompt = _build_continue_prompt(inputs, attempt + 1)
-                else:
-                    # No session was ever established (launch crash before
-                    # sessionID event).  A continue prompt would tell the model
-                    # to "re-read from session history" that doesn't exist.
-                    # Re-send the full base prompt so the model has context.
-                    ts_print(f"\n[opencode] no session established - re-sending full prompt "
-                             f"(retry {attempt + 1})", flush=True)
-                    prompt = base_prompt
+            if reason is None:
+                break
+
+            if reason in ("stale_timeout", "event_stale_timeout") and attempt < _MAX_STALE_RETRIES:
+                retry = attempt + 1
+                ts_print(f"\n[opencode] retrying after {reason} ({retry}/{_MAX_STALE_RETRIES})", flush=True)
+                prompt = _build_continue_prompt(inputs, retry)
                 continue
+
+            if stderr_path and stderr_path.exists():
+                stderr_content = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+                if stderr_content:
+                    ts_print(f"\n[opencode] stderr tail:\n{stderr_content}", flush=True)
             break
 
-        if reason is None:
-            break
-
-        if reason in ("stale_timeout", "event_stale_timeout") and attempt < _MAX_STALE_RETRIES:
-            retry = attempt + 1
-            ts_print(f"\n[opencode] retrying after {reason} ({retry}/{_MAX_STALE_RETRIES})", flush=True)
-            prompt = _build_continue_prompt(inputs, retry)
-            continue
-
-        if stderr_path and stderr_path.exists():
-            stderr_content = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
-            if stderr_content:
-                ts_print(f"\n[opencode] stderr tail:\n{stderr_content}", flush=True)
-        break
-
+    finally:
+        if ascend_path:
+            ci_guard.restore(ascend_path, ci_snap,
+                             f"adapter session ({inputs.get('role', 'adapter')})")
     result = _build_result(step_path, inputs.get("ascend_path", ""), "".join(all_lines))
     result.session_id = new_session_id
     if last_reason and not result.step_summary:

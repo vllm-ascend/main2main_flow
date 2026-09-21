@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter, run_opencode_review
+from main2main_flow.scripts.utils import ci_config_guard
 from main2main_flow.scripts.utils.detect_commits import detect
 from main2main_flow.scripts.utils.plan_steps import run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
@@ -2882,6 +2883,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 and int(step_count.stdout.strip() or "0") > 1):
             run_git(ascend_path, "reset", "--soft",
                     self.state.original_ascend_ref)
+            # Backstop: a .github/workflows edit must never reach the pushed
+            # commit (run 35513059821's PAT-scope rejection).  The adapter
+            # sessions are already bracketed; this catches anything else.
+            ci_config_guard.strip(ascend_path, "final squash")
             run_git(ascend_path, "add", "-A")
             target = self.state.target_commit or self.state.cur_vllm_commit
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
