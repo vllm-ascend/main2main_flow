@@ -31,6 +31,20 @@ HasNoCommit = "HasNoCommit"
 import os as _os
 _ws_env = _os.environ.get("MAIN2MAIN_WORKSPACE", "")
 WORKSPACE_DIR = Path(_ws_env) if _ws_env else (Path(__file__).parent.parent.parent / "workspace")
+# Interface producer artifacts live outside volatile workspace/ and source trees.
+INTERFACE_QA_REPORT_FILE = "qa-review.md"
+INTERFACE_METADATA_FILE = "run-metadata.json"
+INTERFACE_STATUS_FILE = "run-status.json"
+INTERFACE_SUMMARY_FILE = "summary.md"
+INTERFACE_CACHE_MANIFEST_FILE = "cache-manifest.json"
+INTERFACE_SCAN_LOG_FILE = "scan.log"
+INTERFACE_REPORT_DIR = "report"
+INTERFACE_REPORT_FILES = (
+    "main2main-range-report.json",
+    "main2main-range-report.md",
+    "main2main-introduced-breaks.csv",
+    "main2main-all-findings.csv",
+)
 DETECT_FILE = "detect.json"
 STEPS_FILE = "steps.json"
 STEPS_DIR = "steps"
