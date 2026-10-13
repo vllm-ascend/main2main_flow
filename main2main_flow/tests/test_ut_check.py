@@ -37,6 +37,23 @@ def test_build_ut_env_pure_cpu_and_paths(tmp_path):
     assert env["PATH"].startswith(str(fake_bin))
 
 
+def test_build_ut_env_scrubs_production_csrc_cache_leak(
+        tmp_path, monkeypatch):
+    # Production main2main's csrc-l1-restore exports these into GITHUB_ENV;
+    # upstream cpu-UT never sees them (all csrc steps gated npu != cpu) and
+    # VLLM_ASCEND_BUILD_CACHE_DIR defeats the CMake default that
+    # test_build_cache asserts (run 38383045302 step-1).
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    monkeypatch.setenv("VLLM_ASCEND_BUILD_CACHE_DIR",
+                       str(tmp_path / "vllm-ascend-incremental-build-cache"))
+    monkeypatch.setenv("VLLM_ASCEND_BUILD_CACHE_EVENT_LOG",
+                       str(tmp_path / "csrc-l1-job.jsonl"))
+    env = _build_ut_env(repo, tmp_path / "vllm", tmp_path / "fakebin")
+    assert "VLLM_ASCEND_BUILD_CACHE_DIR" not in env
+    assert "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG" not in env
+
+
 def test_ensure_ut_venv_reuses_matching_marker(tmp_path, monkeypatch):
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)

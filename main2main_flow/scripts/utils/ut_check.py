@@ -368,6 +368,18 @@ def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict
     plugin resolves even when the caller's environment doesn't carry it.
     """
     env = os.environ.copy()
+    # Production main2main runs csrc-l1-restore in the SAME job, which
+    # exports these into GITHUB_ENV (prepare_csrc_l1_restore.py) — every
+    # later step inherits them.  Upstream's cpu-UT lane never sees them
+    # (every csrc cache step there is gated `npu_type != 'cpu'`), and
+    # VLLM_ASCEND_BUILD_CACHE_DIR defeats the CMake
+    # `VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache` default
+    # that tests/ut/_tools/test_build_cache.py asserts (run 38383045302
+    # step-1).  The UT batch must judge the tree the way upstream CI
+    # does, so strip the workflow's own cache plumbing from the env.
+    for leaked in ("VLLM_ASCEND_BUILD_CACHE_DIR",
+                   "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"):
+        env.pop(leaked, None)
     ascend_abs = str(repo.resolve())
     vllm_abs = str(Path(vllm_path).resolve())
     flow_root = str(Path(__file__).resolve().parents[3])
