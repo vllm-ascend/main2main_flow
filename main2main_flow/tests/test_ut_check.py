@@ -43,14 +43,54 @@ def test_ensure_ut_venv_reuses_matching_marker(tmp_path, monkeypatch):
     py.write_text("")
     (venv / "m2m_meta.json").write_text(json.dumps({"numpy_spec": "==1.26.4"}))
 
-    def _boom(*a, **k):
-        raise AssertionError("venv must be reused, not recreated")
+    # reuse still probes the actual numpy (run 38220121641: marker stayed
+    # healthy while system numpy drifted under the venv) — but must NOT
+    # recreate
+    calls = []
 
-    monkeypatch.setattr(ut_check.subprocess, "run", _boom)
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "import numpy" in str(cmd[-1]):
+            return SimpleNamespace(returncode=0, stdout="1.26.4\n", stderr="")
+        raise AssertionError("venv creation on the reuse path")
+
+    monkeypatch.setattr(ut_check.subprocess, "run", _fake_run)
     monkeypatch.setenv("MAIN2MAIN_UT_VENV", str(venv))
     got_dir, got_py = _ensure_ut_venv("==1.26.4")
     assert got_dir == venv
     assert got_py == str(py)
+    assert calls
+
+
+def test_ensure_ut_venv_recreates_when_numpy_drifted(tmp_path, monkeypatch):
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("")
+    (venv / "m2m_meta.json").write_text(json.dumps({"numpy_spec": "==1.26.4"}))
+
+    calls = []
+    probes = ["2.3.5", "1.26.4"]  # reuse probe drifted, post-install healthy
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "import numpy" in str(cmd[-1]):
+            v = probes.pop(0) if len(probes) > 1 else probes[0]
+            return SimpleNamespace(returncode=0, stdout=f"{v}\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    ok = SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(ut_check.subprocess, "run", _fake_run)
+    pip_args = []
+    monkeypatch.setattr(ut_check, "pip_install_with_fallback",
+                        lambda py, args: pip_args.append(args) or ok)
+    monkeypatch.setenv("MAIN2MAIN_UT_VENV", str(venv))
+    got_dir, got_py = _ensure_ut_venv("==1.26.4")
+    assert got_dir == venv
+    assert got_py == str(venv / "bin" / "python")
+    assert any("venv" in str(c) for c in calls)  # recreated, not reused
+    assert any("--ignore-installed" in a for a in pip_args)
+    assert json.loads((venv / "m2m_meta.json").read_text())["numpy_spec"] \
+        == "==1.26.4"
 
 
 def test_ensure_ut_venv_recreates_on_spec_mismatch(tmp_path, monkeypatch):
@@ -64,6 +104,8 @@ def test_ensure_ut_venv_recreates_on_spec_mismatch(tmp_path, monkeypatch):
 
     def _fake_run(cmd, **kwargs):
         calls.append(cmd)
+        if "import numpy" in str(cmd[-1]):
+            return SimpleNamespace(returncode=0, stdout="1.26.4\n", stderr="")
         return ok
 
     monkeypatch.setattr(ut_check.subprocess, "run", _fake_run)

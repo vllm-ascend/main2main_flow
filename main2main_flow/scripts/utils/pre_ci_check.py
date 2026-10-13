@@ -29,7 +29,9 @@ from main2main_flow.scripts.utils.utils import (run_format_sh, run_git,
                                                 pip_install_with_fallback,
                                                 ts_print, WORKSPACE_DIR)
 from main2main_flow.scripts.utils.ut_check import (check_ut as _check_ut,
-                                                   _triton_numpy_spec)  # noqa: E402
+                                                   _numpy_drifted,
+                                                   _triton_numpy_spec,
+                                                   _venv_numpy_version)  # noqa: E402
 
 _TEMP_PATTERNS = [
     ".log",
@@ -250,25 +252,39 @@ def _ensure_mypy_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
     Mirrors ut_check's _ensure_ut_venv: the venv lives across pre_ci
     attempts and steps (the runner is ephemeral, so no end-of-run cleanup
     is needed).  Reuse requires bin/python to exist AND the numpy spec in
-    the marker to match triton-ascend's current constraint.  Any failure
-    falls back to the system mypy (returns (None, "")).
+    the marker to match triton-ascend's current constraint AND the
+    actually importable numpy to satisfy it — the marker can look healthy
+    while the venv never owned its numpy (pip "already satisfied" behind
+    --system-site-packages) and drifts with system upgrades, rebuilding
+    instead of linting wrong (run 38220121641).  Any failure falls back
+    to the system mypy (returns (None, "")).
     """
     venv_dir = _mypy_base_dir()
     venv_python = venv_dir / "bin" / "python"
     if venv_python.exists():
+        reason = ""
         try:
             meta = json.loads((venv_dir / _MYPY_VENV_MARKER).read_text(
                 encoding="utf-8"))
-            if meta.get("numpy_spec") == target_numpy_spec:
-                ts_print(f"[pre_ci] mypy: reusing persistent venv at {venv_dir}")
-                return venv_dir, str(venv_python)
-            ts_print(f"[pre_ci] mypy: persistent venv numpy spec mismatch "
-                     f"({meta.get('numpy_spec')!r} != {target_numpy_spec!r}) "
-                     "— recreating")
+            if meta.get("numpy_spec") != target_numpy_spec:
+                reason = (f"numpy spec mismatch ({meta.get('numpy_spec')!r} "
+                          f"!= {target_numpy_spec!r})")
         except Exception:
-            ts_print("[pre_ci] mypy: persistent venv marker unreadable "
-                     "— recreating")
-        shutil.rmtree(venv_dir, ignore_errors=True)
+            reason = "marker unreadable"
+        if not reason and target_numpy_spec:
+            # Probe the ACTUAL numpy, not just the marker: e2e's vllm
+            # install upgraded system numpy 1.26.4 -> 2.3.5 mid-run and the
+            # lint venv drifted with it for three rounds (38220121641).
+            installed = _venv_numpy_version(venv_python)
+            if _numpy_drifted(target_numpy_spec, installed):
+                reason = (f"installed numpy {installed or 'MISSING'} "
+                          f"violates numpy{target_numpy_spec}")
+        if reason:
+            ts_print(f"[pre_ci] mypy: persistent venv {reason} — recreating")
+            shutil.rmtree(venv_dir, ignore_errors=True)
+        else:
+            ts_print(f"[pre_ci] mypy: reusing persistent venv at {venv_dir}")
+            return venv_dir, str(venv_python)
 
     ts_print(f"[pre_ci] mypy: creating persistent lint venv at {venv_dir} "
              f"(numpy{target_numpy_spec} from triton-ascend, no vllm package)")
@@ -286,10 +302,17 @@ def _ensure_mypy_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
         if target_numpy_spec:
             # A failed install silently leaves system numpy 2.x in the venv,
             # reproducing the false positives — treat it as no venv.
+            # --ignore-installed: behind --system-site-packages a satisfying
+            # system numpy turns this into a pip no-op ("already satisfied")
+            # and the venv never owns its pin — the e2e vllm install then
+            # upgrades system numpy out from under it (run 38220121641:
+            # 1.26.4 -> 2.3.5 mid-run).  Forcing the wheel into the venv
+            # makes the pin immune to system-side flips.
             try:
                 r2 = pip_install_with_fallback(
                     venv_python,
-                    [f"numpy{target_numpy_spec}", "--no-build-isolation"])
+                    ["--ignore-installed", f"numpy{target_numpy_spec}",
+                     "--no-build-isolation"])
             except subprocess.TimeoutExpired:
                 ts_print("[pre_ci] mypy: WARNING numpy install TIMED OUT — "
                          "falling back to system mypy")
@@ -298,6 +321,15 @@ def _ensure_mypy_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
                 ts_print(f"[pre_ci] mypy: WARNING numpy install FAILED "
                          f"({r2.stderr.strip()[:200]}) — falling back "
                          "to system mypy")
+                return None, ""
+            # pip exiting 0 is not proof the wheel landed in the venv;
+            # the probe catches any remaining silent no-op.
+            if _numpy_drifted(target_numpy_spec,
+                              _venv_numpy_version(venv_python)):
+                ts_print(f"[pre_ci] mypy: WARNING post-install numpy probe "
+                         f"violates numpy{target_numpy_spec} — falling "
+                         "back to system mypy")
+                shutil.rmtree(venv_dir, ignore_errors=True)
                 return None, ""
         (venv_dir / _MYPY_VENV_MARKER).write_text(
             json.dumps({"numpy_spec": target_numpy_spec}),
@@ -390,16 +422,10 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
     if vllm_path and target_numpy_spec:
         _, venv_python = _ensure_mypy_venv(target_numpy_spec)
     if venv_python:
-        # Verify the actual installed numpy version (reused venvs included —
-        # a stale install behind a matching marker must stay visible).
-        try:
-            vr = subprocess.run(
-                [venv_python, "-c", "import numpy; print(numpy.__version__)"],
-                capture_output=True, text=True, timeout=30,
-            )
-        except subprocess.TimeoutExpired:
-            vr = None
-        installed = vr.stdout.strip() if (vr and vr.returncode == 0) else "?"
+        # Re-report the actual numpy: _ensure_mypy_venv already probed it
+        # and rebuilt on drift, so this stays visible in the log either
+        # way and still warns if the rebuild itself failed.
+        installed = _venv_numpy_version(venv_python) or "?"
         ts_print(f"[pre_ci] mypy: venv numpy installed: {installed} "
                  f"(expected spec numpy{target_numpy_spec})")
         # Check spec satisfaction - a compound spec like ">=1.26.4,<2.1"

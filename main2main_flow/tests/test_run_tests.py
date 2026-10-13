@@ -513,7 +513,7 @@ def test_selection_error_still_importable():
 def test_drop_missing_cases(tmp_path: Path) -> None:
     (tmp_path / "tests" / "e2e" / "one_card").mkdir(parents=True)
     real = "tests/e2e/one_card/test_real.py"
-    (tmp_path / real).write_text("")
+    (tmp_path / real).write_text("def test_method():\n    pass\n")
     node = real + "::TestClass::test_method"
     phantom = "tests/e2e/one_card/test_phantom.py"
     kept = rt._drop_missing_cases([real, node, phantom], tmp_path)
@@ -524,3 +524,156 @@ def test_drop_missing_cases_reports_and_keeps_existing(tmp_path: Path, capsys) -
     phantom = "tests/e2e/one_card/test_phantom.py"
     assert rt._drop_missing_cases([phantom], tmp_path) == []
     assert "test_phantom.py" in capsys.readouterr().out
+
+
+# ---- case-level drop: file exists but the selected function doesn't -------
+# Run 38220121641: test_eagle3_sliding_window — the file survived an upstream
+# rename, the selected function didn't; file-level check passed it, pytest
+# exit-4'd, and the step wedged (the adapter cannot add tests).
+
+def test_drop_missing_cases_function_missing_dropped(
+        tmp_path: Path, capsys) -> None:
+    rel = "tests/e2e/one_card/test_spec_decode.py"
+    (tmp_path / rel).parent.mkdir(parents=True)
+    (tmp_path / rel).write_text("def test_eagle3_basic():\n    pass\n")
+    case = rel + "::test_eagle3_sliding_window"
+    assert rt._drop_missing_cases([case], tmp_path) == []
+    assert "test_eagle3_sliding_window" in capsys.readouterr().out
+
+
+def test_drop_missing_cases_parametrized_present_kept(tmp_path: Path) -> None:
+    rel = "tests/e2e/one_card/test_pipeline_parallel.py"
+    (tmp_path / rel).parent.mkdir(parents=True)
+    (tmp_path / rel).write_text(
+        "def test_models_pp2_dp2(mode, tp, dp, model):\n    pass\n")
+    case = rel + "::test_models_pp2_dp2[mp-2-2-deepseek-ai/DeepSeek-V2-Lite-Chat]"
+    assert rt._drop_missing_cases([case], tmp_path) == [case]
+
+
+def test_drop_missing_cases_unreadable_file_fails_open(tmp_path: Path) -> None:
+    # Unreadable file: keep the case and let pytest surface the problem.
+    rel = "tests/e2e/one_card/test_x.py"
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True)
+    p.mkdir()  # a directory where the test file should be → read_text fails
+    case = rel + "::test_y"
+    assert rt._drop_missing_cases([case], tmp_path) == [case]
+
+
+# ---- download env-flake: terminal-error-aware classification ---------------
+# Run 38220121641: the modelscope download failure itself arrives wrapped in
+# a full traceback (server/DP-worker children tee their output into the test
+# log), so the old "traceback + exception name" guard refused to classify
+# pure download failures — three server-based tests blocked step-1 as fake
+# code bugs while the same failure in pytest E-form was env-flaked.
+
+_DOWNLOAD_TRACEBACK = [
+    "Traceback (most recent call last):",
+    '  File "/usr/local/python3.12.13/lib/python3.12/site-packages/vllm/'
+    'transformers_utils/repo_utils.py", line 299, in get_model_path',
+    "    return snapshot_download(model_id=model, **common_kwargs)",
+    '  File "/usr/local/python3.12.13/lib/python3.12/site-packages/modelscope/'
+    'hub/snapshot_download.py", line 295, in _snapshot_download',
+    "    raise ValueError(",
+    "ValueError: Cannot find the requested files in the cached path and "
+    "outgoing traffic has been disabled. To enable look-ups and downloads "
+    "online, set 'local_files_only' to False.",
+]
+
+
+def test_download_pure_modelscope_traceback_classified(tmp_path: Path) -> None:
+    log = _write_log(tmp_path, "\n".join(_DOWNLOAD_TRACEBACK) + "\n")
+    assert rt._is_model_download_failure(log)
+
+
+def test_download_with_e_form_real_error_not_classified(tmp_path: Path) -> None:
+    # run 31952700363 shape: a real raised error next to download noise stays
+    # blocking (the ANSI-stripped E-form must still be seen).
+    log = _write_log(tmp_path, "\n".join(
+        _DOWNLOAD_TRACEBACK
+        + ["E   \x1b[31mValueError\x1b[0m: too many values to unpack "
+           "(expected 20)"]) + "\n")
+    assert not rt._is_model_download_failure(log)
+
+
+def test_download_with_raw_terminal_real_error_not_classified(
+        tmp_path: Path) -> None:
+    log = _write_log(tmp_path, "\n".join(_DOWNLOAD_TRACEBACK + [
+        "Traceback (most recent call last):",
+        "    ...",
+        "ValueError: too many values to unpack (expected 20)",
+    ]) + "\n")
+    assert not rt._is_model_download_failure(log)
+
+
+def test_download_server_wrapper_only_classified(tmp_path: Path) -> None:
+    # pause_resume shape: the server child died of the download error (raw
+    # traceback teed) and the harness re-raised a generic wrapper.
+    log = _write_log(tmp_path, "\n".join(_DOWNLOAD_TRACEBACK + [
+        "E   RuntimeError: vllm server exited during startup (exit code 1); "
+        "see server logs"]) + "\n")
+    assert rt._is_model_download_failure(log)
+
+
+def test_download_dp_worker_wrapper_only_classified(tmp_path: Path) -> None:
+    # four_card pipeline_parallel shape.
+    log = _write_log(tmp_path, "\n".join(_DOWNLOAD_TRACEBACK + [
+        "E   RuntimeError: Failed to start data parallel worker 0"]) + "\n")
+    assert rt._is_model_download_failure(log)
+
+
+def test_server_wrapper_without_download_signature_not_classified(
+        tmp_path: Path) -> None:
+    # Child output not teed — the death cannot be attributed, stays blocking.
+    log = _write_log(tmp_path, "E   RuntimeError: vllm server exited during "
+                               "startup (exit code 1)\n")
+    assert not rt._is_model_download_failure(log)
+
+
+def test_download_no_download_signature_not_classified(tmp_path: Path) -> None:
+    log = _write_log(tmp_path, "E   AssertionError: garbage output\n")
+    assert not rt._is_model_download_failure(log)
+
+
+# ---- selection-leak safety net: exit 4 + "ERROR: not found:" --------------
+# Parameter-set drift keeps the function name, so the static case-level drop
+# can't see it; the runtime net turns the unfixable exit-4 into an env flake.
+
+def test_run_one_test_not_found_becomes_env_flake(monkeypatch,
+                                                  tmp_path: Path) -> None:
+    log = _write_log(
+        tmp_path,
+        "collecting ... ERROR: not found: tests/e2e/pull_request/two_card/"
+        "spec_decode/test_spec_decode.py::test_eagle3_sliding_window\n",
+        "nf.log")
+    summary = _write_log(tmp_path, "", "nf-summary.json")
+    monkeypatch.setattr(rt, "_run_to_log", lambda *a, **k: 4)
+    monkeypatch.setattr(rt, "_run_summary",
+                        lambda *a, **k: {"summary": {"code_bugs": [],
+                                                     "env_flakes": []},
+                                         "summary_error": None})
+    result = _run_one_test(
+        ["pytest"], log, summary,
+        "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py::"
+        "test_eagle3_sliding_window",
+        "0,1", tmp_path / "ci", tmp_path, 0, 1, {},
+        is_remote=False, is_mock=False)
+    assert result["ci_result"] == "env_flake_pass"
+    assert result["run_suite_exit_code"] == 4
+
+
+def test_run_one_test_exit4_usage_error_stays_failed(monkeypatch,
+                                                     tmp_path: Path) -> None:
+    log = _write_log(tmp_path, "ERROR: usage: pytest [options] [file_or_tests]\n",
+                     "u4.log")
+    summary = _write_log(tmp_path, "", "u4-summary.json")
+    monkeypatch.setattr(rt, "_run_to_log", lambda *a, **k: 4)
+    monkeypatch.setattr(rt, "_run_summary",
+                        lambda *a, **k: {"summary": {"code_bugs": [],
+                                                     "env_flakes": []},
+                                         "summary_error": None})
+    result = _run_one_test(
+        ["pytest"], log, summary, "tests/e2e/pull_request/one_card/test_x.py",
+        "0,1", tmp_path / "ci", tmp_path, 0, 1, {},
+        is_remote=False, is_mock=False)
+    assert result["ci_result"] == "failed"

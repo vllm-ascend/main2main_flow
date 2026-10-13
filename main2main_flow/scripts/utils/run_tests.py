@@ -1026,18 +1026,37 @@ _MODEL_DOWNLOAD_FAILURE_RE = re.compile(
     r"|(?:modelscope|huggingface).*connection (?:error|failed)",
     re.IGNORECASE)
 
-# A real (non-download) exception after a traceback means the log carries a
-# genuine code/compile bug NEXT TO the download noise — run 31952700363:
-# an offline safetensors warning (Qwen3-8B-speculator.eagle3) appeared in the
-# same log as the npu_fx_compiler "too many values to unpack (expected 20)"
-# crash, and the download signature alone misclassified the whole test as an
-# env flake, hiding the real bug from the adapter.
-_REAL_ERROR_SIGNATURES = re.compile(
-    r"Traceback \(most recent call last\).*?(?:ValueError|RuntimeError|"
+# A real (non-download) raised error means the log carries a genuine
+# code/compile bug NEXT TO the download noise — run 31952700363: an offline
+# safetensors warning (Qwen3-8B-speculator.eagle3) appeared in the same log
+# as the npu_fx_compiler "too many values to unpack (expected 20)" crash,
+# and the download signature alone misclassified the whole test as an env
+# flake, hiding the real bug from the adapter.
+#
+# The raised error is judged from TERMINAL error lines, not "any exception
+# name after a Traceback header": the download failure itself arrives
+# wrapped in a full traceback (modelscope raises "ValueError: Cannot find
+# the requested files..." from snapshot_download — run 38220121641), so the
+# traceback + exception-name shape matches the download error too.  A
+# terminal line is the raised exception at column 0 (raw subprocess
+# traceback, e.g. a server child process whose output the conftest tees)
+# or pytest's rendered "E   ValueError: ..." form once ANSI codes are
+# stripped.  Only a terminal error that is NOT itself the download error
+# counts as real.
+_TERMINAL_ERROR_MSG_RE = re.compile(
+    r"^(?:E\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:ValueError|RuntimeError|"
     r"TypeError|KeyError|AttributeError|AssertionError|ImportError|"
-    r"IndexError|OverflowError|NameError|NotImplementedError|EngineDeadError)",
-    re.DOTALL | re.IGNORECASE,
-)
+    r"IndexError|OverflowError|NameError|NotImplementedError|"
+    r"EngineDeadError): ",
+    re.MULTILINE)
+
+# Symptom wrappers re-raise a CHILD process's death (vllm server / DP
+# worker): the real cause and its traceback appear elsewhere in the same
+# log.  They are effects, not causes — never count them as the real error.
+_SYMPTOM_WRAPPER_RE = re.compile(
+    r"vllm server exited during startup"
+    r"|Server at 127\.0\.0\.1 exited unexpected"
+    r"|Failed to start data parallel worker")
 
 
 def _is_model_download_failure(log_path: Path) -> bool:
@@ -1046,14 +1065,38 @@ def _is_model_download_failure(log_path: Path) -> bool:
     try:
         if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
             return False
-        text = log_path.read_text(encoding="utf-8", errors="replace")
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                   errors="replace"))
         if not _MODEL_DOWNLOAD_FAILURE_RE.search(text):
             return False
-        if _REAL_ERROR_SIGNATURES.search(text):
-            ts_print("  [env-flake] real traceback exception found next to "
-                     "download noise — NOT classifying as env flake")
-            return False
+        for m in _TERMINAL_ERROR_MSG_RE.finditer(text):
+            nl = text.find("\n", m.start())
+            msg = text[m.start():] if nl == -1 else text[m.start():nl]
+            if _SYMPTOM_WRAPPER_RE.search(msg):
+                continue
+            if not _MODEL_DOWNLOAD_FAILURE_RE.search(msg):
+                ts_print("  [env-flake] real raised error found next to "
+                         f"download noise — NOT classifying as env flake: "
+                         f"{msg[:120]}")
+                return False
         return True
+    except OSError:
+        return False
+
+
+# pytest exits 4 with "ERROR: not found: <nodeid>" when a selected case
+# doesn't exist in the tree.  The static case-level drop in
+# _drop_missing_cases catches renamed/removed functions; this runtime net
+# catches what it can't see — parameter-set drift that keeps the function
+# name (run 38220121641: eagle3_sliding_window wedged the step here).  A
+# selection leak is never an adaptation bug: the adapter cannot add tests.
+def _is_selection_not_found(log_path: Path) -> bool:
+    """True if pytest exited 4 because a selected case doesn't exist."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        return "ERROR: not found:" in _ANSI_RE.sub(
+            "", log_path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return False
 
@@ -1242,7 +1285,8 @@ class TestSelectionError(RuntimeError):
 
 
 def _drop_missing_cases(test_files: list[str], ascend_path: Path) -> list[str]:
-    """Drop selected cases whose files don't exist in the ascend tree.
+    """Drop selected cases whose file or test function doesn't exist in the
+    ascend tree.
 
     The fixed policy set is maintained by hand; a case picked against a
     stale tree (run 34745454795: test_w8a16/test_w8a8_dynamic don't exist
@@ -1251,15 +1295,36 @@ def _drop_missing_cases(test_files: list[str], ascend_path: Path) -> list[str]:
     with no PR.  A missing file here is a policy bug, not an adaptation
     bug: drop it loudly and let the run degrade to fewer cases instead of
     wedging on an unfixable suite.
+
+    The file-level check is not enough (run 38220121641:
+    test_eagle3_sliding_window — the FILE exists but the selected function
+    was renamed upstream, same exit-4 wedge), so the bare function name of
+    each selected case is checked against the file too.  Parametrized ids
+    are reduced to the function name; parameter-set drift that keeps the
+    name is left to the pytest "not found" safety net in _run_one_test.
     """
     kept: list[str] = []
     for t in test_files:
         rel = t.split("::", 1)[0]
-        if (ascend_path / rel).exists():
-            kept.append(t)
+        path = ascend_path / rel
+        if not path.exists():
+            ts_print(f"[run_tests] WARNING: selected case not found in the ascend "
+                     f"tree, dropping (fix test_policy.json): {t}", flush=True)
             continue
-        ts_print(f"[run_tests] WARNING: selected case not found in the ascend "
-                 f"tree, dropping (fix test_policy.json): {t}", flush=True)
+        case = t.split("::", 1)[1] if "::" in t else ""
+        if case:
+            bare = case.split("[", 1)[0].rsplit("::", 1)[-1].strip()
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                kept.append(t)  # unreadable: let pytest surface it
+                continue
+            if bare and not re.search(rf"\bdef {re.escape(bare)}\s*\(", body):
+                ts_print(f"[run_tests] WARNING: selected case function "
+                         f"'{bare}' not found in {rel}, dropping "
+                         f"(fix test_policy.json): {t}", flush=True)
+                continue
+        kept.append(t)
     return kept
 
 
@@ -1318,6 +1383,12 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
     if ci_result == "failed" and _is_model_download_failure(log_path):
         ts_print(f"  [env-flake] {test}: model download/cache failure "
                  f"classified as environment, not blocking")
+        ci_result = "env_flake_pass"
+    if (ci_result != "passed" and exit_code == 4
+            and _is_selection_not_found(log_path)):
+        ts_print(f"  [env-flake] {test}: selected case does not exist in "
+                 f"the tree (pytest 'not found') — selection leak, not "
+                 f"blocking")
         ci_result = "env_flake_pass"
     if (ci_result != "passed" and exit_code == -9
             and _is_oom_hang_failure(log_path)):

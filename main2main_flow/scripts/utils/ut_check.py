@@ -217,31 +217,82 @@ def _triton_numpy_spec(label: str = "ut") -> str:
     return ""
 
 
+def _venv_numpy_version(venv_python: Path | str) -> str:
+    """numpy version actually importable inside the venv ("" if none).
+
+    The probe runs the venv python itself, so the resolution it reports
+    (--system-site-packages: venv site-packages first, then system) is
+    exactly what mypy/pytest will see.
+    """
+    try:
+        r = subprocess.run(
+            [str(venv_python), "-c",
+             "import numpy; print(numpy.__version__)"],
+            capture_output=True, text=True, timeout=30)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _numpy_drifted(spec: str, installed: str) -> bool:
+    """True when a venv's numpy no longer satisfies its pin.
+
+    The marker records only the *spec*, so a venv whose numpy really
+    lives in system site-packages (pip skipped the install as "already
+    satisfied" behind --system-site-packages) drifts silently when the
+    e2e vllm install upgrades system numpy — run 38220121641 12:02:
+    1.26.4 -> 2.3.5, three lint rounds of spurious [var-annotated]
+    errors.  Drift here means "recreating can fix it": an unimportable
+    numpy, or one outside the spec.  A 2.x the spec admits is NOT drift
+    (rebuilding would reinstall the same thing; _check_mypy keeps
+    warning about that case instead).
+    """
+    if not installed:
+        return True
+    try:
+        from packaging.specifiers import SpecifierSet
+        return not SpecifierSet(spec).contains(installed)
+    except Exception:
+        return False
+
+
 def _ensure_ut_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
     """Create-or-reuse the persistent UT venv; return (venv_dir, venv_python).
 
     The venv lives across pre_ci attempts and steps (the runner is
     ephemeral, so no end-of-run cleanup is needed).  Reuse requires
     bin/python to exist AND the numpy spec recorded in the marker to
-    match what the current triton-ascend metadata asks for.  Any
-    failure falls back to the system pytest (returns (None, "")).
+    match what the current triton-ascend metadata asks for AND the
+    actually importable numpy to satisfy it — the marker can look
+    healthy while the venv never owned its numpy (pip "already
+    satisfied" behind --system-site-packages) and drifts with system
+    upgrades (run 38220121641).  Any failure falls back to the system
+    pytest (returns (None, "")).
     """
     venv_dir = _ut_base_dir()
     venv_python = venv_dir / "bin" / "python"
     if venv_python.exists():
+        reason = ""
         try:
             meta = json.loads((venv_dir / _UT_VENV_MARKER).read_text(
                 encoding="utf-8"))
-            if meta.get("numpy_spec") == target_numpy_spec:
-                ts_print(f"[pre_ci] ut: reusing persistent venv at {venv_dir}")
-                return venv_dir, str(venv_python)
-            ts_print(f"[pre_ci] ut: persistent venv numpy spec mismatch "
-                     f"({meta.get('numpy_spec')!r} != "
-                     f"{target_numpy_spec!r}) — recreating")
+            if meta.get("numpy_spec") != target_numpy_spec:
+                reason = (f"numpy spec mismatch ({meta.get('numpy_spec')!r} "
+                          f"!= {target_numpy_spec!r})")
         except Exception:
-            ts_print("[pre_ci] ut: persistent venv marker unreadable "
-                     "— recreating")
-        shutil.rmtree(venv_dir, ignore_errors=True)
+            reason = "marker unreadable"
+        if not reason and target_numpy_spec:
+            # Probe the ACTUAL numpy, not just the marker.
+            installed = _venv_numpy_version(venv_python)
+            if _numpy_drifted(target_numpy_spec, installed):
+                reason = (f"installed numpy {installed or 'MISSING'} "
+                          f"violates numpy{target_numpy_spec}")
+        if reason:
+            ts_print(f"[pre_ci] ut: persistent venv {reason} — recreating")
+            shutil.rmtree(venv_dir, ignore_errors=True)
+        else:
+            ts_print(f"[pre_ci] ut: reusing persistent venv at {venv_dir}")
+            return venv_dir, str(venv_python)
 
     ts_print(f"[pre_ci] ut: creating persistent venv at {venv_dir} "
              f"(numpy{target_numpy_spec} from triton-ascend)")
@@ -257,9 +308,17 @@ def _ensure_ut_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
                      "falling back to system pytest")
             return None, ""
         if target_numpy_spec:
+            # --ignore-installed: behind --system-site-packages a satisfying
+            # system numpy turns this into a pip no-op ("already satisfied")
+            # and the venv never owns its pin — the e2e vllm install then
+            # upgrades system numpy out from under it (run 38220121641).
+            # Forcing the wheel into the venv makes the pin immune to
+            # system-side flips.
             try:
                 r2 = pip_install_with_fallback(
-                    venv_python, ["-q", f"numpy{target_numpy_spec}"])
+                    venv_python,
+                    ["-q", "--ignore-installed",
+                     f"numpy{target_numpy_spec}"])
             except subprocess.TimeoutExpired:
                 ts_print("[pre_ci] ut: WARNING numpy install TIMED OUT — "
                          "falling back to system pytest")
@@ -268,6 +327,15 @@ def _ensure_ut_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
                 ts_print("[pre_ci] ut: WARNING numpy install FAILED "
                          f"({r2.stderr.strip()[:200]}) — falling back "
                          "to system pytest")
+                return None, ""
+            # pip exiting 0 is not proof the wheel landed in the venv;
+            # the probe catches any remaining silent no-op.
+            if _numpy_drifted(target_numpy_spec,
+                              _venv_numpy_version(venv_python)):
+                ts_print(f"[pre_ci] ut: WARNING post-install numpy probe "
+                         f"violates numpy{target_numpy_spec} — falling "
+                         "back to system pytest")
+                shutil.rmtree(venv_dir, ignore_errors=True)
                 return None, ""
         (venv_dir / _UT_VENV_MARKER).write_text(
             json.dumps({"numpy_spec": target_numpy_spec}),
