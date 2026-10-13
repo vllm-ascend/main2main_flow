@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import (
@@ -394,6 +395,45 @@ def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict
 
 _RELEASE_UT_BASELINE_FILE = Path(__file__).parent / "release_ut_baseline.json"
 
+# Main-lane base-tree known failures, recorded once per run while the
+# ascend tree is still pristine (run 38383045302: step-1 burned all 5
+# attempts on 11 failures the adapter proved pre-existing — rope-cache
+# batch-order state and a runner-env build-cache assertion — none
+# caused by its 20-commit upstream delta).
+_MAIN_UT_BASELINE_FILE = WORKSPACE_DIR / "base_ut_failures.json"
+
+
+def _load_main_baseline() -> set[str]:
+    """Known-failing main-lane UT node IDs of this run's base tree.
+
+    Recorded by :func:`compute_base_ut_baseline` at kickoff, before the
+    adapter touches anything.  Matching failures are reported in the
+    detail and the full log but never block — the same contract as the
+    release lane's static ``release_ut_baseline.json``, except the
+    snapshot is per-run and per-tree (fresh mode's base = upstream main,
+    whose own UT health is upstream's, not the adapter's, to fix).
+    MAIN2MAIN_BASE_UT_BASELINE=0 disables the filtering (see everything).
+    """
+    if os.environ.get("MAIN2MAIN_BASE_UT_BASELINE", "1").lower() in (
+            "0", "false", "no", "off"):
+        return set()
+    try:
+        data = json.loads(
+            _MAIN_UT_BASELINE_FILE.read_text(encoding="utf-8"))
+        return set(data.get("excluded", []))
+    except Exception:
+        return set()
+
+
+def _node_matches_baseline(node: str, baseline: set[str]) -> bool:
+    """Exact node match, or the node's whole file is baselined.
+
+    ``tests/ut/x.py::test_a`` matches key ``tests/ut/x.py::test_a`` and
+    also a whole-file key ``tests/ut/x.py`` (which additionally absorbs
+    the file's collection error, whose node id is the bare path).
+    """
+    return node in baseline or node.split("::")[0] in baseline
+
 
 def _load_release_baseline() -> set[str]:
     """Known-failing release-lane UT node IDs (not adaptation-caused).
@@ -419,7 +459,8 @@ def _load_release_baseline() -> set[str]:
 
 def check_ut(repo: Path, vllm_path: str | Path | None = None,
              vllm_release_path: str | Path | None = None,
-             release_tag: str = "") -> dict:
+             release_tag: str = "",
+             known_failures: set[str] | None = None) -> dict:
     """Run the CPU-UT batch, aligned with CI's single-process execution.
 
     Runs the same CPU-routed tests/ut/* files as CI's CPU runner
@@ -435,7 +476,14 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     cpu-ut, so this is the only UT-level signal for the release lane.
     Release-batch node IDs listed in ``release_ut_baseline.json`` are
     reported but never block (pre-existing release-lane failures are not
-    the adaptation's fault).
+    the adaptation's fault).  Main-lane node IDs matching this run's
+    base-tree snapshot (``known_failures``, defaulting to the workspace
+    ``base_ut_failures.json`` recorded at kickoff by
+    :func:`compute_base_ut_baseline`) are reported but never block the
+    same way — run 38383045302 burned 5 attempts on failures the adapter
+    proved pre-existing on the fresh-mode base tree.  Pass an explicit
+    ``set()`` to disable the exemption (that is exactly how the snapshot
+    itself is taken).
 
     ``test_schedule_body_matches_pinned_release_tag`` is excluded on BOTH
     batches — see ``_BALANCE_TAG_BODY_TEST``.
@@ -488,6 +536,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
 
     all_violations: list[str] = []
     baseline_violations: list[str] = []
+    main_failed_nodes: list[str] = []
     all_files_clean = True
     details: list[str] = []
     # Nodeless ERROR lines are collection errors ("ERROR tests/ut/x.py -
@@ -499,6 +548,11 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     # Release-lane batches only: node IDs known to fail on the release
     # lane independent of the current adaptation (never block).
     baseline = _load_release_baseline() if vllm_release_path else set()
+    # Main lane: node IDs this run's pristine base tree already failed
+    # (see _load_main_baseline).  known_failures=None → load the snapshot;
+    # an explicit set() disables the exemption (snapshot mode).
+    main_baseline = (known_failures if known_failures is not None
+                     else _load_main_baseline())
 
     # Files known to pollute the shared process get their own
     # subprocess.  Verified on the A2 env: test_batch_invariant.py
@@ -621,6 +675,12 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                         if vllm_version and m.group(2) in baseline:
                             baseline_violations.append(v)
                             continue
+                        if not vllm_version:
+                            main_failed_nodes.append(m.group(2))
+                            if _node_matches_baseline(m.group(2),
+                                                      main_baseline):
+                                baseline_violations.append(v)
+                                continue
                         all_violations.append(v)
                         run_blocking += 1
                 if rr.returncode != 0:
@@ -642,19 +702,20 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
 
         baseline_note = ""
         if baseline_violations:
-            baseline_note = (f"; {len(baseline_violations)} release-lane "
-                             f"failure(s) matched the known baseline "
-                             f"(not blocking)")
-            ts_print(f"[pre_ci] ut: {len(baseline_violations)} release-lane "
-                     f"failure(s) matched the known baseline (not blocking)")
+            baseline_note = (f"; {len(baseline_violations)} failure(s) "
+                             f"matched the known baseline (not blocking)")
+            ts_print(f"[pre_ci] ut: {len(baseline_violations)} failure(s) "
+                     f"matched the known baseline (not blocking)")
 
+        failed_nodes = sorted(set(main_failed_nodes))
         if all_files_clean:
             ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean")
             return {"violations": [],
                     "detail": f"UT clean ({len(cpu_files)} files, "
                               f"single-process batch)" + baseline_note,
                     "log_path": str(log_path),
-                    "venv_python": str(venv_python) if venv_dir else ""}
+                    "venv_python": str(venv_python) if venv_dir else "",
+                    "failed_nodes": failed_nodes}
         ts_print(f"\n[pre_ci] ut: {len(all_violations)} failure(s):")
         for v in all_violations[:20]:
             ts_print(f"  {v}")
@@ -664,9 +725,70 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 "detail": f"{len(all_violations)} UT failure(s): "
                           + "; ".join(details) + baseline_note,
                 "log_path": str(log_path),
-                "venv_python": str(venv_python) if venv_dir else ""}
+                "venv_python": str(venv_python) if venv_dir else "",
+                "failed_nodes": failed_nodes}
     finally:
         # The venv persists across attempts/steps (recreated only on numpy
         # spec mismatch) — only the throwaway fake-bin dir is deleted here.
         if fake_bin_dir.exists():
             shutil.rmtree(fake_bin_dir, ignore_errors=True)
+
+
+def compute_base_ut_baseline(repo: Path, vllm_path: str | Path) -> dict | None:
+    """Snapshot the base tree's known-failing main-lane UT node IDs.
+
+    Called by the flow ONCE per run, at kickoff, while the vllm tree is
+    still pristine at the base commit (before any pointer bump).  Runs the
+    same batch check_ut runs, but with the exemption disabled
+    (``known_failures=set()``) so every real failure is captured, then
+    writes :data:`_MAIN_UT_BASELINE_FILE` so later ``check_ut`` calls in
+    this run treat those node IDs (or their whole file) as non-blocking.
+
+    Returns the written record, or None on any failure (missing vllm
+    checkout, empty repo) — a failed snapshot simply means the run has no
+    baseline and the gate stays as strict as before.  Set
+    ``MAIN2MAIN_BASE_UT_BASELINE=0`` to skip entirely.
+    """
+    if os.environ.get("MAIN2MAIN_BASE_UT_BASELINE", "1").lower() in (
+            "0", "false", "no", "off"):
+        ts_print("[pre_ci] ut: base-tree baseline disabled by env, skipping")
+        return None
+    vllm_path = Path(vllm_path)
+    if not (vllm_path / ".git").exists():
+        ts_print(f"[pre_ci] ut: no vllm checkout at {vllm_path}, "
+                 f"base-tree baseline skipped")
+        return None
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vllm_path),
+            capture_output=True, text=True, timeout=30,
+        )
+        recorded_head = head.stdout.strip() if head.returncode == 0 else ""
+        ts_print(f"[pre_ci] ut: snapshotting base-tree UT baseline "
+                 f"@ {recorded_head[:12] or 'unknown'} ...")
+        result = check_ut(repo, vllm_path=vllm_path, known_failures=set())
+    except Exception as exc:  # noqa: BLE001 — snapshot must never kill a run
+        ts_print(f"[pre_ci] ut: base-tree baseline snapshot failed: {exc}")
+        return None
+    failed_nodes = sorted(set(result.get("failed_nodes", [])))
+    if result.get("skipped"):
+        # Nothing ran (broken venv, no pytest) — a written record would
+        # falsely certify the base tree as clean.
+        ts_print("[pre_ci] ut: base-tree baseline snapshot skipped "
+                 f"({result.get('detail', '')}), no record written")
+        return None
+    record = {
+        "excluded": failed_nodes,
+        "recorded_head": recorded_head,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "detail": result.get("detail", ""),
+    }
+    try:
+        _MAIN_UT_BASELINE_FILE.write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        ts_print(f"[pre_ci] ut: failed to write base-tree baseline: {exc}")
+        return None
+    ts_print(f"[pre_ci] ut: base-tree baseline written "
+             f"({len(failed_nodes)} node(s)) -> {_MAIN_UT_BASELINE_FILE}")
+    return record

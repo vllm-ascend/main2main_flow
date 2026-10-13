@@ -40,6 +40,7 @@ from main2main_flow.scripts.utils.extended_e2e import (
 )
 from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
+from main2main_flow.scripts.utils.ut_check import compute_base_ut_baseline
 from main2main_flow.scripts.utils.utils import (
     UpgradeCompleted, UpgradeFailed, UpgradePartial,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
@@ -1015,6 +1016,21 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             step_dir.mkdir(parents=True, exist_ok=True)
             (step_dir / VLLM_GIT_PATCH_FILE).write_text(step["upstream_patch"], encoding="utf-8")
             (step_dir / VLLM_GIT_CHANGED_FILES).write_text(step["changed_files"], encoding="utf-8")
+
+        # Snapshot the base tree's known-failing UT node IDs ONCE per run.
+        # Runs consume a moving vllm main; a fresh-mode step can start from
+        # a base whose CPU-UT batch already fails (run 38383045302: step-1
+        # burned all 5 attempts on failures the adapter proved pre-existing
+        # on the pristine base pairing, with no exemption channel).  Only
+        # at the true kickoff (no step completed, first attempt) is the
+        # pairing vllm@base + ascend@kickoff — later, the tree belongs to
+        # the steps in flight and must not be repositioned.
+        if self.state.current_step == 0 and self.state.retry_count == 0:
+            try:
+                run_git(vllm_path, "checkout", self.state.base_commit)
+                compute_base_ut_baseline(vllm_ascend_path, vllm_path)
+            except Exception as exc:  # noqa: BLE001 — never kill the run here
+                ts_print(f"[analyze] base-tree UT baseline snapshot failed: {exc}")
 
         return HasCommit
 

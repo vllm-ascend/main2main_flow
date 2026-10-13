@@ -12,6 +12,7 @@ from main2main_flow.scripts.utils.ut_check import (
     _build_ut_env,
     _ensure_ut_venv,
     check_ut,
+    compute_base_ut_baseline,
 )
 
 
@@ -348,3 +349,147 @@ def test_load_release_baseline_from_file(tmp_path, monkeypatch):
     monkeypatch.setattr(ut_check, "_RELEASE_UT_BASELINE_FILE",
                         tmp_path / "nope.json")
     assert ut_check._load_release_baseline() == set()
+
+
+# --- main-lane base-tree baseline (run 38383045302) -------------------------
+# A fresh-mode step can start from a vllm base whose CPU-UT batch already
+# fails; step-1 burned all 5 attempts on failures the adapter proved
+# pre-existing.  compute_base_ut_baseline snapshots those node IDs at
+# kickoff (vllm@base + ascend@kickoff); check_ut then reports them but
+# never blocks on them.
+
+_MAIN_FAIL_OUT = ("1 failed, 0 passed in 0.01s\n"
+                  "FAILED tests/ut/test_a.py::test_b - AssertionError\n")
+
+
+def test_check_ut_main_baseline_exempts(tmp_path, monkeypatch):
+    repo, vllm, release, seen = _dual_lane_setup(
+        tmp_path, monkeypatch,
+        {"main": _MAIN_FAIL_OUT, "release": "1 passed in 0.01s\n"})
+    baseline_file = tmp_path / "base_ut_failures.json"
+    baseline_file.write_text(
+        json.dumps({"excluded": ["tests/ut/test_a.py::test_b"]}))
+    monkeypatch.setattr(ut_check, "_MAIN_UT_BASELINE_FILE", baseline_file)
+    result = check_ut(repo, vllm_path=vllm)
+    # Baseline-matched: reported in detail + log, never blocks.
+    assert result["violations"] == []
+    assert "matched the known baseline" in result["detail"]
+    # ... but still reported as a failed node (the snapshot's raw truth).
+    assert result["failed_nodes"] == ["tests/ut/test_a.py::test_b"]
+    log_text = Path(result["log_path"]).read_text()
+    assert "FAILED tests/ut/test_a.py::test_b" in log_text
+
+
+def test_check_ut_main_baseline_whole_file_match(tmp_path, monkeypatch):
+    repo, vllm, release, seen = _dual_lane_setup(
+        tmp_path, monkeypatch,
+        {"main": _MAIN_FAIL_OUT, "release": "1 passed in 0.01s\n"})
+    baseline_file = tmp_path / "base_ut_failures.json"
+    baseline_file.write_text(json.dumps({"excluded": ["tests/ut/test_a.py"]}))
+    monkeypatch.setattr(ut_check, "_MAIN_UT_BASELINE_FILE", baseline_file)
+    result = check_ut(repo, vllm_path=vllm)
+    assert result["violations"] == []
+    assert "matched the known baseline" in result["detail"]
+
+
+def test_check_ut_main_baseline_disabled_blocks(tmp_path, monkeypatch):
+    repo, vllm, release, seen = _dual_lane_setup(
+        tmp_path, monkeypatch,
+        {"main": _MAIN_FAIL_OUT, "release": "1 passed in 0.01s\n"})
+    baseline_file = tmp_path / "base_ut_failures.json"
+    baseline_file.write_text(
+        json.dumps({"excluded": ["tests/ut/test_a.py::test_b"]}))
+    monkeypatch.setattr(ut_check, "_MAIN_UT_BASELINE_FILE", baseline_file)
+    monkeypatch.setenv("MAIN2MAIN_BASE_UT_BASELINE", "0")
+    result = check_ut(repo, vllm_path=vllm)
+    assert any("test_a.py::test_b" in v for v in result["violations"])
+
+
+def test_check_ut_snapshot_mode_overrides_file(tmp_path, monkeypatch):
+    # explicit known_failures=set() must win over the workspace file —
+    # that is exactly how compute_base_ut_baseline takes the snapshot.
+    repo, vllm, release, seen = _dual_lane_setup(
+        tmp_path, monkeypatch,
+        {"main": _MAIN_FAIL_OUT, "release": "1 passed in 0.01s\n"})
+    baseline_file = tmp_path / "base_ut_failures.json"
+    baseline_file.write_text(
+        json.dumps({"excluded": ["tests/ut/test_a.py::test_b"]}))
+    monkeypatch.setattr(ut_check, "_MAIN_UT_BASELINE_FILE", baseline_file)
+    result = check_ut(repo, vllm_path=vllm, known_failures=set())
+    assert any("test_a.py::test_b" in v for v in result["violations"])
+    assert result["failed_nodes"] == ["tests/ut/test_a.py::test_b"]
+
+
+def test_compute_base_ut_baseline_writes_and_exempts(tmp_path, monkeypatch):
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    vllm = tmp_path / "vllm"
+    (vllm / ".git").mkdir(parents=True)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    py = venv / "bin" / "python"
+    py.write_text("")
+    baseline_file = tmp_path / "base_ut_failures.json"
+    monkeypatch.setattr(ut_check, "_MAIN_UT_BASELINE_FILE", baseline_file)
+    monkeypatch.setattr(ut_check, "_collect_cpu_ut_files",
+                        lambda r: ["tests/ut/test_a.py"])
+    monkeypatch.setattr(ut_check, "_ensure_ut_venv",
+                        lambda spec: (venv, str(py)))
+
+    head = SimpleNamespace(returncode=0, stdout="abc123def456\n", stderr="")
+    batch = SimpleNamespace(returncode=1, stdout=_MAIN_FAIL_OUT, stderr="")
+
+    def _fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return head
+        return batch
+
+    monkeypatch.setattr(ut_check.subprocess, "run", _fake_run)
+
+    record = compute_base_ut_baseline(repo, vllm)
+    assert record["excluded"] == ["tests/ut/test_a.py::test_b"]
+    assert record["recorded_head"] == "abc123def456"
+    on_disk = json.loads(baseline_file.read_text())
+    assert on_disk["excluded"] == ["tests/ut/test_a.py::test_b"]
+    # end-to-end: the run's later check_ut calls now exempt via the file
+    result = check_ut(repo, vllm_path=vllm)
+    assert result["violations"] == []
+    assert "matched the known baseline" in result["detail"]
+
+
+def test_compute_base_ut_baseline_env_disabled(tmp_path, monkeypatch):
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    vllm = tmp_path / "vllm"
+    (vllm / ".git").mkdir(parents=True)
+    baseline_file = tmp_path / "base_ut_failures.json"
+    monkeypatch.setattr(ut_check, "_MAIN_UT_BASELINE_FILE", baseline_file)
+    monkeypatch.setenv("MAIN2MAIN_BASE_UT_BASELINE", "0")
+    assert compute_base_ut_baseline(repo, vllm) is None
+    assert not baseline_file.exists()
+
+
+def test_compute_base_ut_baseline_no_checkout_skips(tmp_path, monkeypatch):
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    baseline_file = tmp_path / "base_ut_failures.json"
+    monkeypatch.setattr(ut_check, "_MAIN_UT_BASELINE_FILE", baseline_file)
+    assert compute_base_ut_baseline(repo, tmp_path / "missing") is None
+    assert not baseline_file.exists()
+
+
+def test_compute_base_ut_baseline_snapshot_failure_writes_nothing(
+        tmp_path, monkeypatch):
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    vllm = tmp_path / "vllm"
+    (vllm / ".git").mkdir(parents=True)
+    baseline_file = tmp_path / "base_ut_failures.json"
+    monkeypatch.setattr(ut_check, "_MAIN_UT_BASELINE_FILE", baseline_file)
+    monkeypatch.setattr(ut_check, "_collect_cpu_ut_files",
+                        lambda r: ["tests/ut/test_a.py"])
+    monkeypatch.setattr(ut_check, "_ensure_ut_venv",
+                        lambda spec: (None, ""))  # no venv, no pytest
+    monkeypatch.setattr(ut_check.shutil, "which", lambda name: None)
+    assert compute_base_ut_baseline(repo, vllm) is None
+    assert not baseline_file.exists()
