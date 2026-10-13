@@ -646,9 +646,23 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         ts_print("\n[pre_ci] ut: SKIPPED — no usable venv and pytest not installed")
         return {"violations": [], "detail": "pytest not installed", "skipped": True,
                 "log_path": "", "venv_python": ""}
-    pytest_cmd = [str(venv_python), "-m", "pytest"] if venv_dir else [pytest_bin]
+    # Upstream CI invokes the pytest CONSOLE script (`pytest -sv ...`),
+    # whose sys.path[0] is the script's own directory.  `python -m pytest`
+    # instead prepends the cwd — the graded tree — AHEAD of PYTHONPATH,
+    # which would silently defeat the pure-CPU shadow view below (the
+    # tree's own a3 _build_info would win; verified locally 2026-10-13).
+    # Prefer the venv's pytest script; fall back loudly if it is missing.
+    pytest_cmd = [pytest_bin]
     if venv_dir:
-        ts_print(f"[pre_ci] ut: using venv pytest via {venv_python} -m pytest")
+        venv_pytest = Path(venv_python).parent / "pytest"
+        if venv_pytest.exists():
+            pytest_cmd = [str(venv_pytest)]
+            ts_print(f"[pre_ci] ut: using venv pytest script {venv_pytest}")
+        else:
+            ts_print("[pre_ci] ut: venv has no pytest script — falling back "
+                     f"to {venv_python} -m pytest (cwd shadows PYTHONPATH, "
+                     "so the pure-CPU view will NOT take effect)")
+            pytest_cmd = [str(venv_python), "-m", "pytest"]
 
     # Full pytest stdout is persisted here so the adapter (fix mode) can
     # grep complete tracebacks when a violation's excerpt was truncated.

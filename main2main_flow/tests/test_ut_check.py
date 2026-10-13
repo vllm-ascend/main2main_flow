@@ -634,3 +634,41 @@ def test_build_ut_env_prepends_pure_cpu_view(tmp_path):
     assert parts[0] == str(view)
     assert parts[1] == str(repo.resolve())
     assert parts[2] == str(vllm.resolve())
+
+
+def test_check_ut_uses_venv_pytest_script(tmp_path, monkeypatch):
+    """Upstream CI invokes the pytest console script.  `python -m pytest`
+    instead prepends the repo cwd to sys.path AHEAD of PYTHONPATH, which
+    silently defeats the pure-CPU shadow view (the tree's own a3
+    _build_info wins; verified locally 2026-10-13)."""
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    vllm = tmp_path / "vllm"
+    vllm.mkdir()
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    py = venv / "bin" / "python"
+    py.write_text("")
+    script = venv / "bin" / "pytest"
+    script.write_text("")
+
+    monkeypatch.setattr(ut_check, "_collect_cpu_ut_files",
+                        lambda repo: ["tests/ut/test_a.py"])
+    monkeypatch.setattr(ut_check, "_ensure_ut_venv",
+                        lambda spec: (venv, str(py)))
+    ok = SimpleNamespace(returncode=0, stdout="1 passed in 0.01s\n",
+                         stderr="")
+    seen_cmds = []
+
+    def _fake_run(cmd, **kwargs):
+        seen_cmds.append((cmd, kwargs))
+        return ok
+
+    monkeypatch.setattr(ut_check.subprocess, "run", _fake_run)
+
+    result = check_ut(repo, vllm_path=vllm)
+
+    cmd = seen_cmds[0][0]
+    assert cmd[0] == str(script)
+    assert "main2main_flow.scripts.utils.ut_namespace" in cmd
+    assert result["violations"] == []
