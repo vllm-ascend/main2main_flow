@@ -554,3 +554,83 @@ def test_failure_excerpt_falls_back_to_first_occurrence():
     ex = ut_check._failure_excerpt(clean, line)
 
     assert "bad config" in ex
+
+
+def _make_built_ascend_tree(tmp_path):
+    """A minimal built ascend tree: vllm_ascend package with an a3 profile."""
+    repo = tmp_path / "ascend"
+    pkg = repo / "vllm_ascend"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "device_config.py").write_text("VALUE = 'real-tree'\n",
+                                          encoding="utf-8")
+    (pkg / "_build_info.py").write_text(
+        "# Auto-generated file\n__device_type__ = 'A3'\n", encoding="utf-8")
+    return repo
+
+
+def test_pure_cpu_view_shadows_build_info_only(tmp_path, monkeypatch):
+    repo = _make_built_ascend_tree(tmp_path)
+    monkeypatch.setattr(ut_check, "WORKSPACE_DIR", tmp_path / "ws")
+
+    view = ut_check._make_pure_cpu_view(repo)
+
+    assert view is not None
+    info = (view / "vllm_ascend" / "_build_info.py").read_text()
+    # Upstream's SOC-less cpu-ut build writes exactly this device family.
+    assert "__device_type__ = 'A2'" in info
+    # Every other module resolves through the symlink to the real tree —
+    # tracebacks must keep pointing at the graded sources.
+    assert (view / "vllm_ascend" / "device_config.py").resolve() == \
+        (repo / "vllm_ascend" / "device_config.py").resolve()
+    assert (view / "vllm_ascend" / "device_config.py").read_text() == \
+        "VALUE = 'real-tree'\n"
+    # The tree under test is untouched (gitignored file stays a3).
+    assert "__device_type__ = 'A3'" in \
+        (repo / "vllm_ascend" / "_build_info.py").read_text()
+
+
+def test_pure_cpu_view_rebuilds_stale_workspace(tmp_path, monkeypatch):
+    repo = _make_built_ascend_tree(tmp_path)
+    monkeypatch.setattr(ut_check, "WORKSPACE_DIR", tmp_path / "ws")
+
+    first = ut_check._make_pure_cpu_view(repo)
+    stale = first / "vllm_ascend" / "stale_marker"
+    stale.write_text("left over from a previous round", encoding="utf-8")
+
+    second = ut_check._make_pure_cpu_view(repo)
+
+    assert second == first
+    assert not stale.exists()  # rebuilt, not reused
+
+
+def test_pure_cpu_view_env_override_disables(tmp_path, monkeypatch):
+    repo = _make_built_ascend_tree(tmp_path)
+    monkeypatch.setattr(ut_check, "WORKSPACE_DIR", tmp_path / "ws")
+    monkeypatch.setenv("MAIN2MAIN_UT_PURE_CPU", "0")
+
+    assert ut_check._make_pure_cpu_view(repo) is None
+
+
+def test_pure_cpu_view_missing_package_returns_none(tmp_path, monkeypatch):
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    monkeypatch.setattr(ut_check, "WORKSPACE_DIR", tmp_path / "ws")
+
+    assert ut_check._make_pure_cpu_view(repo) is None
+
+
+def test_build_ut_env_prepends_pure_cpu_view(tmp_path):
+    repo = _make_built_ascend_tree(tmp_path)
+    vllm = tmp_path / "vllm"
+    vllm.mkdir()
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    view = tmp_path / "ws" / "ut_purecpu_view"
+
+    env = ut_check._build_ut_env(repo, vllm, fake_bin, pure_cpu_view=view)
+
+    parts = env["PYTHONPATH"].split(":")
+    assert parts[0] == str(view)
+    assert parts[1] == str(repo.resolve())
+    assert parts[2] == str(vllm.resolve())
