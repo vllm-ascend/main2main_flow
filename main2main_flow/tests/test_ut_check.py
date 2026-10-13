@@ -510,3 +510,47 @@ def test_compute_base_ut_baseline_snapshot_failure_writes_nothing(
     monkeypatch.setattr(ut_check.shutil, "which", lambda name: None)
     assert compute_base_ut_baseline(repo, vllm) is None
     assert not baseline_file.exists()
+
+
+def test_failure_excerpt_anchors_to_own_section():
+    """Two tests raising the same error must not share an excerpt.
+
+    clean.find(needle) returns the FIRST occurrence of the error text in
+    the whole run — run 38405850804's request_lifecycle violations
+    carried a build_cache test's traceback, sending the root-cause
+    analysis to the wrong file.  The excerpt must anchor at the failing
+    test's own `_____ name _____` section header.
+    """
+    early_err = "FileNotFoundError: [Errno 2] /tmp/zz_dead_dir/vllm_ascend_1.log"
+    clean = (
+        "_________________________ test_build_cache_env _________________________\n"
+        f"E   {early_err}\n"
+        "E   assert csrc default\n"
+        "\n"
+        "_________________________ test_request_lifecycle ________________________\n"
+        f"E   {early_err}\n"
+        "E   assert emit re-opened the dead stream\n"
+    )
+    line = ("FAILED tests/ut/x/test_request_lifecycle.py::test_request_lifecycle"
+            f" - {early_err}")
+
+    ex = ut_check._failure_excerpt(clean, line)
+
+    assert "test_request_lifecycle" in ex
+    assert "dead stream" in ex
+    assert "csrc default" not in ex
+
+
+def test_failure_excerpt_falls_back_to_first_occurrence():
+    """Without a matching section header, the excerpt degrades to the
+    first needle occurrence instead of returning nothing."""
+    err = "ValueError: bad config"
+    clean = (
+        f"E   {err}\n"
+        "E   more detail\n"
+    )
+    line = f"FAILED tests/ut/x/test_cfg.py::test_cfg - {err}"
+
+    ex = ut_check._failure_excerpt(clean, line)
+
+    assert "bad config" in ex

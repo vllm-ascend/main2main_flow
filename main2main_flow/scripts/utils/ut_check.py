@@ -147,15 +147,45 @@ def _failure_excerpt(clean: str, failure_line: str, max_chars: int = 900) -> str
     pytest output and return the surrounding window (the code line that
     raised, plus the tail of the call stack).
     """
-    err = failure_line.split(" - ", 1)[-1] if " - " in failure_line else failure_line
+    if " - " in failure_line:
+        node_part, err = failure_line.split(" - ", 1)
+    else:
+        node_part, err = "", failure_line
     needle = err.strip()[:80]
     idx = clean.find(needle)
+    # The error text can occur EARLIER in the run than the failing test
+    # (two tests raising the same error): clean.find() then quotes another
+    # test's traceback — run 38405850804's request_lifecycle violations
+    # carried a build_cache test's excerpt, which sent the root-cause
+    # analysis to the wrong file.  Anchor the search at the failing
+    # test's own pytest failure-section header when it exists.
+    section_start = 0
+    if idx >= 0 and node_part:
+        test_name = node_part.split("::")[-1]
+        # pytest renders each failure under a `_____ name _____` header;
+        # methods show `Class.name`, parametrized add `[id]` — substring
+        # match covers both.
+        section_m = None
+        for hm in re.finditer(r"^_{5,}.*_{5,}$", clean, re.MULTILINE):
+            if test_name in hm.group(0):
+                section_m = hm
+                break
+        if section_m:
+            anchored = clean.find(needle, section_m.start())
+            if anchored >= 0:
+                idx = anchored
+                # Keep the context window inside this test's section —
+                # a 200-char reach backward must not quote the previous
+                # test's traceback.
+                section_start = section_m.start()
+            # else: needle wording differs between the short summary and
+            # the traceback — keep the first-occurrence idx.
     if idx < 0:
         m = _EXCERPT_SIG_RE.search(clean)
         if not m:
             return ""
         idx = m.start()
-    start = max(0, idx - 200)
+    start = max(section_start, idx - 200)
     end = min(len(clean), idx + max_chars)
     excerpt = clean[start:end].strip()
     # 截断到下一个测试标题/分隔（pytest 的 ____ name ____ 或 ==== 段）。
