@@ -114,6 +114,20 @@ def _collect_cpu_ut_files(repo: Path) -> list[str]:
                 elif _is_npu_convention_ut_path(rel):
                     continue
                 files.append(rel)
+    # Sort the batch into pytest's collection order (recursively name-sorted
+    # with directories interleaved among files).  os.walk hands back
+    # root-level files BEFORE subdirectories, which inverts pytest's order:
+    # ``test_logger.py`` then runs early in the batch while
+    # ``runtime_config/`` runs after it.  That order breaks the batch:
+    # test_logger's file-logging test leaks a handler bound to its deleted
+    # TemporaryDirectory on the ``vllm_ascend`` logger, and a later
+    # ``configure_ascend_file_logging()`` closes the module handler, so
+    # every subsequent log emit re-opens the dead stream and raises
+    # FileNotFoundError (parity run 38405850804: 371 violations on the
+    # os.walk order vs 1 failure in pytest's own order on the SAME tree).
+    # Sorting matches upstream CI's single-process order and keeps the
+    # polluter-then-reconfigurer inversion out of the batch.
+    files.sort()
     return files
 
 
