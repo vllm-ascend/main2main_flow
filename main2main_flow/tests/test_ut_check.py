@@ -28,6 +28,11 @@ def test_build_ut_env_pure_cpu_and_paths(tmp_path):
         d.mkdir()
     env = _build_ut_env(repo, vllm, fake_bin)
     assert env["PYTHONPATH"].split(":")[:2] == [str(repo), str(vllm)]
+    # `python -m pytest` prepends the graded tree (cwd) ahead of
+    # PYTHONPATH; PYTHONSAFEPATH gives -m the console-script sys.path
+    # semantics so the pure-CPU view cannot be shadowed by the tree's
+    # own _build_info (run 38421012498).
+    assert env["PYTHONSAFEPATH"] == "1"
     assert env["PYTHONPATH"].endswith(_flow_root())
     assert env["HF_HUB_OFFLINE"] == "1"
     assert env["ASCEND_RT_VISIBLE_DEVICES"] == ""

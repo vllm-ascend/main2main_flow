@@ -501,6 +501,15 @@ def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path,
     env["PYTHONPATH"] = ":".join(parts)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
     env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    # Upstream CI runs the pytest CONSOLE script, whose sys.path[0] is the
+    # script's own directory — the repo cwd is never on sys.path.
+    # `python -m pytest` instead prepends the cwd (the graded tree) ahead
+    # of PYTHONPATH, letting the tree's own a3 _build_info defeat the
+    # pure-CPU view (run 38421012498: the venv shares the system pytest
+    # and has no bin/pytest script, so the -m fallback ran and W4A8 fired
+    # again).  PYTHONSAFEPATH (py3.11+) gives -m the console-script
+    # sys.path semantics on both invocation paths.
+    env["PYTHONSAFEPATH"] = "1"
     # Match CI: offline mode so get_model_file / hf_hub_download
     # fails immediately (385s→0.5s for test_maybe_update_config_
     # non_directory_raises) instead of retrying network timeouts.
@@ -659,9 +668,12 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
             pytest_cmd = [str(venv_pytest)]
             ts_print(f"[pre_ci] ut: using venv pytest script {venv_pytest}")
         else:
-            ts_print("[pre_ci] ut: venv has no pytest script — falling back "
-                     f"to {venv_python} -m pytest (cwd shadows PYTHONPATH, "
-                     "so the pure-CPU view will NOT take effect)")
+            # No venv-local pytest (shared system site-packages): -m is
+            # safe here — _build_ut_env sets PYTHONSAFEPATH, so the cwd
+            # does not shadow the pure-CPU view.
+            ts_print("[pre_ci] ut: venv has no pytest script — using "
+                     f"{venv_python} -m pytest (PYTHONSAFEPATH keeps the "
+                     "cwd off sys.path)")
             pytest_cmd = [str(venv_python), "-m", "pytest"]
 
     # Full pytest stdout is persisted here so the adapter (fix mode) can
