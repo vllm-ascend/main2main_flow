@@ -12,7 +12,8 @@ from main2main_flow.scripts.utils import run_tests as rt
 from main2main_flow.scripts.utils.run_tests import (
     _apply_device_constraints,
     _assign_devices,
-    _is_oom_hang_failure,
+    _is_oom_env_failure,
+    _is_psutil_cleanup_race,
     _pair_complete_pool,
     _run_one_test,
     _schedule_rounds,
@@ -184,7 +185,7 @@ def _write_log(tmp_path: Path, body: str, name: str = "test.log") -> Path:
     return p
 
 
-def test_oom_hang_pure_oom_classified(tmp_path: Path):
+def test_oom_env_pure_oom_classified(tmp_path: Path):
     # Round-2/3 gemma4 shape: OOM worker death + a bare traceback SOURCE line
     # ("RuntimeError(" has no message) + pytest killed by the suite timeout.
     log = _write_log(tmp_path, "\n".join([
@@ -193,10 +194,10 @@ def test_oom_hang_pure_oom_classified(tmp_path: Path):
         'raise RuntimeError(',
         "[TIMEOUT] suite exceeded 1800s, killing process group",
     ]) + "\n")
-    assert _is_oom_hang_failure(log)
+    assert _is_oom_env_failure(log)
 
 
-def test_oom_hang_ansi_colored_real_error_not_classified(tmp_path: Path):
+def test_oom_env_ansi_colored_real_error_not_classified(tmp_path: Path):
     # ANSI codes around AssertionError must not hide a real failure
     # (prefix_caching garbage output asserts with colored pytest output).
     log = _write_log(tmp_path, "\n".join([
@@ -204,34 +205,68 @@ def test_oom_hang_ansi_colored_real_error_not_classified(tmp_path: Path):
         "E   \x1b[31mAssertionError\x1b[0m: Test0: vllm_output does not "
         "match golden",
     ]) + "\n")
-    assert not _is_oom_hang_failure(log)
+    assert not _is_oom_env_failure(log)
 
 
-def test_oom_hang_non_oom_worker_error_not_classified(tmp_path: Path):
+def test_oom_env_non_oom_worker_error_not_classified(tmp_path: Path):
     # Round-1 gemma4 shape: engine died of the skip_gather TypeError —
     # a real adaptation bug, even though OOM text may appear elsewhere.
     log = _write_log(tmp_path, "\n".join([
         SKIP_GATHER_WORKER_LINE,
         "NPU out of memory is mentioned in a doc line",
     ]) + "\n")
-    assert not _is_oom_hang_failure(log)
+    assert not _is_oom_env_failure(log)
 
 
-def test_oom_hang_mixed_worker_errors_not_classified(tmp_path: Path):
+def test_oom_env_mixed_worker_errors_not_classified(tmp_path: Path):
     log = _write_log(tmp_path, "\n".join([
         OOM_WORKER_LINE,
         "ERROR Worker failed with error 'AssertionError: Engine core "
         "initialization failed'",
     ]) + "\n")
-    assert not _is_oom_hang_failure(log)
+    assert not _is_oom_env_failure(log)
 
 
-def test_oom_hang_no_oom_signature_not_classified(tmp_path: Path):
+def test_oom_env_no_oom_signature_not_classified(tmp_path: Path):
     log = _write_log(tmp_path, "E   AssertionError: garbage output\n")
-    assert not _is_oom_hang_failure(log)
+    assert not _is_oom_env_failure(log)
 
 
-def test_run_one_test_oom_hang_becomes_env_flake(monkeypatch, tmp_path: Path):
+# ---- run 38512795089 shapes (EngineDeadError-wrapped OOM, psutil race) -------
+
+ENGINEDEAD_LINE = (
+    "E           vllm.v1.engine.exceptions.EngineDeadError: EngineCore "
+    "encountered an issue. See stack trace (above) for the root cause.")
+
+
+def test_oom_env_enginedead_wrapper_classified(tmp_path: Path):
+    # test_vlm/test_whisper shape (run 38512795089): OOM inside the worker
+    # stack, death re-raised to the test as EngineDeadError — pytest exits 1,
+    # not -9, and the wrapper used to block the OOM classification.
+    log = _write_log(tmp_path, "\n".join([
+        "(EngineCore pid=1) ERROR [core.py:1438] torch.OutOfMemoryError: "
+        "NPU out of memory. Tried to allocate 6.75 GiB",
+        ENGINEDEAD_LINE,
+        "FAILED tests/e2e/pull_request/one_card/test_vlm.py::test_whisper",
+    ]) + "\n")
+    assert _is_oom_env_failure(log)
+
+
+def test_oom_env_engine_init_wrapper_classified(tmp_path: Path):
+    # test_sampler shape (run 38512795089): OOM during NPUModelRunner init,
+    # "Engine core initialization failed" re-raise + EngineDeadError, suite
+    # hung to the timeout SIGKILL.
+    log = _write_log(tmp_path, "\n".join([
+        OOM_WORKER_LINE,
+        "RuntimeError: Engine core initialization failed. See root cause "
+        "above. Failed core proc(s): {}",
+        ENGINEDEAD_LINE,
+        "[TIMEOUT] suite exceeded 1800s, killing process group",
+    ]) + "\n")
+    assert _is_oom_env_failure(log)
+
+
+def test_run_one_test_oom_becomes_env_flake(monkeypatch, tmp_path: Path):
     # exit -9 (suite-timeout SIGKILL) + pure-OOM log → env_flake_pass, so the
     # round doesn't count as an adaptation failure.
     log = _write_log(tmp_path, OOM_WORKER_LINE + "\n", "oom.log")
@@ -266,6 +301,80 @@ def test_run_one_test_oom_with_real_error_stays_failed(monkeypatch,
         "0,1", tmp_path / "ci", tmp_path, 0, 1, {},
         is_remote=False, is_mock=False)
     assert result["ci_result"] == "failed"
+
+
+def test_run_one_test_enginedead_oom_exit1_becomes_env_flake(monkeypatch,
+                                                             tmp_path: Path):
+    # test_vlm/test_whisper (run 38512795089): OOM death re-raised as
+    # EngineDeadError fails pytest with exit 1 — the widened OOM gate must
+    # env-flake it too, not just the -9 hang shape.
+    log = _write_log(tmp_path, "\n".join([
+        "(EngineCore pid=1) ERROR [core.py:1438] torch.OutOfMemoryError: "
+        "NPU out of memory. Tried to allocate 6.75 GiB",
+        ENGINEDEAD_LINE,
+        "FAILED tests/e2e/pull_request/one_card/test_vlm.py::test_whisper",
+    ]) + "\n", "whisper.log")
+    summary = _write_log(tmp_path, "", "whisper-summary.json")
+    monkeypatch.setattr(rt, "_run_to_log", lambda *a, **k: 1)
+    monkeypatch.setattr(rt, "_run_summary",
+                        lambda *a, **k: {"summary": {"code_bugs": [],
+                                                     "env_flakes": []},
+                                         "summary_error": None})
+    result = _run_one_test(
+        ["pytest"], log, summary,
+        "tests/e2e/pull_request/one_card/test_vlm.py",
+        "0", tmp_path / "ci", tmp_path, 0, 1, {},
+        is_remote=False, is_mock=False)
+    assert result["ci_result"] == "env_flake_pass"
+    assert result["run_suite_exit_code"] == 1
+
+
+def test_psutil_cleanup_race_classified(tmp_path: Path):
+    # two_card/test_pipeline_parallel shape (run 38512795089): the engine
+    # child died, then the test's psutil enumeration raced the vanished pid.
+    log = _write_log(tmp_path, "\n".join([
+        "self = <psutil._pslinux.Process object>",
+        "E               psutil.NoSuchProcess: process no longer exists "
+        "(pid=617773)",
+        "/usr/local/python3.12.13/lib/python3.12/site-packages/psutil/"
+        "_pslinux.py:1726: NoSuchProcess",
+    ]) + "\n")
+    assert _is_psutil_cleanup_race(log)
+
+
+def test_psutil_cleanup_race_with_real_error_not_classified(tmp_path: Path):
+    # A psutil exception next to a real raised error never env-flakes: a
+    # genuine engine-killing code bug leaves its own traceback in the log.
+    log = _write_log(tmp_path, "\n".join([
+        "E   AssertionError: vllm_output does not match golden",
+        "E               psutil.NoSuchProcess: process no longer exists "
+        "(pid=617773)",
+    ]) + "\n")
+    assert not _is_psutil_cleanup_race(log)
+
+
+def test_psutil_cleanup_race_no_psutil_not_classified(tmp_path: Path):
+    log = _write_log(tmp_path, "E   RuntimeError: garbage output\n")
+    assert not _is_psutil_cleanup_race(log)
+
+
+def test_run_one_test_psutil_race_becomes_env_flake(monkeypatch,
+                                                    tmp_path: Path):
+    log = _write_log(tmp_path, "E   psutil.NoSuchProcess: process no longer "
+                     "exists (pid=617773)\n", "psutil.log")
+    summary = _write_log(tmp_path, "", "psutil-summary.json")
+    monkeypatch.setattr(rt, "_run_to_log", lambda *a, **k: 1)
+    monkeypatch.setattr(rt, "_run_summary",
+                        lambda *a, **k: {"summary": {"code_bugs": [],
+                                                     "env_flakes": []},
+                                         "summary_error": None})
+    result = _run_one_test(
+        ["pytest"], log, summary,
+        "tests/e2e/pull_request/two_card/test_pipeline_parallel.py",
+        "0,1", tmp_path / "ci", tmp_path, 0, 1, {},
+        is_remote=False, is_mock=False)
+    assert result["ci_result"] == "env_flake_pass"
+    assert result["run_suite_exit_code"] == 1
 
 
 # ---- numeric-precision failures → precision_pass (2026-09-03 user) ----

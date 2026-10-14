@@ -1051,12 +1051,26 @@ _TERMINAL_ERROR_MSG_RE = re.compile(
     re.MULTILINE)
 
 # Symptom wrappers re-raise a CHILD process's death (vllm server / DP
-# worker): the real cause and its traceback appear elsewhere in the same
-# log.  They are effects, not causes — never count them as the real error.
+# worker / engine core): the real cause and its traceback appear elsewhere
+# in the same log.  They are effects, not causes — never count them as the
+# real error.  EngineDeadError and "Engine core initialization failed" are
+# the v1 engine's re-raises of a worker death ("See stack trace (above) for
+# the root cause" — run 38512795089: whisper AND sampler both died of an
+# NPU OOM, yet the only terminal raised error was EngineDeadError, which
+# used to block the OOM env-flake classification).
+_SYMPTOM_WRAPPER_PHRASES = (
+    "Worker failed with error",
+    "vllm server exited during startup",
+    "Server at 127.0.0.1 exited unexpected",
+    "Failed to start data parallel worker",
+    "EngineDeadError",
+    "Engine core initialization failed",
+)
 _SYMPTOM_WRAPPER_RE = re.compile(
-    r"vllm server exited during startup"
-    r"|Server at 127\.0\.0\.1 exited unexpected"
-    r"|Failed to start data parallel worker")
+    "|".join(re.escape(p) for p in _SYMPTOM_WRAPPER_PHRASES))
+_SYMPTOM_LINE_RE = re.compile(
+    r"^.*(?:" + "|".join(re.escape(p) for p in _SYMPTOM_WRAPPER_PHRASES)
+    + r").*$", re.MULTILINE)
 
 
 def _is_model_download_failure(log_path: Path) -> bool:
@@ -1126,9 +1140,17 @@ _RAISED_ERROR_MSG_RE = re.compile(
     r"NameError|NotImplementedError|EngineDeadError)\b:\s+\S")
 
 
-def _is_oom_hang_failure(log_path: Path) -> bool:
+def _is_oom_env_failure(log_path: Path) -> bool:
     """True if the test log shows an NPU-OOM engine death with no real code
-    error alongside it (the suite timed out waiting for the dead engine)."""
+    error alongside it.
+
+    Two shapes carry the same root cause: the engine hangs after the OOM
+    until the suite timeout SIGKILLs pytest (exit -9, runs
+    33314256232/33406387872), and the death re-raised to the test as
+    EngineDeadError fails pytest outright (exit 1, run 38512795089
+    test_vlm/test_whisper).  Symptom-wrapper lines are stripped before the
+    real-error scan — they re-render the OOM death as "RuntimeError: ..."
+    / "EngineDeadError: ..." without being one."""
     try:
         if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
             return False
@@ -1136,11 +1158,7 @@ def _is_oom_hang_failure(log_path: Path) -> bool:
                                                    errors="replace"))
         if not _NPU_OOM_RE.search(text):
             return False
-        # Strip the worker-error wrapper lines before scanning for real
-        # errors: the wrapper itself renders as "RuntimeError: ..." with the
-        # OOM message inside.
-        rest = re.sub(r"^.*Worker failed with error.*$", "", text,
-                      flags=re.MULTILINE)
+        rest = _SYMPTOM_LINE_RE.sub("", text)
         if _RAISED_ERROR_MSG_RE.search(rest):
             ts_print("  [env-flake] real error with message found next to "
                      "the OOM — NOT classifying as env flake")
@@ -1205,9 +1223,9 @@ def _no_observed_failure(summary: dict | None, log_path: Path) -> bool:
     adaptation (run 34018086282: deepseek_pruning killed at 3600s while
     hung on a flaky wait was classified failed and burned two adapter-fix
     rounds; gemma4, killed identically, was env_flake via its OOM
-    signature — the two must not diverge).  Worker-error wrapper lines are
-    stripped first: they re-render an OOM worker death as
-    "RuntimeError: ..." without being a code bug."""
+    signature — the two must not diverge).  Symptom-wrapper lines are
+    stripped first: they re-render an engine death as "RuntimeError: ..."
+    / "EngineDeadError: ..." without being a code bug."""
     if _count(summary, "failed_test_cases") or _count(summary, "failed_test_files"):
         return False
     try:
@@ -1217,8 +1235,7 @@ def _no_observed_failure(summary: dict | None, log_path: Path) -> bool:
                                                   errors="replace"))
     except OSError:
         return False
-    rest = re.sub(r"^.*Worker failed with error.*$", "", text,
-                  flags=re.MULTILINE)
+    rest = _SYMPTOM_LINE_RE.sub("", text)
     return not _RAISED_ERROR_MSG_RE.search(rest)
 
 
@@ -1230,6 +1247,33 @@ def _is_npu_memory_pressure(log_path: Path) -> bool:
     except OSError:
         return False
     return bool(_NPU_MEMORY_PRESSURE_RE.search(text))
+
+
+# A test whose engine child died leaves the pytest-side cleanup enumerating
+# processes that no longer exist — psutil raises NoSuchProcess reading
+# /proc/<pid>/stat (run 38512795089: two_card/test_pipeline_parallel's
+# engine died under shared-host memory pressure, then test_models_pp2_tp2
+# failed on psutil.NoSuchProcess with bugs=0).  A psutil exception never
+# points at vllm_ascend code; a genuine code bug crashing the engine would
+# leave its own raised error in the log, which the scan below refuses to
+# classify past.
+_PSUTIL_PROCESS_RACE_RE = re.compile(
+    r"psutil\.(?:NoSuchProcess|AccessDenied|ZombieProcess)\b")
+
+
+def _is_psutil_cleanup_race(log_path: Path) -> bool:
+    """True if the only failure evidence is a psutil process-lookup race
+    against a process that already exited."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                   errors="replace"))
+    except OSError:
+        return False
+    if not _PSUTIL_PROCESS_RACE_RE.search(text):
+        return False
+    return not _RAISED_ERROR_MSG_RE.search(_SYMPTOM_LINE_RE.sub("", text))
 
 
 _ERROR_SIGNATURES = re.compile(
@@ -1390,11 +1434,17 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
                  f"the tree (pytest 'not found') — selection leak, not "
                  f"blocking")
         ci_result = "env_flake_pass"
-    if (ci_result != "passed" and exit_code == -9
-            and _is_oom_hang_failure(log_path)):
-        ts_print(f"  [env-flake] {test}: engine died of NPU OOM and hung to "
-                 f"the suite timeout — classified as environment, not "
+    if (ci_result != "passed"
+            and _is_oom_env_failure(log_path)):
+        ts_print(f"  [env-flake] {test}: engine died of NPU OOM (hang to the "
+                 f"suite timeout, or the death re-raised as "
+                 f"EngineDeadError) — classified as environment, not "
                  f"blocking")
+        ci_result = "env_flake_pass"
+    if ci_result == "failed" and _is_psutil_cleanup_race(log_path):
+        ts_print(f"  [env-flake] {test}: only failure evidence is a psutil "
+                 f"process-lookup race after an engine death — classified "
+                 f"as environment, not blocking")
         ci_result = "env_flake_pass"
     if ci_result == "failed" and _is_precision_failure(log_path):
         ts_print(f"  [precision-pass] {test}: numeric-precision assertion "
