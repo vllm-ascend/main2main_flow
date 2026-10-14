@@ -413,6 +413,41 @@ def _plan_steps(
     return steps
 
 
+def emit_plan_summary(plan: dict[str, Any]) -> None:
+    """Surface the step plan where the Actions UI actually shows it.
+
+    The raw log line ([analyze] planned N step(s) ...) is buried in the
+    main2main step's tens of thousands of lines, so also emit a ::notice
+    workflow command (renders as an annotation at the top of the job
+    page) and a markdown table appended to $GITHUB_STEP_SUMMARY (renders
+    in the job's Summary view).  Outside Actions — local runs, tests —
+    GITHUB_STEP_SUMMARY is unset and only the notice line is printed.
+    """
+    steps = plan["steps"]
+    total = len(steps)
+    ts_print(f"::notice::planned {total} step(s) covering "
+             f"{plan['total_commits']} commit(s)")
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    lines = [
+        "## Main2Main step plan",
+        f"{total} step(s) covering {plan['total_commits']} commit(s)",
+        "",
+        "| # | commits | date (UTC) | effective lines | upstream range |",
+        "|---|---------|------------|-----------------|----------------|",
+    ]
+    for step in steps:
+        dates = sorted({c.get("date", "") for c in step["commits"]})
+        span = dates[0] if len(dates) == 1 else f"{dates[0]}..{dates[-1]}"
+        lines.append(
+            f"| {step['index']} | {step['commit_count']} | {span} | "
+            f"{step['effective_lines']} | "
+            f"`{step['start_commit'][:8]}..{step['end_commit'][:8]}` |")
+    with open(summary_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def _enrich_steps_with_diff(vllm_path: Path, steps: list[dict[str, Any]]) -> None:
     for step in steps:
         step["upstream_patch"] = run_git(

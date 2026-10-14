@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter, run_opencode_review
 from main2main_flow.scripts.utils import ci_config_guard
 from main2main_flow.scripts.utils.detect_commits import detect
-from main2main_flow.scripts.utils.plan_steps import run_plan
+from main2main_flow.scripts.utils.plan_steps import emit_plan_summary, run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson,
@@ -1008,6 +1008,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             sp.pop("upstream_patch", None)
             steps_preview.append(sp)
         ts_print(json.dumps(steps_preview, indent=2, ensure_ascii=False))
+        emit_plan_summary(plan)
 
         # generate every step folder in workspace
         for index in range(self.state.total_steps):

@@ -14,6 +14,7 @@ from main2main_flow.scripts.utils.plan_steps import (
     _list_commits,
     _plan_steps,
     _split_evenly,
+    emit_plan_summary,
 )
 
 
@@ -211,3 +212,64 @@ def test_list_commits_stamps_monotonic_utc_days(tmp_path):
     assert days == ["2026-09-30"] * 4
     # one day bucket → the plan cannot fragment across the date churn
     assert [len(b) for b in _day_buckets(commits)] == [4]
+
+
+# ---- emit_plan_summary --------------------------------------------------------
+
+def _plan_dict(steps_spec):
+    steps = []
+    for i, (n, date, eff, start, end) in enumerate(steps_spec):
+        steps.append({
+            "index": i + 1, "commit_count": n, "effective_lines": eff,
+            "start_commit": start, "end_commit": end,
+            "commits": [{"sha": f"{start}{j}", "date": date} for j in range(n)],
+        })
+    return {"steps": steps, "total_commits": sum(n for n, *_ in steps_spec)}
+
+
+def test_emit_plan_summary_writes_notice_and_table(tmp_path, capsys):
+    summary = tmp_path / "summary.md"
+    plan = _plan_dict([(6, "2026-09-30", 1607, "c4df37df", "0f8b3981"),
+                       (41, "2026-10-01", 5151, "26ce58b4", "cb6458c5")])
+    import main2main_flow.scripts.utils.plan_steps as ps
+    old = ps.os.environ.get("GITHUB_STEP_SUMMARY")
+    ps.os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+    try:
+        emit_plan_summary(plan)
+    finally:
+        if old is None:
+            ps.os.environ.pop("GITHUB_STEP_SUMMARY", None)
+        else:
+            ps.os.environ["GITHUB_STEP_SUMMARY"] = old
+    out = capsys.readouterr().out
+    assert "::notice::planned 2 step(s) covering 47 commit(s)" in out
+    text = summary.read_text()
+    assert "## Main2Main step plan" in text
+    assert "| 1 | 6 | 2026-09-30 | 1607 | `c4df37df..0f8b3981` |" in text
+    assert "| 2 | 41 | 2026-10-01 | 5151 | `26ce58b4..cb6458c5` |" in text
+
+
+def test_emit_plan_summary_without_github_env_only_prints(capsys):
+    import main2main_flow.scripts.utils.plan_steps as ps
+    old = ps.os.environ.pop("GITHUB_STEP_SUMMARY", None)
+    try:
+        emit_plan_summary(_plan_dict([(3, "2026-10-02", 900, "aaaa", "bbbb")]))
+    finally:
+        if old is not None:
+            ps.os.environ["GITHUB_STEP_SUMMARY"] = old
+    out = capsys.readouterr().out
+    assert "::notice::planned 1 step(s) covering 3 commit(s)" in out
+
+
+def test_emit_plan_summary_spans_multi_date_step(tmp_path):
+    # a step covering two UTC days renders a date range in its cell
+    summary = tmp_path / "s.md"
+    plan = _plan_dict([(4, "2026-10-02", 900, "aaaa", "bbbb")])
+    plan["steps"][0]["commits"][3]["date"] = "2026-10-03"
+    import main2main_flow.scripts.utils.plan_steps as ps
+    ps.os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+    try:
+        emit_plan_summary(plan)
+    finally:
+        ps.os.environ.pop("GITHUB_STEP_SUMMARY", None)
+    assert "2026-10-02..2026-10-03" in summary.read_text()
