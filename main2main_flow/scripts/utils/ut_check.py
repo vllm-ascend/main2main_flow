@@ -10,9 +10,10 @@ Key mechanisms:
   ``npu-smi info`` to decide whether to mock torch_npu.  A fake npu-smi
   (exit 1) forces the mock path even on an NPU runner, exactly like CI's
   CPU runner.
-- **Single-process batch**: all files in one pytest process (CI-aligned,
-  fast); files known to pollute the shared process (module-level
-  monkeypatches without cleanup) run in their own subprocess.
+- **Single-process batch**: ALL files in one pytest process (CI-aligned,
+  fast) in pytest's collection order — no per-file isolation list, which
+  would rot as upstream's tests evolve (see the order note in
+  _collect_cpu_ut_files and the polluter note in check_ut).
 - **--continue-on-collection-errors**: one file failing to import no
   longer aborts the whole batch and masks every other test.
 - **ut_namespace plugin**: PYTHONPATH=<ascend>:<vllm> makes
@@ -652,7 +653,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 "log_path": "", "venv_python": ""}
 
     ts_print(f"\n[pre_ci] ut: collected {len(cpu_files)} CPU test files "
-             f"(per-file isolation, NPU-convention a2/ and a3_2/ excluded)")
+             f"(single process, NPU-convention a2/ and a3_2/ excluded)")
 
     # Read numpy constraint from triton-ascend metadata (mirror _check_mypy).
     target_numpy_spec = _triton_numpy_spec()
@@ -720,22 +721,21 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     main_baseline = (known_failures if known_failures is not None
                      else _load_main_baseline())
 
-    # Files known to pollute the shared process get their own
-    # subprocess.  Verified on the A2 env: test_batch_invariant.py
-    # installs a global torch.library.Library monkeypatch that breaks
-    # test_gdn_layerwise_kv.py when run in the same process.
-    # test_vocab_parallel_embedding.py assigns module-level
-    # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
-    # polluting test_linear.py / test_gdn_layerwise_kv.py in the
-    # same process (verified on A2, run 2026-08-12).
-    # test_gdn_layerwise_kv.py itself fails only inside the batch
-    # (qwen_gdn_attention_core CPU-backend NotImplementedError;
-    # passes standalone) — isolate it too so the batch stays clean.
-    isolated = [f for f in cpu_files
-                if f.endswith(("test_batch_invariant.py",
-                               "test_vocab_parallel_embedding.py",
-                               "test_gdn_layerwise_kv.py"))]
-    batch = [f for f in cpu_files if f not in isolated]
+    # One pytest process over ALL CPU-UT files — exactly upstream's
+    # cpu-UT lane shape, so no per-file list can rot as upstream's tests
+    # evolve.  In pytest's collection order (which the batch now uses)
+    # the known module-level polluters cannot bite their victims:
+    # test_vocab_parallel_embedding.py leaks parallel_state MagicMocks
+    # at module scope and test_batch_invariant.py a global
+    # torch.library.Library, but both sort AFTER the ops/ files they
+    # used to break (test_gdn_layerwise_kv / test_linear), and the
+    # upstream-recipe control lane has been single-process green on the
+    # same trees (parity runs 38416535777 / 38497619728: only W4A8, a
+    # build-profile artifact, ever failed there).  The per-file
+    # isolation this replaced was an os.walk-order-era guard (root
+    # files ran before subdirs, polluters before victims — run
+    # 38405850804's 371-violation cascade); the order fix removed its
+    # reason, and a hardcoded filename list is a maintenance trap.
 
     # (label, vllm tree for this batch, VLLM_VERSION value or "").  The
     # release tuple is appended only when both the worktree and the tag
@@ -812,7 +812,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                     [*pytest_cmd, "-q", "--tb=short", "--no-header",
                      "--continue-on-collection-errors",
                      "-p", "main2main_flow.scripts.utils.ut_namespace",
-                     *batch, "-k", exclude_expr],
+                     *cpu_files, "-k", exclude_expr],
                     cwd=str(repo), capture_output=True, text=True,
                     env=env, timeout=1200,
                 )
@@ -821,17 +821,6 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 ts_print(f"[pre_ci] ut: [{label}] batch TIMEOUT(1200s)")
                 all_files_clean = False
                 details.append(f"{label}/batch: TIMEOUT(1200s)")
-            for f in isolated:
-                try:
-                    rr = subprocess.run(
-                        [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
-                        cwd=str(repo), capture_output=True, text=True,
-                        env=env, timeout=300,
-                    )
-                    runs.append((f, rr))
-                except subprocess.TimeoutExpired:
-                    ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
-                    all_files_clean = False
 
             for name, rr in runs:
                 clean = strip_ansi(rr.stdout + rr.stderr)
