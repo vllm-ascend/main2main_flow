@@ -574,78 +574,103 @@ def _make_built_ascend_tree(tmp_path):
     return repo
 
 
-def test_pure_cpu_view_shadows_build_info_only(tmp_path, monkeypatch):
+def test_pure_cpu_swap_rewrites_device_type_in_place(tmp_path):
     repo = _make_built_ascend_tree(tmp_path)
-    monkeypatch.setattr(ut_check, "WORKSPACE_DIR", tmp_path / "ws")
 
-    view = ut_check._make_pure_cpu_view(repo)
+    info, original = ut_check._swap_pure_cpu_build_info(repo)
 
-    assert view is not None
-    info = (view / "vllm_ascend" / "_build_info.py").read_text()
-    # Upstream's SOC-less cpu-ut build writes exactly this device family.
-    assert "__device_type__ = 'A2'" in info
-    # Every other module resolves through the symlink to the real tree —
-    # tracebacks must keep pointing at the graded sources.
-    assert (view / "vllm_ascend" / "device_config.py").resolve() == \
-        (repo / "vllm_ascend" / "device_config.py").resolve()
-    assert (view / "vllm_ascend" / "device_config.py").read_text() == \
-        "VALUE = 'real-tree'\n"
-    # The tree under test is untouched (gitignored file stays a3).
+    assert info is not None and original is not None
+    # Upstream's SOC-less cpu-ut build writes exactly this device family;
+    # the rest of the generated file must survive byte-for-byte.
+    swapped = info.read_text()
+    assert "__device_type__ = 'A2'" in swapped
+    assert "# Auto-generated file" in swapped
+    assert "__device_type__ = 'A3'" not in swapped
+    assert swapped.replace("A2", "A3") == original
+
+
+def test_pure_cpu_swap_restore_round_trip(tmp_path):
+    repo = _make_built_ascend_tree(tmp_path)
+
+    info, original = ut_check._swap_pure_cpu_build_info(repo)
+    ut_check._restore_build_info(info, original)
+
+    assert info.read_text() == \
+        "# Auto-generated file\n__device_type__ = 'A3'\n"
+
+
+def test_pure_cpu_swap_double_quoted_value(tmp_path):
+    """Installs that quote with double quotes swap just as cleanly."""
+    repo = _make_built_ascend_tree(tmp_path)
+    info = repo / "vllm_ascend" / "_build_info.py"
+    info.write_text('__device_type__ = "A3"\n', encoding="utf-8")
+
+    swapped, original = ut_check._swap_pure_cpu_build_info(repo)
+
+    assert swapped is not None and original is not None
+    assert "__device_type__ = 'A2'" in swapped.read_text()
+    ut_check._restore_build_info(swapped, original)
+    assert swapped.read_text() == '__device_type__ = "A3"\n'
+
+
+def test_pure_cpu_swap_env_override_disables(tmp_path, monkeypatch):
+    repo = _make_built_ascend_tree(tmp_path)
+    monkeypatch.setenv("MAIN2MAIN_UT_PURE_CPU", "0")
+
+    assert ut_check._swap_pure_cpu_build_info(repo) == (None, None)
     assert "__device_type__ = 'A3'" in \
         (repo / "vllm_ascend" / "_build_info.py").read_text()
 
 
-def test_pure_cpu_view_rebuilds_stale_workspace(tmp_path, monkeypatch):
-    repo = _make_built_ascend_tree(tmp_path)
-    monkeypatch.setattr(ut_check, "WORKSPACE_DIR", tmp_path / "ws")
+def test_pure_cpu_swap_missing_or_malformed_is_noop(tmp_path, capsys):
+    missing = tmp_path / "ascend"
+    missing.mkdir()
 
-    first = ut_check._make_pure_cpu_view(repo)
-    stale = first / "vllm_ascend" / "stale_marker"
-    stale.write_text("left over from a previous round", encoding="utf-8")
+    assert ut_check._swap_pure_cpu_build_info(missing) == (None, None)
 
-    second = ut_check._make_pure_cpu_view(repo)
+    malformed = tmp_path / "ascend2"
+    pkg = malformed / "vllm_ascend"
+    pkg.mkdir(parents=True)
+    (pkg / "_build_info.py").write_text("# no device type here\n",
+                                        encoding="utf-8")
 
-    assert second == first
-    assert not stale.exists()  # rebuilt, not reused
-
-
-def test_pure_cpu_view_env_override_disables(tmp_path, monkeypatch):
-    repo = _make_built_ascend_tree(tmp_path)
-    monkeypatch.setattr(ut_check, "WORKSPACE_DIR", tmp_path / "ws")
-    monkeypatch.setenv("MAIN2MAIN_UT_PURE_CPU", "0")
-
-    assert ut_check._make_pure_cpu_view(repo) is None
+    assert ut_check._swap_pure_cpu_build_info(malformed) == (None, None)
+    assert (pkg / "_build_info.py").read_text() == "# no device type here\n"
+    # The skip is loud, not silent — an operator must be able to see why
+    # the batch graded the tree's own build profile.
+    assert "no __device_type__ line" in capsys.readouterr().out
 
 
-def test_pure_cpu_view_missing_package_returns_none(tmp_path, monkeypatch):
-    repo = tmp_path / "ascend"
-    repo.mkdir()
-    monkeypatch.setattr(ut_check, "WORKSPACE_DIR", tmp_path / "ws")
+def test_restore_build_info_noop_without_swap(capsys):
+    ut_check._restore_build_info(None, None)
 
-    assert ut_check._make_pure_cpu_view(repo) is None
+    assert "restored" not in capsys.readouterr().out
 
 
-def test_build_ut_env_prepends_pure_cpu_view(tmp_path):
+def test_build_ut_env_paths_and_safepath(tmp_path):
     repo = _make_built_ascend_tree(tmp_path)
     vllm = tmp_path / "vllm"
     vllm.mkdir()
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
-    view = tmp_path / "ws" / "ut_purecpu_view"
 
-    env = ut_check._build_ut_env(repo, vllm, fake_bin, pure_cpu_view=view)
+    env = ut_check._build_ut_env(repo, vllm, fake_bin)
 
     parts = env["PYTHONPATH"].split(":")
-    assert parts[0] == str(view)
-    assert parts[1] == str(repo.resolve())
-    assert parts[2] == str(vllm.resolve())
+    assert parts[0] == str(repo.resolve())
+    assert parts[1] == str(vllm.resolve())
+    # `python -m pytest` prepends the graded tree (cwd) ahead of
+    # PYTHONPATH; PYTHONSAFEPATH gives -m the console-script sys.path
+    # semantics so the invocation matches upstream CI on both paths
+    # (run 38421012498).
+    assert env["PYTHONSAFEPATH"] == "1"
 
 
 def test_check_ut_uses_venv_pytest_script(tmp_path, monkeypatch):
     """Upstream CI invokes the pytest console script.  `python -m pytest`
-    instead prepends the repo cwd to sys.path AHEAD of PYTHONPATH, which
-    silently defeats the pure-CPU shadow view (the tree's own a3
-    _build_info wins; verified locally 2026-10-13)."""
+    instead prepends the repo cwd to sys.path AHEAD of PYTHONPATH — the
+    batch prefers the console-script form and sets PYTHONSAFEPATH for the
+    -m fallback (invocation parity with upstream CI)."""
     repo = tmp_path / "ascend"
     repo.mkdir()
     vllm = tmp_path / "vllm"
