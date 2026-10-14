@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
 """Deterministic step planner for the main2main upgrade pipeline.
 
-Splits a range of upstream vLLM commits into ordered steps based on changed
-lines in vllm/ source files. Commits that do not touch vllm/ are skipped.
+Splits a range of upstream vLLM commits into ordered steps. Every commit
+goes into a step (so verified.commit advances across the full range); the
+only question is where the step boundaries fall.
 
-Algorithm:
-  1. git log --reverse base..target → ordered commit list
-  2. For each commit, git diff-tree --numstat → vllm/ changed lines
-  3. Keep only commits that touch vllm/; skip others
-  4. Commits accumulate into a step until vllm_changed_lines > LINE_BUDGET
-     or the step reaches the commit-count budget
-  5. A single commit with vllm_changed_lines > LINE_BUDGET becomes its own step
+Algorithm (user decision 2026-10-14, after run 38512795089 planned 17
+steps for a single day of 191 commits — each step pays a full e2e+UT
+validation round, so step count dominates wall-clock):
+  1. git log --reverse base..target → ordered commit list with commit dates
+  2. Group consecutive commits by commit date (one bucket per calendar day)
+  3. A day whose total effective lines fit LINE_BUDGET and whose commit
+     count fits COMMIT_BUDGET becomes one step; otherwise the day is split
+     into exactly MAX_STEPS_PER_DAY steps with an even effective-line share
+
+A day is never split into more than MAX_STEPS_PER_DAY steps regardless of
+volume — the cost is coarser failure bisection (a failing step pins the
+regression to half a day of commits instead of a ~2000-line slice), which
+the user accepted for the wall-clock win.
 
 Overridable via env for tuning:
-  MAIN2MAIN_LINE_BUDGET   (default 2000 vllm/ changed lines per step)
-  MAIN2MAIN_COMMIT_BUDGET (default 35 commits per step)
+  MAIN2MAIN_LINE_BUDGET       (default 2000 vllm/ changed lines; the
+                              1-step-vs-2 threshold within a day)
+  MAIN2MAIN_COMMIT_BUDGET     (default 35 commits; ditto)
+  MAIN2MAIN_MAX_STEPS_PER_DAY (default 2)
 
 Output:
   - <workspace>/steps.json  — machine-readable plan
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -32,6 +42,7 @@ from main2main_flow.scripts.utils.utils import run_git, ts_print
 
 LINE_BUDGET = int(os.environ.get("MAIN2MAIN_LINE_BUDGET", "2000"))
 BASE_COMMIT_COUNT_BUDGET = int(os.environ.get("MAIN2MAIN_COMMIT_BUDGET", "35"))
+MAX_STEPS_PER_DAY = int(os.environ.get("MAIN2MAIN_MAX_STEPS_PER_DAY", "2"))
 
 
 # ── vllm-report MCP client ────────────────────────────────────────────────────
@@ -175,17 +186,22 @@ def _commit_count_budget() -> int:
 
 
 def _list_commits(repo: Path, base: str, target: str) -> list[dict[str, str]]:
+    # --date=short renders the committer date in the offset recorded in the
+    # commit object itself, so day grouping is deterministic regardless of
+    # the runner's TZ.
     log_output = run_git(
-        repo, "log", "--reverse", "--format=%H%x1f%s", f"{base}..{target}"
+        repo, "log", "--reverse", "--date=short",
+        "--format=%H%x1f%s%x1f%cd", f"{base}..{target}"
     )
     commits: list[dict[str, str]] = []
     for line in log_output.strip().splitlines():
         if not line.strip():
             continue
-        parts = line.split("\x1f", 1)
+        parts = line.split("\x1f", 2)
         commits.append({
             "sha": parts[0].strip(),
             "subject": parts[1].strip() if len(parts) > 1 else "",
+            "date": parts[2].strip() if len(parts) > 2 else "",
         })
     return commits
 
@@ -242,13 +258,58 @@ def _make_step(index: int, commits: list[dict[str, str]], start: str,
     }
 
 
+def _day_buckets(commits: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    """Group a chronological commit list into consecutive calendar-day
+    buckets (commits arrive oldest-first from git log --reverse)."""
+    buckets: list[list[dict[str, str]]] = []
+    for commit in commits:
+        if buckets and buckets[-1][-1].get("date") == commit.get("date"):
+            buckets[-1].append(commit)
+        else:
+            buckets.append([commit])
+    return buckets
+
+
+def _split_evenly(day_commits: list[dict[str, str]],
+                  effective: list[int], k: int) -> list[list[dict[str, str]]]:
+    """Split one day's commits into at most k steps with an even
+    effective-line share.
+
+    Boundaries fall after the commit where the cumulative effective lines
+    first reach j*total/k.  A huge commit naturally lands alone (the
+    boundary lands right after it); zero-effective tails merge into the
+    last bucket rather than forming empty steps.  When the day has fewer
+    commits than k, each commit becomes its own step instead of empty
+    buckets."""
+    n = len(day_commits)
+    if n <= k:
+        return [[c] for c in day_commits]
+    total = sum(effective)
+    prefix = list(itertools.accumulate(effective))
+    boundaries: list[int] = []
+    j = 1
+    for i in range(n - 1):
+        while (j < k and prefix[i] >= j * total / k
+               and (not boundaries or i + 1 > boundaries[-1])):
+            boundaries.append(i + 1)
+            j += 1
+    buckets: list[list[dict[str, str]]] = []
+    prev = 0
+    for b in boundaries:
+        buckets.append(day_commits[prev:b])
+        prev = b
+    buckets.append(day_commits[prev:])
+    return buckets
+
+
 def _plan_steps(
     commits: list[dict[str, str]],
     lines_per_commit: dict[str, int],
     impacts: dict[str, dict | None],
     base_commit: str,
 ) -> list[dict[str, Any]]:
-    """Linear grouping by effective-line budget.
+    """Day-bounded grouping: at most MAX_STEPS_PER_DAY steps per calendar
+    day (user decision 2026-10-14).
 
     Every commit goes into a step (so verified.commit advances across the
     full range).  A commit's *effective* lines are:
@@ -258,9 +319,12 @@ def _plan_steps(
       - the full vllm/ line count otherwise (analyzed + affected, or
         unanalyzed where we fall back to conservative line-count)
 
-    Steps accumulate commits until effective_lines > LINE_BUDGET or the
-    commit-count budget is reached, then a new step starts.  A single
-    commit whose effective_lines > LINE_BUDGET gets its own step.
+    Within a day, the LINE_BUDGET / COMMIT_BUDGET pair only decides
+    whether the day is one step or is split into MAX_STEPS_PER_DAY steps
+    by even effective-line share — budget accumulation never produces
+    more than MAX_STEPS_PER_DAY steps for a day.  The cost of the cap is
+    coarser failure bisection; the win is that each day costs at most
+    MAX_STEPS_PER_DAY e2e+UT validation rounds.
 
     The adapter runs on every step.  If the adapter's analysis confirms
     the step needs no ascend change (all commits ascend_affected=False AND
@@ -269,51 +333,42 @@ def _plan_steps(
     """
     placed_shas: set[str] = set()
     steps: list[dict[str, Any]] = []
-
-    cur_commits: list[dict[str, str]] = []
-    cur_vllm_lines = 0
-    cur_effective_lines = 0
     start = base_commit
 
-    def close_step() -> None:
-        nonlocal cur_commits, cur_vllm_lines, cur_effective_lines, start
-        if not cur_commits:
-            return
-        needs_adapt = _step_needs_adaptation(cur_commits, impacts)
-        steps.append(_make_step(len(steps) + 1, cur_commits, start,
-                                cur_vllm_lines, cur_effective_lines,
+    def close_step(bucket: list[dict[str, str]],
+                   vllm_lines: int, effective_lines: int) -> None:
+        nonlocal start
+        needs_adapt = _step_needs_adaptation(bucket, impacts)
+        steps.append(_make_step(len(steps) + 1, bucket, start,
+                                vllm_lines, effective_lines,
                                 needs_adapt, impacts))
-        for c in cur_commits:
+        for c in bucket:
             placed_shas.add(c["sha"])
-        start = cur_commits[-1]["sha"]
-        cur_commits = []
-        cur_vllm_lines = 0
-        cur_effective_lines = 0
+        start = bucket[-1]["sha"]
 
-    for commit in commits:
-        sha = commit["sha"]
-        vllm_lines = lines_per_commit.get(sha, 0)
-        impact = impacts.get(sha)
-        eff = _effective_lines(impact, vllm_lines)
-
-        # Single commit exceeding budget → own step.
-        if eff > LINE_BUDGET:
-            close_step()
-            cur_commits.append(commit)
-            cur_vllm_lines = vllm_lines
-            cur_effective_lines = eff
-            close_step()
+    for day_commits in _day_buckets(commits):
+        effective = [
+            _effective_lines(impacts.get(c["sha"]), lines_per_commit.get(c["sha"], 0))
+            for c in day_commits
+        ]
+        total_eff = sum(effective)
+        # A zero-effective day is a no-op workload (vllm-report routed every
+        # commit to ascend_affected=False) — the adapter sets is_noop and
+        # skips e2e, so commit count is irrelevant; keep it one step.
+        fits_one_step = (total_eff <= LINE_BUDGET
+                         and (len(day_commits) <= _commit_count_budget()
+                              or total_eff == 0))
+        if fits_one_step or len(day_commits) <= 1 or MAX_STEPS_PER_DAY <= 1:
+            close_step(day_commits, sum(lines_per_commit.get(c["sha"], 0)
+                                        for c in day_commits), total_eff)
             continue
-
-        # Accumulate; flush when budget exceeded.
-        if cur_effective_lines + eff > LINE_BUDGET or len(cur_commits) >= _commit_count_budget():
-            close_step()
-
-        cur_commits.append(commit)
-        cur_vllm_lines += vllm_lines
-        cur_effective_lines += eff
-
-    close_step()
+        buckets = _split_evenly(day_commits, effective, MAX_STEPS_PER_DAY)
+        for bucket in buckets:
+            close_step(bucket,
+                       sum(lines_per_commit.get(c["sha"], 0) for c in bucket),
+                       sum(_effective_lines(impacts.get(c["sha"]),
+                                            lines_per_commit.get(c["sha"], 0))
+                           for c in bucket))
 
     # If commits existed but produced zero steps (shouldn't happen), fall
     # back to a single step covering the full range.
