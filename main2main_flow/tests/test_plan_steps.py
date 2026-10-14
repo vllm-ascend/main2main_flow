@@ -1,12 +1,17 @@
 """Day-bounded step planning: at most MAX_STEPS_PER_DAY steps per calendar
 day (user decision 2026-10-14, run 38512795089 planned 17 steps for one
-day of 191 commits)."""
+run's 191-commit backlog).  Days are stamped from the committer epoch in
+UTC — the first cut used each commit's own recorded offset, whose
+interleaved rendering fragmented one 5-day backlog into 24 steps."""
 from __future__ import annotations
 
+import os
+import subprocess
 from typing import Any
 
 from main2main_flow.scripts.utils.plan_steps import (
     _day_buckets,
+    _list_commits,
     _plan_steps,
     _split_evenly,
 )
@@ -160,3 +165,49 @@ def test_every_commit_placed_in_order():
     assert placed == [c["sha"] for c in commits]
     for prev, nxt in zip(steps, steps[1:]):
         assert nxt["start_commit"] == prev["end_commit"]
+
+
+# ---- _list_commits: UTC day stamping ------------------------------------------
+
+def _git(repo, *args, env_extra=None):
+    env = {**os.environ, **(env_extra or {})}
+    proc = subprocess.run(["git", "-C", str(repo), *args], check=False,
+                          capture_output=True, env=env, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {args} failed ({proc.returncode}): "
+                           f"{proc.stderr.strip()} / out: {proc.stdout.strip()[:200]}")
+
+
+def test_list_commits_stamps_monotonic_utc_days(tmp_path):
+    # Upstream committer timezones interleave the --date=short rendering
+    # along the topological order (the first day-cap cut split one 5-day
+    # backlog into 24 bouncing steps).  Days must come from the committer
+    # epoch in UTC: monotonic with git log --reverse and runner-TZ-free.
+    repo = tmp_path / "upstream"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "user.email", "t@example.com")
+    (repo / "f.txt").write_text("0\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base",
+         env_extra={"GIT_AUTHOR_DATE": "2026-09-30T10:00:00+00:00",
+                    "GIT_COMMITTER_DATE": "2026-09-30T10:00:00+00:00"})
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    # Epochs ascend (18:00Z → 21:00Z on 09-30) while each commit's own
+    # offset renders 10-01, 09-30, 09-30, 10-01 — the interleaving shape.
+    offsets = ["2026-10-01T02:00:00+08:00", "2026-09-30T12:00:00-07:00",
+               "2026-09-30T13:00:00-07:00", "2026-10-01T05:00:00+08:00"]
+    for i, d in enumerate(offsets):
+        (repo / "f.txt").write_text(f"rev{i + 1}\n")
+        _git(repo, "commit", "-qam", f"c{i}",
+             env_extra={"GIT_AUTHOR_DATE": d, "GIT_COMMITTER_DATE": d})
+
+    commits = _list_commits(repo, base, "HEAD")
+
+    assert [c["subject"] for c in commits] == ["c0", "c1", "c2", "c3"]
+    days = [c["date"] for c in commits]
+    assert days == ["2026-09-30"] * 4
+    # one day bucket → the plan cannot fragment across the date churn
+    assert [len(b) for b in _day_buckets(commits)] == [4]

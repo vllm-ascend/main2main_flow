@@ -6,10 +6,11 @@ goes into a step (so verified.commit advances across the full range); the
 only question is where the step boundaries fall.
 
 Algorithm (user decision 2026-10-14, after run 38512795089 planned 17
-steps for a single day of 191 commits — each step pays a full e2e+UT
+steps for one run's backlog of 191 commits — each step pays a full e2e+UT
 validation round, so step count dominates wall-clock):
-  1. git log --reverse base..target → ordered commit list with commit dates
-  2. Group consecutive commits by commit date (one bucket per calendar day)
+  1. git log --reverse base..target → ordered commit list, each stamped
+     with the UTC calendar day of its committer epoch
+  2. Group consecutive commits by that day (one bucket per calendar day)
   3. A day whose total effective lines fit LINE_BUDGET and whose commit
      count fits COMMIT_BUDGET becomes one step; otherwise the day is split
      into exactly MAX_STEPS_PER_DAY steps with an even effective-line share
@@ -17,7 +18,15 @@ validation round, so step count dominates wall-clock):
 A day is never split into more than MAX_STEPS_PER_DAY steps regardless of
 volume — the cost is coarser failure bisection (a failing step pins the
 regression to half a day of commits instead of a ~2000-line slice), which
-the user accepted for the wall-clock win.
+the user accepted for the wall-clock win.  Days stay capped rather than
+merging the whole range: a single step spanning several days of upstream
+PRs is too large for the adapter to land in one round.
+
+The UTC stamping exists because a step must be a contiguous commit range
+(it is applied as one diff) while upstream committer timezones interleave
+the --date=short rendering along the topological order — the first cut of
+this cap fragmented a 5-day backlog into 24 steps that bounced between
+dates.
 
 Overridable via env for tuning:
   MAIN2MAIN_LINE_BUDGET       (default 2000 vllm/ changed lines; the
@@ -35,6 +44,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -186,22 +196,32 @@ def _commit_count_budget() -> int:
 
 
 def _list_commits(repo: Path, base: str, target: str) -> list[dict[str, str]]:
-    # --date=short renders the committer date in the offset recorded in the
-    # commit object itself, so day grouping is deterministic regardless of
-    # the runner's TZ.
+    # Day buckets must come from the committer EPOCH rendered in a fixed
+    # timezone, not from the commit's own recorded offset: upstream vLLM
+    # committers span timezones, and --date=short renders each commit in
+    # its own offset, so calendar dates interleave along the topological
+    # order and consecutive-run day grouping fragments the plan (run
+    # 38512795089 attempt 2: a 5-day backlog split into 17 day-fragments
+    # → 24 steps, worse than the linear planner it replaced).  UTC is
+    # deterministic (independent of the runner's TZ) and monotonic with
+    # git log --reverse's epoch ordering.
     log_output = run_git(
-        repo, "log", "--reverse", "--date=short",
-        "--format=%H%x1f%s%x1f%cd", f"{base}..{target}"
+        repo, "log", "--reverse",
+        "--format=%H%x1f%s%x1f%ct", f"{base}..{target}"
     )
     commits: list[dict[str, str]] = []
     for line in log_output.strip().splitlines():
         if not line.strip():
             continue
         parts = line.split("\x1f", 2)
+        day = ""
+        if len(parts) > 2 and parts[2].strip().isdigit():
+            day = datetime.fromtimestamp(int(parts[2]), tz=timezone.utc)\
+                .strftime("%Y-%m-%d")
         commits.append({
             "sha": parts[0].strip(),
             "subject": parts[1].strip() if len(parts) > 1 else "",
-            "date": parts[2].strip() if len(parts) > 2 else "",
+            "date": day,
         })
     return commits
 
