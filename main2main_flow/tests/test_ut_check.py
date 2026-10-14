@@ -28,6 +28,11 @@ def test_build_ut_env_pure_cpu_and_paths(tmp_path):
         d.mkdir()
     env = _build_ut_env(repo, vllm, fake_bin)
     assert env["PYTHONPATH"].split(":")[:2] == [str(repo), str(vllm)]
+    # `python -m pytest` prepends the graded tree (cwd) ahead of
+    # PYTHONPATH; PYTHONSAFEPATH gives -m the console-script sys.path
+    # semantics so the pure-CPU view cannot be shadowed by the tree's
+    # own _build_info (run 38421012498).
+    assert env["PYTHONSAFEPATH"] == "1"
     assert env["PYTHONPATH"].endswith(_flow_root())
     assert env["HF_HUB_OFFLINE"] == "1"
     assert env["ASCEND_RT_VISIBLE_DEVICES"] == ""
@@ -35,6 +40,23 @@ def test_build_ut_env_pure_cpu_and_paths(tmp_path):
     assert env["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert env["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"
     assert env["PATH"].startswith(str(fake_bin))
+
+
+def test_build_ut_env_scrubs_production_csrc_cache_leak(
+        tmp_path, monkeypatch):
+    # Production main2main's csrc-l1-restore exports these into GITHUB_ENV;
+    # upstream cpu-UT never sees them (all csrc steps gated npu != cpu) and
+    # VLLM_ASCEND_BUILD_CACHE_DIR defeats the CMake default that
+    # test_build_cache asserts (run 38383045302 step-1).
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    monkeypatch.setenv("VLLM_ASCEND_BUILD_CACHE_DIR",
+                       str(tmp_path / "vllm-ascend-incremental-build-cache"))
+    monkeypatch.setenv("VLLM_ASCEND_BUILD_CACHE_EVENT_LOG",
+                       str(tmp_path / "csrc-l1-job.jsonl"))
+    env = _build_ut_env(repo, tmp_path / "vllm", tmp_path / "fakebin")
+    assert "VLLM_ASCEND_BUILD_CACHE_DIR" not in env
+    assert "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG" not in env
 
 
 def test_ensure_ut_venv_reuses_matching_marker(tmp_path, monkeypatch):
@@ -493,3 +515,190 @@ def test_compute_base_ut_baseline_snapshot_failure_writes_nothing(
     monkeypatch.setattr(ut_check.shutil, "which", lambda name: None)
     assert compute_base_ut_baseline(repo, vllm) is None
     assert not baseline_file.exists()
+
+
+def test_failure_excerpt_anchors_to_own_section():
+    """Two tests raising the same error must not share an excerpt.
+
+    clean.find(needle) returns the FIRST occurrence of the error text in
+    the whole run — run 38405850804's request_lifecycle violations
+    carried a build_cache test's traceback, sending the root-cause
+    analysis to the wrong file.  The excerpt must anchor at the failing
+    test's own `_____ name _____` section header.
+    """
+    early_err = "FileNotFoundError: [Errno 2] /tmp/zz_dead_dir/vllm_ascend_1.log"
+    clean = (
+        "_________________________ test_build_cache_env _________________________\n"
+        f"E   {early_err}\n"
+        "E   assert csrc default\n"
+        "\n"
+        "_________________________ test_request_lifecycle ________________________\n"
+        f"E   {early_err}\n"
+        "E   assert emit re-opened the dead stream\n"
+    )
+    line = ("FAILED tests/ut/x/test_request_lifecycle.py::test_request_lifecycle"
+            f" - {early_err}")
+
+    ex = ut_check._failure_excerpt(clean, line)
+
+    assert "test_request_lifecycle" in ex
+    assert "dead stream" in ex
+    assert "csrc default" not in ex
+
+
+def test_failure_excerpt_falls_back_to_first_occurrence():
+    """Without a matching section header, the excerpt degrades to the
+    first needle occurrence instead of returning nothing."""
+    err = "ValueError: bad config"
+    clean = (
+        f"E   {err}\n"
+        "E   more detail\n"
+    )
+    line = f"FAILED tests/ut/x/test_cfg.py::test_cfg - {err}"
+
+    ex = ut_check._failure_excerpt(clean, line)
+
+    assert "bad config" in ex
+
+
+def _make_built_ascend_tree(tmp_path):
+    """A minimal built ascend tree: vllm_ascend package with an a3 profile."""
+    repo = tmp_path / "ascend"
+    pkg = repo / "vllm_ascend"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "device_config.py").write_text("VALUE = 'real-tree'\n",
+                                          encoding="utf-8")
+    (pkg / "_build_info.py").write_text(
+        "# Auto-generated file\n__device_type__ = 'A3'\n", encoding="utf-8")
+    return repo
+
+
+def test_pure_cpu_swap_rewrites_device_type_in_place(tmp_path):
+    repo = _make_built_ascend_tree(tmp_path)
+
+    info, original = ut_check._swap_pure_cpu_build_info(repo)
+
+    assert info is not None and original is not None
+    # Upstream's SOC-less cpu-ut build writes exactly this device family;
+    # the rest of the generated file must survive byte-for-byte.
+    swapped = info.read_text()
+    assert "__device_type__ = 'A2'" in swapped
+    assert "# Auto-generated file" in swapped
+    assert "__device_type__ = 'A3'" not in swapped
+    assert swapped.replace("A2", "A3") == original
+
+
+def test_pure_cpu_swap_restore_round_trip(tmp_path):
+    repo = _make_built_ascend_tree(tmp_path)
+
+    info, original = ut_check._swap_pure_cpu_build_info(repo)
+    ut_check._restore_build_info(info, original)
+
+    assert info.read_text() == \
+        "# Auto-generated file\n__device_type__ = 'A3'\n"
+
+
+def test_pure_cpu_swap_double_quoted_value(tmp_path):
+    """Installs that quote with double quotes swap just as cleanly."""
+    repo = _make_built_ascend_tree(tmp_path)
+    info = repo / "vllm_ascend" / "_build_info.py"
+    info.write_text('__device_type__ = "A3"\n', encoding="utf-8")
+
+    swapped, original = ut_check._swap_pure_cpu_build_info(repo)
+
+    assert swapped is not None and original is not None
+    assert "__device_type__ = 'A2'" in swapped.read_text()
+    ut_check._restore_build_info(swapped, original)
+    assert swapped.read_text() == '__device_type__ = "A3"\n'
+
+
+def test_pure_cpu_swap_env_override_disables(tmp_path, monkeypatch):
+    repo = _make_built_ascend_tree(tmp_path)
+    monkeypatch.setenv("MAIN2MAIN_UT_PURE_CPU", "0")
+
+    assert ut_check._swap_pure_cpu_build_info(repo) == (None, None)
+    assert "__device_type__ = 'A3'" in \
+        (repo / "vllm_ascend" / "_build_info.py").read_text()
+
+
+def test_pure_cpu_swap_missing_or_malformed_is_noop(tmp_path, capsys):
+    missing = tmp_path / "ascend"
+    missing.mkdir()
+
+    assert ut_check._swap_pure_cpu_build_info(missing) == (None, None)
+
+    malformed = tmp_path / "ascend2"
+    pkg = malformed / "vllm_ascend"
+    pkg.mkdir(parents=True)
+    (pkg / "_build_info.py").write_text("# no device type here\n",
+                                        encoding="utf-8")
+
+    assert ut_check._swap_pure_cpu_build_info(malformed) == (None, None)
+    assert (pkg / "_build_info.py").read_text() == "# no device type here\n"
+    # The skip is loud, not silent — an operator must be able to see why
+    # the batch graded the tree's own build profile.
+    assert "no __device_type__ line" in capsys.readouterr().out
+
+
+def test_restore_build_info_noop_without_swap(capsys):
+    ut_check._restore_build_info(None, None)
+
+    assert "restored" not in capsys.readouterr().out
+
+
+def test_build_ut_env_paths_and_safepath(tmp_path):
+    repo = _make_built_ascend_tree(tmp_path)
+    vllm = tmp_path / "vllm"
+    vllm.mkdir()
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+
+    env = ut_check._build_ut_env(repo, vllm, fake_bin)
+
+    parts = env["PYTHONPATH"].split(":")
+    assert parts[0] == str(repo.resolve())
+    assert parts[1] == str(vllm.resolve())
+    # `python -m pytest` prepends the graded tree (cwd) ahead of
+    # PYTHONPATH; PYTHONSAFEPATH gives -m the console-script sys.path
+    # semantics so the invocation matches upstream CI on both paths
+    # (run 38421012498).
+    assert env["PYTHONSAFEPATH"] == "1"
+
+
+def test_check_ut_uses_venv_pytest_script(tmp_path, monkeypatch):
+    """Upstream CI invokes the pytest console script.  `python -m pytest`
+    instead prepends the repo cwd to sys.path AHEAD of PYTHONPATH — the
+    batch prefers the console-script form and sets PYTHONSAFEPATH for the
+    -m fallback (invocation parity with upstream CI)."""
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    vllm = tmp_path / "vllm"
+    vllm.mkdir()
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    py = venv / "bin" / "python"
+    py.write_text("")
+    script = venv / "bin" / "pytest"
+    script.write_text("")
+
+    monkeypatch.setattr(ut_check, "_collect_cpu_ut_files",
+                        lambda repo: ["tests/ut/test_a.py"])
+    monkeypatch.setattr(ut_check, "_ensure_ut_venv",
+                        lambda spec: (venv, str(py)))
+    ok = SimpleNamespace(returncode=0, stdout="1 passed in 0.01s\n",
+                         stderr="")
+    seen_cmds = []
+
+    def _fake_run(cmd, **kwargs):
+        seen_cmds.append((cmd, kwargs))
+        return ok
+
+    monkeypatch.setattr(ut_check.subprocess, "run", _fake_run)
+
+    result = check_ut(repo, vllm_path=vllm)
+
+    cmd = seen_cmds[0][0]
+    assert cmd[0] == str(script)
+    assert "main2main_flow.scripts.utils.ut_namespace" in cmd
+    assert result["violations"] == []

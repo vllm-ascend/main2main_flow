@@ -87,3 +87,33 @@ def test_collect_cpu_ut_files_new_format(tmp_path: Path) -> None:
 
 def test_estimated_times_missing_file(tmp_path: Path) -> None:
     assert _load_estimated_times(tmp_path / "empty") == {}
+
+
+def test_collect_cpu_ut_files_matches_pytest_order(tmp_path: Path) -> None:
+    """The CPU-UT batch must run in pytest's collection order.
+
+    os.walk yields root-level files before subdirectories, inverting
+    pytest's name-interleaved order.  On that inverted order
+    ``test_logger.py`` runs early and leaks a file-logging handler bound
+    to its deleted TemporaryDirectory; a later ``runtime_config/`` test
+    reconfigures logging and every subsequent log emit re-opens the dead
+    stream (parity run 38405850804: 371 cascade violations on os.walk
+    order vs 1 failure in pytest's order on the same tree).
+    """
+    repo = tmp_path / "ascend"
+    (repo / "tests" / "ut" / "runtime_config").mkdir(parents=True)
+    (repo / "tests" / "ut" / "test_logger.py").write_text("")
+    (repo / "tests" / "ut" / "runtime_config" / "test_reconfigurer.py").write_text("")
+    cfg = repo / ".github" / "workflows" / "scripts"
+    cfg.mkdir(parents=True)
+    (cfg / "test_config.yaml").write_text(NEW_YAML, encoding="utf-8")
+
+    files = _collect_cpu_ut_files(repo)
+
+    # pytest order: directory entries interleave with files by name, so
+    # runtime_config/ sorts before test_logger.py — NOT os.walk's
+    # root-files-first order.
+    assert files == [
+        "tests/ut/runtime_config/test_reconfigurer.py",
+        "tests/ut/test_logger.py",
+    ]
