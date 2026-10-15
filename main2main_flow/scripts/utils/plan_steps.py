@@ -178,7 +178,7 @@ def _effective_lines(impact: dict | None, vllm_lines: int) -> int:
 def _step_needs_adaptation(step_commits: list[dict[str, str]],
                            impacts: dict[str, dict | None]) -> bool:
     """Unused. The adapter always runs on every step and decides itself
-    whether to skip e2e (via is_noop).  Kept only because the step dict
+    whether adaptation is needed.  Kept only because the step dict
     records it for telemetry."""
     for c in step_commits:
         impact = impacts.get(c["sha"])
@@ -346,10 +346,10 @@ def _plan_steps(
     coarser failure bisection; the win is that each day costs at most
     MAX_STEPS_PER_DAY e2e+UT validation rounds.
 
-    The adapter runs on every step.  If the adapter's analysis confirms
-    the step needs no ascend change (all commits ascend_affected=False AND
-    no baseline issue surfaces), the adapter sets is_noop=True on the
-    result and the flow skips e2e for that step.
+    The adapter runs on every step.  Every step pays its e2e before its
+    commit lands — even a step whose adapter analysis finds no ascend
+    change needed: that judgment is confirmed (or refuted) by the e2e run
+    itself, never used to skip it.
     """
     placed_shas: set[str] = set()
     steps: list[dict[str, Any]] = []
@@ -373,8 +373,8 @@ def _plan_steps(
         ]
         total_eff = sum(effective)
         # A zero-effective day is a no-op workload (vllm-report routed every
-        # commit to ascend_affected=False) — the adapter sets is_noop and
-        # skips e2e, so commit count is irrelevant; keep it one step.
+        # commit to ascend_affected=False) — commit count is irrelevant;
+        # keep it one step (its e2e still runs like every other step's).
         fits_one_step = (total_eff <= LINE_BUDGET
                          and (len(day_commits) <= _commit_count_budget()
                               or total_eff == 0))

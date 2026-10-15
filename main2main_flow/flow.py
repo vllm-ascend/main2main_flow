@@ -279,24 +279,6 @@ def _resolve_test_timeouts() -> dict[str, int] | None:
     return out or None
 
 
-def _has_source_changes(changed_files: list[str]) -> bool:
-    """True if any changed file is real adaptation code.
-
-    Steps that only bump .github/vllm-main-verified.commit (or touch
-    docs/configs) don't need an e2e run — previously they ran the full
-    suite (~40 min) for nothing.
-    """
-    for f in changed_files:
-        if not f:
-            continue
-        if f.startswith(".github/"):
-            continue
-        if f.endswith((".md", ".json", ".txt", ".yaml", ".yml", ".toml", ".cfg")):
-            continue
-        return True
-    return False
-
-
 _UPSTREAM_DIFF_KEEP = (
     "vllm/model_executor/",
     "vllm/lora/",
@@ -450,16 +432,10 @@ class Main2MainState(BaseModel):
 
     # Whether the LAST step's e2e ran and passed.  The last step's e2e runs
     # on the cumulative state (all prior steps' commits + this step's patch),
-    # so it subsumes earlier steps.  When the last step skipped its e2e (or
-    # failed), the cumulative state is unvalidated and the final quality gate
-    # must run the regression e2e — the agent's no-op judgment can be wrong.
+    # so it subsumes earlier steps.  When the last step's e2e failed, the
+    # cumulative state is unvalidated and the final quality gate must run
+    # the regression e2e.
     last_step_e2e_passed: bool = False
-
-    # Set by _ai_analysis: True if the adapter's analysis found the step
-    # needs no vllm-ascend code change (modified files excluding the
-    # tracking file).  process_steps uses this to skip the per-step e2e
-    # round; final_quality_gate's regression e2e still runs.
-    last_step_is_noop: bool = False
 
     # Persistent opencode session ID for full conversational context
     session_id: str = ""
@@ -1103,27 +1079,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     continue
                 noop_fix_retried = False
 
-            # Adapter analyzed the step and confirmed no vllm-ascend code
-            # change needed → skip the per-step e2e round (only on the first
-            # attempt; if a later step's regression e2e in the final gate
-            # surfaces a baseline bug, that gate's fix loop handles it).
-            # The final quality gate always runs the regression e2e at the end.
-            if self.state.last_step_is_noop and self.state.retry_count == 0:
-                ts_print(f"[process_steps] {step_id}: adapter marked step as "
-                         f"no-op (no vllm-ascend code change), skipping e2e")
-                # Commit the verified.commit bump + any adapter artifacts
-                # (e.g. step_summary.md is untracked, no commit needed for it).
-                run_git(ascend_path, "add", "-A")
-                subprocess.run(["git", "commit", "-s", "-m",
-                                 f"main2main: step {step_id} ({step['end_commit'][:8]})"],
-                                cwd=ascend_path, capture_output=True)
-                self.state.current_step += 1
-                self.state.retry_count = 0
-                self.state.last_verified_commit = self.state.cur_vllm_commit
-                self.state.last_step_e2e_passed = False  # final gate must run regression
-                last_e2e_blocking = None
-                continue
-
+            # No skip here, not even for no-op steps: a step's commit (the
+            # verified.commit bump counts) may only land after its e2e has
+            # actually run and passed — a "no vllm-ascend change needed"
+            # judgment is itself a claim about the new upstream range that
+            # e2e must confirm, never a license to skip it.
             last_tested_diff_sha = self._working_tree_diff_sha(ascend_path)
             test_pass = self._run_e2e_test()
             if not test_pass and (last_e2e_blocking is not None
@@ -2573,11 +2533,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         self.state.test_errors = []
 
-        # Track whether the adapter made any vllm-ascend code change (excluding
-        # the tracking file).  process_steps uses this to skip the per-step
-        # e2e for true no-op steps; the final quality gate's regression e2e
-        # still runs at the end.
-        self.state.last_step_is_noop = bool(adapt_result and adapt_result.is_noop)
+        # Note: adapt_result.is_noop ("no vllm-ascend change needed") is only
+        # advisory metadata now (logged below, used by pr_ci_monitor).  It
+        # never skips the per-step e2e — a step's commit lands only after its
+        # e2e has run and passed.
 
         summary_path = step_dir / EACH_STEP_SUMMARY_FILE
         if adapt_result and adapt_result.step_summary and not summary_path.exists():
@@ -2642,13 +2601,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print("[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             return True
 
-        changed = [f for f in (self.state.changed_files or []) if f]
-        if not _has_source_changes(changed):
-            self.state.last_step_e2e_passed = False
-            ts_print(f"[run_e2e_test] {step_id}: only non-source changes "
-                     f"({changed or '(none)'}), skipping e2e")
-            return True
-
+        # Every step pays its e2e before its commit can land — including
+        # steps whose changed files are only the verified.commit bump or
+        # docs: the run would otherwise advance the marker on a stack no
+        # e2e has ever exercised.
         ts_print(f"The adaptation patch is at: {self.state.cur_patch_path}")
         result = run_tests(
             vllm_path=self.state.vllm_path,

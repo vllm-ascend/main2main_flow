@@ -10,6 +10,9 @@
   a revert doesn't re-run format/mypy/UT on an already-verified tree
 - the pre_ci fix loop skips a redundant format+mypy+UT round when the retry
   reproduces the already-failed tree byte-for-byte
+- every step pays its per-step e2e — including adapter-judged no-op steps —
+  and a step's commit lands only on a green e2e (run 38512795089: the
+  removed no-op skip committed a verified.commit bump no e2e ever saw)
 """
 
 import inspect
@@ -24,7 +27,6 @@ def _make_flow():
     f.state.steps = [{"id": "step-1", "start_commit": "aaa", "end_commit": "bbb"}]
     f.state.total_steps = 1
     f.state.current_step = 0
-    f.state.last_step_is_noop = False
     return f
 
 
@@ -101,6 +103,71 @@ def test_e2e_no_stop_loss_when_blocking_set_changes(monkeypatch):
     f.process_steps()
     assert len(calls) == 3  # full budget consumed
     assert reverts == ["step step-1 e2e exhausted"]
+    assert f.state.final_status == flow_mod.UpgradePartial
+
+
+def _head(repo) -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _noop_step_flow(repo, monkeypatch):
+    """The old no-op shape: adapter succeeds without touching any file
+    (adapt_result.is_noop would have been True under the removed skip)."""
+    f = _make_flow()
+    f.state.vllm_ascend_path = str(repo)
+    monkeypatch.setattr(f, "_ai_analysis", lambda: True)
+    return f
+
+
+def test_noop_step_still_pays_e2e_before_commit(monkeypatch, tmp_path):
+    # run 38512795089 (PR 18766): the adapter judged step-1 a no-op and
+    # process_steps skipped e2e entirely, committing the verified.commit
+    # bump onto a stack no e2e had ever exercised.  A no-op judgment is
+    # advisory only — every step pays its e2e, and the commit lands only
+    # after it passes.
+    repo = _init_ascend_repo(tmp_path)
+    base_head = _head(repo)
+    # The realistic no-op tree: only the verified.commit bump, zero source
+    # changes — exactly PR 18766's anatomy.
+    (repo / ".github").mkdir()
+    (repo / ".github" / "vllm-main-verified.commit").write_text(
+        "0f8b398158f01fb3ea0e81b5adc93338fdf3db9c\n")
+    f = _noop_step_flow(repo, monkeypatch)
+    e2e_calls: list[int] = []
+    monkeypatch.setattr(f, "_run_e2e_test",
+                        lambda: e2e_calls.append(f.state.retry_count) or True)
+
+    f.process_steps()
+
+    assert e2e_calls == [0]  # the no-op step's e2e actually ran
+    assert _head(repo) != base_head  # commit landed, only after e2e passed
+    assert f.state.current_step == 1
+    assert f.state.final_status == flow_mod.UpgradeCompleted
+
+
+def test_noop_step_red_e2e_blocks_commit(monkeypatch, tmp_path):
+    # Same shape, e2e red: the verified marker must not advance — the step
+    # burns its full e2e retry budget and ships as partial with nothing
+    # committed.
+    repo = _init_ascend_repo(tmp_path)
+    base_head = _head(repo)
+    f = _noop_step_flow(repo, monkeypatch)
+    e2e_calls: list[int] = []
+    monkeypatch.setattr(f, "_run_e2e_test",
+                        lambda: e2e_calls.append(f.state.retry_count) or False)
+    reverts: list[str] = []
+    monkeypatch.setattr(f, "_revert_working_tree",
+                        lambda reason: reverts.append(reason))
+
+    f.process_steps()
+
+    # Round 0 ran (never skipped).  The adapter keeps changing nothing, so
+    # the zero-progress guard stops the fix loop instead of burning more
+    # e2e rounds on an identical tree — e2e stays at exactly one call.
+    assert e2e_calls == [0]
+    assert _head(repo) == base_head  # nothing committed on a red e2e
+    assert reverts == ["step step-1 no-op fix loop"]
     assert f.state.final_status == flow_mod.UpgradePartial
 
 

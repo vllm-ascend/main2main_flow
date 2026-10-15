@@ -28,7 +28,6 @@ def _make_flow():
     f.state.steps = [{"id": "step-1", "start_commit": "aaa", "end_commit": "bbb"}]
     f.state.total_steps = 1
     f.state.current_step = 0
-    f.state.last_step_is_noop = False
     return f
 
 
