@@ -244,13 +244,12 @@ def _gate_e2e_summary() -> str:
     if data.get("status") == "inherited":
         line += (" — failures are upstream-inherited (outside this PR's "
                  f"diff: {', '.join((data.get('inherited_files') or [])[:2])}"
-                 "), recorded not blocking")
+                 ")")
     elif n_fail:
         line += f", {n_fail} own-diff suite(s) failing"
         if data.get("status") in ("exhausted", "stop_loss_no_progress",
                                   "time_budget", "collection_error_own"):
-            line += (" — fix budget spent, not blocking: upstream PR CI "
-                     "is the verifier")
+            line += " — fix budget spent"
     if n_coll:
         line += f", {n_coll} collection-error suite(s)"
     return line
@@ -1241,19 +1240,19 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
           coverage set now (2026-09-15 merge, _run_gate_e2e): 34 cases
           whose failures are triaged — one delta re-run absorbs flakes;
           tracebacks entirely outside the adaptation diff are
-          upstream-inherited (recorded, not blocking); own-diff failures
-          enter adapter-fix rounds that re-run ONLY the failed suites.
-          Once the fix budget exhausts (MAIN2MAIN_EXTENDED_FIX_ROUNDS,
-          default 3) the failing set is RECORDED, NOT BLOCKING (2026-09-20
-          decision) — the PR body's Gate e2e line carries the evidence and
-          upstream PR CI is the verifier; only static_failed / error still
-          block the gate.
+          upstream-inherited; own-diff failures enter adapter-fix rounds
+          that re-run ONLY the failed suites.  Since the 2026-10-15
+          ruling every red verdict BLOCKS the gate — inherited, exhausted
+          fix budget, stop-loss, time budget, own-diff collection errors,
+          static_failed, error are all recorded for diagnosis and none of
+          them ships a PR (this reverses the 2026-09-20 record-and-push
+          tolerance; a red gate no longer defers to upstream PR CI).
           MAIN2MAIN_EXTENDED_E2E=0 falls back to the legacy 23-case
           regression e2e (same-tree flake retry + revert on determinism).
           Static checks are memoized by working-tree diff sha (HEAD never
           changes during the gate, so the diff sha identifies the tree);
-          the gate e2e is memoized the same way — a green or
-          inherited-suppressed tree is not re-run until the tree changes.
+          the gate e2e is memoized the same way — a green tree is not
+          re-run until the tree changes; a red tree breaks the gate.
         """
         ascend_path = self.state.vllm_ascend_path
         vllm_path = self.state.vllm_path
@@ -1275,13 +1274,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # final_gate); the default routes through _run_gate_e2e.
         extended_e2e_enabled = os.getenv("MAIN2MAIN_EXTENDED_E2E", "1") == "1"
         # Gate-e2e memoization (same tree-sha pattern as the smoke below):
-        # a passed or suppressed (upstream-inherited) tree is not re-run
-        # until the tree changes.
+        # a passed tree is not re-run until the tree changes.  A red tree
+        # never memoizes — it breaks the gate (2026-10-15 ruling).
         gate_e2e_passed_sha: str | None = None
-        gate_e2e_suppressed_sha: str | None = None
         # Release-smoke memoization (same tree-sha pattern as the static
-        # checks): a passed or suppressed (upstream-inherited) tree is not
-        # re-smoked until the tree changes.
+        # checks): a passed tree is not re-smoked until the tree changes;
+        # a skipped round (no worktree, remote mode) also marks the tree
+        # so it isn't retried every iteration.  A red tree breaks the gate.
         smoke_passed_sha: str | None = None
         smoke_suppressed_sha: str | None = None
 
@@ -1356,12 +1355,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     need_regression_e2e = False
                 else:
                     cur_sha = self._working_tree_diff_sha(ascend_path)
-                    if cur_sha in (gate_e2e_passed_sha,
-                                   gate_e2e_suppressed_sha):
-                        # Same tree already green or inherited-suppressed —
-                        # don't re-run the wide set on a memo hit (a smoke
-                        # fix round re-arms the regression e2e; only a tree
-                        # change justifies another full entry).
+                    if cur_sha == gate_e2e_passed_sha:
+                        # Same tree already green — don't re-run the wide
+                        # set on a memo hit (a smoke fix round re-arms the
+                        # regression e2e; only a tree change justifies
+                        # another full entry).
                         need_regression_e2e = False
                     elif e2e_attempts_left <= 0:
                         break
@@ -1369,8 +1367,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         e2e_attempts_left -= 1
                         e2e = self._run_gate_e2e(gate_dir)
                         verdict = e2e.get("status")
-                        if verdict in ("passed", "inherited", "empty",
-                                       "skipped"):
+                        if verdict in ("passed", "empty", "skipped"):
                             need_regression_e2e = False
                             if e2e.get("fixes_applied"):
                                 fixes_applied = True
@@ -1383,41 +1380,23 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                 verified = e2e.get("statics_verified_sha")
                                 if verified:
                                     static_passed_sha = verified
-                            if verdict == "inherited":
-                                gate_e2e_suppressed_sha = (
-                                    self._working_tree_diff_sha(ascend_path))
-                            else:
-                                gate_e2e_passed_sha = (
-                                    self._working_tree_diff_sha(ascend_path))
-                        elif verdict in ("exhausted", "stop_loss_no_progress",
-                                         "time_budget",
-                                         "collection_error_own"):
-                            # 2026-09-20 decision: the fix budget is spent
-                            # with own-diff failures still standing —
-                            # record and keep pushing.  Memoized like the
-                            # inherited verdict so a re-armed loop doesn't
-                            # re-burn the wide set on the same tree; the
-                            # failing suites stay visible in the PR body's
-                            # Gate e2e line and upstream PR CI is the
-                            # verifier.
-                            ts_print(
-                                f"[final_quality_gate] gate e2e {verdict} "
-                                f"— own-diff failures unresolved after fix "
-                                f"rounds; recorded, NOT blocking PR "
-                                f"creation")
-                            error_logs = (e2e.get("last_error_logs") or [
-                                str(Path(gate_dir) / GATE_E2E_RESULT_FILE)])
-                            if e2e.get("fixes_applied"):
-                                fixes_applied = True
-                                verified = e2e.get("statics_verified_sha")
-                                if verified:
-                                    static_passed_sha = verified
-                            gate_e2e_suppressed_sha = cur_sha
-                            need_regression_e2e = False
+                            gate_e2e_passed_sha = (
+                                self._working_tree_diff_sha(ascend_path))
                         else:
+                            # 2026-10-15 ruling: red e2e blocks the PR.
+                            # inherited (root cause outside the diff),
+                            # exhausted fix budgets, stop-loss, time
+                            # budget, and own-diff collection errors are
+                            # all recorded for diagnosis (gate_e2e_
+                            # inherited.json, the PR body's Gate e2e line)
+                            # — and none of them ships.  Reverses the
+                            # 2026-09-20 record-and-push tolerance:
+                            # upstream PR CI is no longer the verifier for
+                            # a gate the flow already knows is red.
                             ts_print(
                                 f"[final_quality_gate] gate e2e {verdict} "
-                                f"— gate fails")
+                                f"— recorded, BLOCKING: red e2e does not "
+                                f"ship a PR (2026-10-15 ruling)")
                             error_logs = (e2e.get("last_error_logs") or [
                                 str(Path(gate_dir) / GATE_E2E_RESULT_FILE)])
                             break
@@ -1445,14 +1424,20 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     else:
                         verdict, root_files = self._classify_smoke_failure(smoke)
                         if verdict == "inherited":
+                            # Recorded for diagnosis, and — 2026-10-15
+                            # ruling — blocking: red e2e does not ship.
                             ts_print(f"[final_quality_gate] release smoke failure is "
                                      f"UPSTREAM-INHERITED (root cause in "
                                      f"{', '.join(root_files[:3])} — none of them "
-                                     f"is in this adaptation's diff); recording, "
-                                     f"not blocking")
-                            smoke_suppressed_sha = static_passed_sha
+                                     f"is in this adaptation's diff); recorded, "
+                                     f"BLOCKING")
                             self._record_inherited_smoke(smoke, gate_dir,
                                                          root_files)
+                            error_logs = smoke["detail_files"] or [
+                                str(Path(gate_dir)
+                                    / "final-quality-gate-release-smoke"
+                                    / "tests" / "round-0-result.json")]
+                            break
                         elif fix_rounds_left == 0:
                             break
                         else:
@@ -1522,21 +1507,19 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         set: one delta re-run of the failed suites absorbs flakes; a
         failure whose traceback files all sit OUTSIDE the cumulative
         adaptation diff is upstream-inherited (the PR 16382 shape) —
-        recorded in gate_e2e_inherited.json, NOT blocking.  Own-diff
+        recorded in gate_e2e_inherited.json.  Own-diff
         failures enter adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS,
         default 3) that re-run ONLY the failed suites, with a wall-clock
         backstop (MAIN2MAIN_EXTENDED_MAX_MIN), a stop-loss on an identical
         failing set, and a statics re-check when a fix edited the tree.
-        Unlike the old post-gate phase this runs INSIDE the gate, but
-        since 2026-09-20 exhausting the budgets on an own-diff failing set
-        is RECORDED, NOT BLOCKING — the PR body's Gate e2e line carries
-        the failing-suite evidence and upstream PR CI is the verifier.
+        Since the 2026-10-15 ruling EVERY red verdict blocks the gate
+        (run 38512795089 shipped PR 18766 on a red, inherited-suppressed
+        gate) — the evidence is recorded, the PR is not created.
 
         Returns a dict whose "status" the gate loop routes on:
-        passed / inherited / empty / skipped are non-blocking;
+        passed / empty / skipped are non-blocking; inherited /
         exhausted / stop_loss_no_progress / time_budget /
-        collection_error_own are tolerated (recorded, not blocking since
-        2026-09-20); static_failed / error block the gate.
+        collection_error_own / static_failed / error block the gate.
         """
         if not self.state.steps:
             return {"status": "skipped", "reason": "no steps"}
@@ -1759,7 +1742,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                  f"(root cause in "
                                  f"{', '.join(failure_files[:3])} — none of "
                                  f"them is in this adaptation's diff); "
-                                 f"recording, not blocking")
+                                 f"recorded, BLOCKING (2026-10-15 ruling)")
                         self._record_inherited_smoke(
                             {"detail_files": [str(result_path)],
                              "result": {"suite_results": triage_suites}},

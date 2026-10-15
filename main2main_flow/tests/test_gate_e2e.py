@@ -11,11 +11,12 @@ now (2026-09-15 merge) — the wide coverage set with gate semantics:
   absorption) BEFORE triage or any adapter round
 - triage (release-smoke philosophy): traceback files entirely outside the
   cumulative adaptation diff are upstream-inherited — recorded in
-  gate_e2e_inherited.json, NOT blocking; own-diff failures enter
-  adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS, default 3) and, once
-  the budgets exhaust, are RECORDED, NOT BLOCKING (2026-09-20 decision:
-  the PR body carries the failing-suite evidence, upstream PR CI is the
-  verifier); only static_failed / error still block the gate
+  gate_e2e_inherited.json; own-diff failures enter
+  adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS, default 3).  Since
+  the 2026-10-15 ruling EVERY red verdict blocks the gate (inherited,
+  exhausted, stop-loss, time budget, collection_error_own, static_failed,
+  error) — the evidence is recorded, the PR is not created.  This
+  reverses the 2026-09-20 record-and-push tolerance
 - pytest exit 4 (collection error) suites are excluded from fix rounds
   permanently; when only they remain, the triage verdict decides blocking
 - budgets: fix rounds, wall-clock backstop (MAIN2MAIN_EXTENDED_MAX_MIN),
@@ -30,8 +31,6 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-
-import pytest
 
 from main2main_flow import flow as flow_mod
 from main2main_flow.scripts.utils.utils import (
@@ -590,29 +589,31 @@ def _loop_flow(monkeypatch, tmp_path):
     return f, smoke_calls
 
 
-def test_gate_loop_inherited_verdict_is_not_blocking(monkeypatch, tmp_path):
+def test_gate_loop_inherited_verdict_blocks(monkeypatch, tmp_path):
+    # 2026-10-15 ruling: an upstream-inherited failure is recorded (the
+    # evidence JSON) and BLOCKS — run 38512795089 shipped PR 18766 on a
+    # red, inherited-suppressed gate; that tolerance is gone.
     f, smoke_calls = _loop_flow(monkeypatch, tmp_path)
     e2e_calls: list = []
     monkeypatch.setattr(f, "_run_gate_e2e",
                         lambda gate_dir: e2e_calls.append(gate_dir) or
                         {"status": "inherited"})
-    assert f._final_quality_gate() is True
+    assert f._final_quality_gate() is False
     assert len(e2e_calls) == 1
-    assert len(smoke_calls) == 1  # the smoke still runs after e2e
+    assert smoke_calls == []  # the gate broke before the smoke
 
 
-def test_gate_loop_exhausted_verdict_is_not_blocking(monkeypatch, tmp_path):
-    # 2026-09-20: exhausting the gate-e2e fix budget on own-diff failures
-    # records the evidence and keeps pushing — the smoke still runs and
-    # the gate passes.
+def test_gate_loop_exhausted_verdict_blocks(monkeypatch, tmp_path):
+    # 2026-10-15 ruling: exhausting the gate-e2e fix budget on own-diff
+    # failures blocks the gate (reverses 2026-09-20 record-and-push).
     f, smoke_calls = _loop_flow(monkeypatch, tmp_path)
     e2e_calls: list[int] = []
     monkeypatch.setattr(f, "_run_gate_e2e",
                         lambda gate_dir: e2e_calls.append(gate_dir) or
                         {"status": "exhausted"})
-    assert f._final_quality_gate() is True
+    assert f._final_quality_gate() is False
     assert len(e2e_calls) == 1
-    assert len(smoke_calls) == 1  # the smoke still runs after the e2e
+    assert smoke_calls == []
 
 
 def test_gate_loop_static_failed_verdict_blocks(monkeypatch, tmp_path):
@@ -623,41 +624,6 @@ def test_gate_loop_static_failed_verdict_blocks(monkeypatch, tmp_path):
                         lambda gate_dir: {"status": "static_failed"})
     assert f._final_quality_gate() is False
     assert smoke_calls == []
-
-
-def test_gate_loop_exhausted_memoizes_tree(monkeypatch, tmp_path):
-    # A tolerated-exhausted tree is memoized like the inherited verdict:
-    # a smoke fix round re-arms the regression e2e, but the same tree
-    # must not re-burn the wide set.
-    f, smoke_calls = _loop_flow(monkeypatch, tmp_path)
-    e2e_calls: list[int] = []
-    monkeypatch.setattr(f, "_run_gate_e2e",
-                        lambda gate_dir: e2e_calls.append(1) or
-                        {"status": "exhausted"})
-    # Smoke fails twice (initial + flake retry, triaged own), then passes
-    # on the same tree after one adapter round.
-    smoke = [{"skipped": False, "reason": "", "passed": False,
-              "detail_files": ["d.json"], "result": {}}] * 2 + \
-        [{"skipped": False, "reason": "", "passed": True,
-          "detail_files": [], "result": {}}]
-
-    def fake_smoke(gate_dir):
-        smoke_calls.append(1)
-        return smoke[min(len(smoke), len(smoke_calls)) - 1].copy()
-
-    monkeypatch.setattr(f, "_run_release_smoke", fake_smoke)
-    monkeypatch.setattr(f, "_classify_smoke_failure",
-                        lambda smoke: ("own", [OWN_FILE]))
-    payloads: list[int] = []
-    monkeypatch.setattr(f, "_gate_adapter_fix",
-                        lambda role, error_logs, gate_dir:
-                        payloads.append(1) or SimpleNamespace(session_id=None))
-    assert f._final_quality_gate() is True
-    # One e2e entry despite the smoke fix re-arming the regression e2e:
-    # the tree never changed (statics memo + e2e suppressed memo hits).
-    assert len(e2e_calls) == 1
-    assert len(smoke_calls) == 3  # fail + flake retry + pass on same tree
-    assert len(payloads) == 1
 
 
 def test_gate_loop_memoizes_passed_tree(monkeypatch, tmp_path):
