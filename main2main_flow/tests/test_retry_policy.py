@@ -10,9 +10,11 @@
   a revert doesn't re-run format/mypy/UT on an already-verified tree
 - the pre_ci fix loop skips a redundant format+mypy+UT round when the retry
   reproduces the already-failed tree byte-for-byte
-- every step pays its per-step e2e — including adapter-judged no-op steps —
-  and a step's commit lands only on a green e2e (run 38512795089: the
-  removed no-op skip committed a verified.commit bump no e2e ever saw)
+- adapter-judged no-op steps skip their per-step e2e and advance; the
+  final gate owes the run ONE regression e2e for the whole no-op streak
+  (last_step_e2e_passed stays False).  A zero-source-delta FIRST attempt
+  (marker bump / docs only) defers the same way; a fix round with a red
+  e2e outstanding always re-runs run_tests
 """
 
 import inspect
@@ -120,12 +122,11 @@ def _noop_step_flow(repo, monkeypatch):
     return f
 
 
-def test_noop_step_still_pays_e2e_before_commit(monkeypatch, tmp_path):
-    # run 38512795089 (PR 18766): the adapter judged step-1 a no-op and
-    # process_steps skipped e2e entirely, committing the verified.commit
-    # bump onto a stack no e2e had ever exercised.  A no-op judgment is
-    # advisory only — every step pays its e2e, and the commit lands only
-    # after it passes.
+def test_noop_step_skips_e2e_and_advances(monkeypatch, tmp_path):
+    # User model (2026-10-15): a no-op step (adapter found no vllm-ascend
+    # change) skips its per-step e2e and moves straight to the next step's
+    # adaptation.  The marker-bump commit still lands, but the run owes
+    # the final gate one regression e2e — last_step_e2e_passed stays False.
     repo = _init_ascend_repo(tmp_path)
     base_head = _head(repo)
     # The realistic no-op tree: only the verified.commit bump, zero source
@@ -134,41 +135,76 @@ def test_noop_step_still_pays_e2e_before_commit(monkeypatch, tmp_path):
     (repo / ".github" / "vllm-main-verified.commit").write_text(
         "0f8b398158f01fb3ea0e81b5adc93338fdf3db9c\n")
     f = _noop_step_flow(repo, monkeypatch)
+    f.state.last_step_is_noop = True
     e2e_calls: list[int] = []
     monkeypatch.setattr(f, "_run_e2e_test",
                         lambda: e2e_calls.append(f.state.retry_count) or True)
 
     f.process_steps()
 
-    assert e2e_calls == [0]  # the no-op step's e2e actually ran
-    assert _head(repo) != base_head  # commit landed, only after e2e passed
+    assert e2e_calls == []  # the no-op step never pays a per-step e2e
+    assert _head(repo) != base_head  # the marker bump still commits
     assert f.state.current_step == 1
+    assert f.state.last_step_e2e_passed is False  # gate owes this run one e2e
     assert f.state.final_status == flow_mod.UpgradeCompleted
 
 
-def test_noop_step_red_e2e_blocks_commit(monkeypatch, tmp_path):
-    # Same shape, e2e red: the verified marker must not advance — the step
-    # burns its full e2e retry budget and ships as partial with nothing
-    # committed.
+def test_noop_streak_costs_zero_per_step_e2e(monkeypatch, tmp_path):
+    # N consecutive no-op steps skip every per-step e2e; the flag stays
+    # False so the final quality gate runs its regression e2e exactly once
+    # for the whole streak.
     repo = _init_ascend_repo(tmp_path)
-    base_head = _head(repo)
-    f = _noop_step_flow(repo, monkeypatch)
+    f = _make_flow()
+    f.state.vllm_ascend_path = str(repo)
+    f.state.steps = [
+        {"id": "step-1", "start_commit": "aaa", "end_commit": "bbb"},
+        {"id": "step-2", "start_commit": "bbb", "end_commit": "ccc"},
+    ]
+    f.state.total_steps = 2
+    f.state.current_step = 0
+    f.state.last_step_is_noop = True
+    monkeypatch.setattr(f, "_ai_analysis", lambda: True)
     e2e_calls: list[int] = []
     monkeypatch.setattr(f, "_run_e2e_test",
-                        lambda: e2e_calls.append(f.state.retry_count) or False)
-    reverts: list[str] = []
-    monkeypatch.setattr(f, "_revert_working_tree",
-                        lambda reason: reverts.append(reason))
+                        lambda: e2e_calls.append(f.state.retry_count) or True)
 
     f.process_steps()
 
-    # Round 0 ran (never skipped).  The adapter keeps changing nothing, so
-    # the zero-progress guard stops the fix loop instead of burning more
-    # e2e rounds on an identical tree — e2e stays at exactly one call.
-    assert e2e_calls == [0]
-    assert _head(repo) == base_head  # nothing committed on a red e2e
-    assert reverts == ["step step-1 no-op fix loop"]
-    assert f.state.final_status == flow_mod.UpgradePartial
+    assert e2e_calls == []  # two no-op steps, zero per-step e2e rounds
+    assert f.state.current_step == 2
+    assert f.state.last_step_e2e_passed is False  # → the gate's single e2e
+    assert f.state.final_status == flow_mod.UpgradeCompleted
+
+
+def test_non_source_first_attempt_defers_e2e_to_gate(monkeypatch, tmp_path):
+    # Docs/configs-only diff on the FIRST attempt: skip the per-step e2e,
+    # leave the flag False so the final gate's regression e2e covers it.
+    f = _make_flow()
+    f.state.changed_files = [".github/vllm-main-verified.commit", "docs/note.md"]
+    f.state.retry_count = 0
+    monkeypatch.setattr(flow_mod, "WORKSPACE_DIR", tmp_path)
+    run_calls: list[dict] = []
+    monkeypatch.setattr(flow_mod, "run_tests",
+                        lambda **kw: run_calls.append(kw) or {"can_commit": True})
+
+    assert f._run_e2e_test() is True
+    assert run_calls == []
+    assert f.state.last_step_e2e_passed is False
+
+
+def test_non_source_fix_round_still_runs_e2e(monkeypatch, tmp_path):
+    # A fix round has a RED e2e outstanding: a docs-only tweak must not
+    # skip its way into a commit — run_tests is invoked regardless.
+    f = _make_flow()
+    f.state.changed_files = ["docs/note.md"]
+    f.state.retry_count = 1
+    monkeypatch.setattr(flow_mod, "WORKSPACE_DIR", tmp_path)
+    run_calls: list[dict] = []
+    monkeypatch.setattr(flow_mod, "run_tests",
+                        lambda **kw: run_calls.append(kw) or {"can_commit": True})
+
+    assert f._run_e2e_test() is True
+    assert len(run_calls) == 1
 
 
 def test_budgets_are_hardcoded(monkeypatch):
