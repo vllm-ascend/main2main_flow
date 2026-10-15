@@ -162,7 +162,15 @@ def pip_install_with_fallback(python: Path,
 # ``torch_compile_debug/`` into the repo root when a2 UTs run (e.g.
 # test_gdn_layerwise_kv.py); without isolation the artifacts get staged and
 # the next gate round fails format on them (run 31563761175 round 3).
-GENERATED_ARTIFACT_DIRS = ("torch_compile_debug/",)
+# vllm-ascend's Runtime Guard writes its config under ``<cwd>/runtime/``,
+# and the e2e pytest process runs with cwd = the repo root, so every round
+# drops runtime_config.json(+.lock) into the tree.  Run 38705391440: those
+# files reached the index, adapter-qa raised them as a blocking
+# temp-artifact finding, and the adapter "fixed" it by adding a pattern to
+# the repo's own .gitignore — a file no adaptation may touch.  Entries stay
+# unanchored on purpose: this same tuple is a ``git ls-files`` pathspec
+# below, where a leading "/" is rejected as an invalid path.
+GENERATED_ARTIFACT_DIRS = ("torch_compile_debug/", "runtime/")
 
 
 def exclude_generated_artifacts(repo: Path) -> int:
