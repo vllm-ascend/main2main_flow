@@ -1058,6 +1058,18 @@ _TERMINAL_ERROR_MSG_RE = re.compile(
 # the root cause" — run 38512795089: whisper AND sampler both died of an
 # NPU OOM, yet the only terminal raised error was EngineDeadError, which
 # used to block the OOM env-flake classification).
+#
+# vllm-ascend's NPUModelRunner re-raises its own init failure the same way:
+# "(Worker pid=N) ... RuntimeError: NPUModelRunner failed, error is NPU out
+# of memory. Tried to allocate ...".  The phrase is generic (it renders
+# whatever `e` was), so it belongs here rather than being matched on the
+# OOM text — and leaving it out cost run 38705391440 the whole run: the
+# line's own payload IS the OOM, but it survived the wrapper strip,
+# matched _RAISED_ERROR_MSG_RE, and so returned False from BOTH
+# _is_oom_env_failure (step 3 of the classifier chain) and the
+# signal-kill fallback _no_observed_failure (step 7).  test_sampler was
+# the round's only blocker, and env_flake_pass is in PASS_RESULTS — one
+# missing phrase meant 0/6 steps and no PR.
 _SYMPTOM_WRAPPER_PHRASES = (
     "Worker failed with error",
     "vllm server exited during startup",
@@ -1065,6 +1077,7 @@ _SYMPTOM_WRAPPER_PHRASES = (
     "Failed to start data parallel worker",
     "EngineDeadError",
     "Engine core initialization failed",
+    "NPUModelRunner failed, error is",
 )
 _SYMPTOM_WRAPPER_RE = re.compile(
     "|".join(re.escape(p) for p in _SYMPTOM_WRAPPER_PHRASES))

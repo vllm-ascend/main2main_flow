@@ -14,6 +14,7 @@ from main2main_flow.scripts.utils.run_tests import (
     _assign_devices,
     _is_oom_env_failure,
     _is_psutil_cleanup_race,
+    _no_observed_failure,
     _pair_complete_pool,
     _run_one_test,
     _schedule_rounds,
@@ -264,6 +265,59 @@ def test_oom_env_engine_init_wrapper_classified(tmp_path: Path):
         "[TIMEOUT] suite exceeded 1800s, killing process group",
     ]) + "\n")
     assert _is_oom_env_failure(log)
+
+
+# ---- run 38705391440 shapes (NPUModelRunner re-raise hides the OOM) ----------
+
+NPUMODELRUNNER_RERAISE = (
+    "(Worker pid=1268149) ERROR 10-15 10:07:06 [multiproc_executor.py:1058] "
+    "RuntimeError: NPUModelRunner failed, error is NPU out of memory. Tried "
+    "to allocate 2.00 GiB (NPU 0; 61.27 GiB total capacity; 54.98 GiB already "
+    "allocated; 1.67 GiB free)")
+NPUMODELRUNNER_WRAPPED = (
+    "(EngineCore pid=1265857) ERROR 10-15 10:07:06 [core.py:1436] "
+    "RuntimeError: Worker failed with error 'NPUModelRunner init failed, "
+    "error is NPUModelRunner failed, error is NPU out of memory. Tried to "
+    "allocate 2.00 GiB', please check the stack trace above for the root cause")
+
+
+def test_oom_env_npumodelrunner_reraise_classified(tmp_path: Path):
+    # test_sampler shape (run 38705391440, rounds 1 AND 2): the worker's own
+    # re-raise line carries the OOM as its payload, so it is a symptom — but
+    # it is not "Worker failed with error" either, so before the phrase was
+    # added it survived the wrapper strip, matched _RAISED_ERROR_MSG_RE and
+    # blocked BOTH OOM rescue paths (the round's only blocker).
+    log = _write_log(tmp_path, "\n".join([
+        "E1015 10:07:06.145809 1268149 NPUCachingAllocator.cpp:1332] "
+        "NPU out of memory. Tried to allocate 2.00 GiB",
+        "(Worker pid=1268149) ERROR [multiproc_executor.py:1058] "
+        "torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.00 GiB",
+        NPUMODELRUNNER_RERAISE,
+        "(Worker pid=1268149) ERROR [multiproc_executor.py:1058] "
+        "RuntimeError: NPUModelRunner init failed, error is NPUModelRunner "
+        "failed, error is NPU out of memory. Tried to allocate 2.00 GiB",
+        NPUMODELRUNNER_WRAPPED,
+    ]) + "\n", "sampler.log")
+    assert _is_oom_env_failure(log)
+    # ...and the signal-kill fallback must agree: exit -9 with an empty
+    # summary and no terminal raised error left in the log.
+    empty = {"failed_test_cases": [], "failed_test_files": []}
+    assert _no_observed_failure(empty, log)
+
+
+def test_oom_env_npumodelrunner_non_oom_payload_not_classified(tmp_path: Path):
+    # The added phrase is generic ("... failed, error is <e>"), so a runner
+    # death carrying a REAL error must still be caught — here by the worker
+    # reason, which now carries that payload instead of the OOM.
+    log = _write_log(tmp_path, "\n".join([
+        "(Worker pid=1) ERROR [multiproc_executor.py:1058] RuntimeError: "
+        "NPUModelRunner failed, error is shape mismatch in fused_moe forward",
+        "NPU out of memory is mentioned in a doc line",
+        "(EngineCore pid=2) ERROR [core.py:1436] RuntimeError: Worker failed "
+        "with error 'NPUModelRunner failed, error is shape mismatch in "
+        "fused_moe forward', please check the stack trace above",
+    ]) + "\n")
+    assert not _is_oom_env_failure(log)
 
 
 def test_run_one_test_oom_becomes_env_flake(monkeypatch, tmp_path: Path):
