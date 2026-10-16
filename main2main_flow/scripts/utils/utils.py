@@ -49,6 +49,15 @@ PR_CI_WATCH_RESULT_FILE = "pr_ci_watch_result.json"
 # Gate main e2e evidence (flow._run_gate_e2e), written into quality_gate/.
 GATE_E2E_RESULT_FILE = "gate_e2e_result.json"
 GATE_E2E_INHERITED_FILE = "gate_e2e_inherited.json"
+# Run-wide verdict, written by flow.generate_final_post and read by both the
+# workflow's final-status step and run_summary's job-page section.
+FINAL_STATUS_FILE = "final_status.json"
+# End-of-run job-page summary (run_summary.emit_run_summary): one markdown
+# file per run, also appended to $GITHUB_STEP_SUMMARY.
+RUN_RESULT_FILE = "run_result.md"
+# Per-round pre_ci trace (run_summary.record_pre_ci_attempt), one file per
+# step e2e round, holding every adapter attempt that ran under that round.
+PRE_CI_ROUND_FILE_FMT = "pre_ci-round-{round}.json"
 
 def run_git(repo: Path | str, *args: str) -> str:
     result = subprocess.run(

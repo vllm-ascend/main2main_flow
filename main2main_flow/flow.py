@@ -23,6 +23,8 @@ from main2main_flow.scripts.utils.lessons import (
     submit_pre_ci_exhausted_lesson, submit_pre_ci_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
 from main2main_flow.scripts.utils.pr_ci_monitor import watch_and_fix
+from main2main_flow.scripts.utils.run_summary import (
+    emit_run_summary, record_pre_ci_attempt)
 from main2main_flow.scripts.utils.run_tests import (
     PASS_RESULTS,
     _load_estimated_times,
@@ -47,7 +49,7 @@ from main2main_flow.scripts.utils.utils import (
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
     FINAL_CODE_STRUCTURE_GUIDE_FILE, GENERATED_ARTIFACT_DIRS, run_git, ts_print,
-    GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE,
+    GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE, FINAL_STATUS_FILE,
 )
 
 # Files that are tracking/metadata, not real adaptation changes — excluded
@@ -574,65 +576,78 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
 
     def run(self, inputs: dict | None = None):
-        if inputs:
-            for k, v in inputs.items():
-                setattr(self.state, k, v)
-        self.initialize()
-        signal = self.analyze_commit_and_plan_step()
-        if signal == HasNoCommit:
-            self.has_no_commit()
-            return
-        self.process_steps()
-        # Final quality gate runs whenever at least one step succeeded
-        # (current_step > 0), including partial runs: format + mypy + UT
-        # must always execute so lint issues never leak into the PR (run
-        # 174 pushed an E501 line because the gate only ran on the
-        # all-steps-passed path).  Failures enter adapter-fix mode.
-        gate_passed = True
-        if self.state.current_step > 0:
-            # Re-verify against the LAST VERIFIED vllm commit, not the
-            # target.  A step that exhausted its retries was reverted, but
-            # the vllm checkout was left on that step's commit — running
-            # the gate there pairs the committed (older-shape) adaptation
-            # with vllm changes it never adapted to, failing spuriously
-            # (2026-09-03 run 33638863120: step-21 exhausted, gate then
-            # died on a mamba get_mamba_groups shape the 20 committed
-            # steps never saw).  On the all-steps-completed path
-            # last_verified_commit == the target, so this is a no-op.
-            if self.state.last_verified_commit:
-                run_git(self.state.vllm_path, "checkout",
-                        self.state.last_verified_commit)
-                ts_print(f"[run] gate against last verified vllm "
-                         f"{self.state.last_verified_commit[:12]}")
-            gate_passed = self._final_quality_gate()
+        # The run summary is emitted from `finally` so that every exit — the
+        # two early returns below, the push path, and an exception mid-run —
+        # leaves a job page saying how far the run actually got.  pr_url is
+        # filled only on the push path; the early returns set pr_note instead,
+        # because "no PR" is the single most-asked question about a failed run.
+        pr_url = ""
+        pr_note = ""
+        try:
+            if inputs:
+                for k, v in inputs.items():
+                    setattr(self.state, k, v)
+            self.initialize()
+            signal = self.analyze_commit_and_plan_step()
+            if signal == HasNoCommit:
+                pr_note = "nothing to adapt — already at the target"
+                self.has_no_commit()
+                return
+            self.process_steps()
+            # Final quality gate runs whenever at least one step succeeded
+            # (current_step > 0), including partial runs: format + mypy + UT
+            # must always execute so lint issues never leak into the PR (run
+            # 174 pushed an E501 line because the gate only ran on the
+            # all-steps-passed path).  Failures enter adapter-fix mode.
+            gate_passed = True
+            if self.state.current_step > 0:
+                # Re-verify against the LAST VERIFIED vllm commit, not the
+                # target.  A step that exhausted its retries was reverted, but
+                # the vllm checkout was left on that step's commit — running
+                # the gate there pairs the committed (older-shape) adaptation
+                # with vllm changes it never adapted to, failing spuriously
+                # (2026-09-03 run 33638863120: step-21 exhausted, gate then
+                # died on a mamba get_mamba_groups shape the 20 committed
+                # steps never saw).  On the all-steps-completed path
+                # last_verified_commit == the target, so this is a no-op.
+                if self.state.last_verified_commit:
+                    run_git(self.state.vllm_path, "checkout",
+                            self.state.last_verified_commit)
+                    ts_print(f"[run] gate against last verified vllm "
+                             f"{self.state.last_verified_commit[:12]}")
+                gate_passed = self._final_quality_gate()
+                if not gate_passed:
+                    self.state.final_status = UpgradeFailed
+            self.generate_final_post()
+            # Persist adaptation lessons (E2E fix rounds) back to vllm-report
+            # before push — the clone is recreated every run, so unsaved
+            # lessons would be lost.
+            persist_lessons(self.state.vllm_report_path)
+            # The release worktree is workspace-scoped (initialize rmtree's
+            # workspace), but a leftover worktree registration in the vllm repo
+            # would break the next run's `worktree add` — remove it cleanly.
+            self._cleanup_release_worktree()
+            if self.state.current_step == 0:
+                # No step ever passed e2e: there is no successful adaptation to
+                # submit, so creating a PR would only ship a "failed" description
+                # and the last-attempted (broken) diff (PR #14376).  Skip the
+                # push entirely.
+                pr_note = "no step passed e2e"
+                ts_print("[push] no steps completed, skipping PR creation")
+                return
             if not gate_passed:
-                self.state.final_status = UpgradeFailed
-        self.generate_final_post()
-        # Persist adaptation lessons (E2E fix rounds) back to vllm-report
-        # before push — the clone is recreated every run, so unsaved
-        # lessons would be lost.
-        persist_lessons(self.state.vllm_report_path)
-        # The release worktree is workspace-scoped (initialize rmtree's
-        # workspace), but a leftover worktree registration in the vllm repo
-        # would break the next run's `worktree add` — remove it cleanly.
-        self._cleanup_release_worktree()
-        if self.state.current_step == 0:
-            # No step ever passed e2e: there is no successful adaptation to
-            # submit, so creating a PR would only ship a "failed" description
-            # and the last-attempted (broken) diff (PR #14376).  Skip the
-            # push entirely.
-            ts_print("[push] no steps completed, skipping PR creation")
-            return
-        if not gate_passed:
-            # Format/mypy/UT could not be satisfied after the gate's fix
-            # rounds — pushing would ship known-broken code (run 174's E501).
-            # The manual review issue is created by the workflow's
-            # final-status step; do not create a PR.
-            ts_print("[push] final quality gate failed after fix rounds, "
-                     "skipping PR creation")
-            return
-        pr_url = self.push_to_github()
-        self._monitor_pr_ci(pr_url)
+                # Format/mypy/UT could not be satisfied after the gate's fix
+                # rounds — pushing would ship known-broken code (run 174's E501).
+                # The manual review issue is created by the workflow's
+                # final-status step; do not create a PR.
+                pr_note = "final quality gate failed"
+                ts_print("[push] final quality gate failed after fix rounds, "
+                         "skipping PR creation")
+                return
+            pr_url = self.push_to_github()
+            self._monitor_pr_ci(pr_url)
+        finally:
+            emit_run_summary(self.state, pr_url=pr_url, pr_note=pr_note)
 
     def _monitor_pr_ci(self, pr_url: str) -> None:
         """Closed-loop watch of the submitted PR's upstream CI.
@@ -2450,6 +2465,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 ascend_path, self.state.release_tag, vllm_path=vllm_path,
                 vllm_release_path=self._release_gate_path())
             pre_ci_passed = check_result["all_passed"]
+            # Durable per-attempt trace for the run summary.  Only FAILING
+            # attempts leave a file otherwise (pre_ci_check.json, overwritten
+            # each time), so a job page could say "the step passed" but never
+            # "it took 3 format/mypy/UT rounds to get there".  retry_count is
+            # the e2e round this pre_ci precedes — the same number that names
+            # tests/round-<n>-result.json.
+            record_pre_ci_attempt(step_dir, step_id, self.state.retry_count,
+                                  check_result)
             ut_check = next((c for c in check_result.get("checks", [])
                              if c.get("name") == "ut"), None)
             if ut_check and not ut_check.get("skipped", False):
@@ -2913,7 +2936,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             (WORKSPACE_DIR / FINAL_SUMMARY_FILE).write_text(
                 "main2main adaptation failed — no steps completed.\n", encoding="utf-8"
             )
-            (WORKSPACE_DIR / "final_status.json").write_text(
+            (WORKSPACE_DIR / FINAL_STATUS_FILE).write_text(
                 json.dumps({"status": "failed", "steps_completed": 0, "steps_total": self.state.total_steps,
                             "reached_commit": "", "old_commit": self.state.base_commit,
                             "new_commit": self.state.target_commit or ""}, indent=2, ensure_ascii=False) + "\n",
@@ -3247,7 +3270,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             "old_commit": self.state.base_commit,
             "new_commit": self.state.target_commit or self.state.cur_vllm_commit,
         }
-        (WORKSPACE_DIR / "final_status.json").write_text(
+        (WORKSPACE_DIR / FINAL_STATUS_FILE).write_text(
             json.dumps(status_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
