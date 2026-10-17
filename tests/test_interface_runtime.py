@@ -103,7 +103,18 @@ class RuntimeTests(unittest.TestCase):
         flow.state.target_commit = self.new
         workspace = self.root / "workspace"
         workspace.mkdir()
-        step = {"id": "step-1", "upstream_patch": "", "changed_files": "vllm/api.py"}
+        step = {
+            "id": "step-1",
+            "index": 1,
+            "commit_count": 1,
+            "effective_lines": 2,
+            "commits": [{"sha": self.new, "date": "2026-01-01"}],
+            "start_commit": self.old,
+            "end_commit": self.new,
+            "upstream_patch": "",
+            "changed_files": "vllm/api.py",
+        }
+        summary_file = self.root / "job-summary.md"
         calls = []
 
         def scan(*args):
@@ -115,6 +126,7 @@ class RuntimeTests(unittest.TestCase):
             return {"steps": [step], "total_commits": 1}
 
         with (
+            patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary_file)}),
             patch("main2main_flow.flow.WORKSPACE_DIR", workspace),
             patch("main2main_flow.flow.scan_for_flow", side_effect=scan) as scanner,
             patch("main2main_flow.flow.run_plan", side_effect=plan),
@@ -124,6 +136,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(flow.analyze_commit_and_plan_step(), "HasCommit")
             self.assertEqual(calls, ["scan", "plan"])
             scanner.assert_called_once()
+        self.assertIn("## Main2Main step plan", summary_file.read_text(encoding="utf-8"))
 
         prompts = []
         step_dir = workspace / "steps/step-1"
