@@ -16,9 +16,14 @@ The order inside `kickoff` is:
    scan the entire selected range once, before planning or adapting any step.
    The Ascend baseline is the committed HEAD actually supplied to kickoff,
    including any cumulative adaptations/rebase selected by the caller.
-4. Plan steps, adapt, run pre-CI, and invoke the original `adapter-qa`. Each QA
-   review/retry reads the same `workspace/interface_scan/qa-review.md` together
-   with its current diff and source. Detection adds no model call.
+4. Plan steps. The adapter and adapter-fix read the same single
+   `workspace/interface_scan/qa-review.md`, verify candidates against the
+   current upstream/downstream source, and adapt only confirmed current-step
+   incompatibilities. They record per-root decisions in the existing
+   `step_summary.md`. After pre-CI, the original `adapter-qa` independently
+   reviews the report, decisions, current cumulative tree and diff.
+   Detection itself adds no model call; rejected candidates can require QA
+   even when there is no business-code diff.
 5. Continue the original NPU tests, final gates, PR creation and reporting.
 
 Detection performs CPU source analysis while the existing job holds its runner;
@@ -51,27 +56,53 @@ rescanned. No executable/pickle index is restored. Cache reuse still validates
 the selected source snapshots. A fresh runner without this cache scans again.
 
 The run's diagnostics live in volatile `workspace/interface_scan/`; only
-`qa-review.md` is given to QA. The Markdown contains source evidence so deleting
+`qa-review.md` is given to both agents. The Markdown contains source evidence so deleting
 the temporary clones does not remove its evidence. Local cumulative Ascend
 commits are not given fabricated public GitHub links.
 
-## Original QA consumer
+## Adapter decisions and original QA consumer
 
 The flow automatically binds its report to that flow instance. It takes
 precedence over `MAIN2MAIN_INTERFACE_REPORT`, which remains an optional manual
 QA input when no automatic report is bound. A manual report must be outside
 `workspace/` if initialization will run, because initialization recreates it.
 
-For a nonempty diff, the original `_run_adapter_qa` validates the report as
-readable UTF-8, nonempty and at most 1,000,000 bytes. Invalid evidence produces a
-critic issue before the model call. Empty diffs retain their existing fast path.
+`agents/adapter/SKILL.md` and `agents/adapter-qa/SKILL.md` contain the role
+instructions. `interface_report/handoff.py` builds the input context and checks
+the handoff; `flow.py` supplies paths, step ranges and retry routing.
+
+The report must be readable UTF-8, nonempty and at most 1,000,000 bytes. An
+automatic report's SHA-256 is bound to the flow so later modification is rejected.
 The report describes the PRE-adaptation baseline across the complete range;
-later-step candidates must be deferred until applicable. QA treats evidence as
-untrusted data, distinguishes argument/return/instance-state contracts, and
-records root IDs and assessments in `review.json`'s `interface_report_usage`.
-Existing `verdict`/`issues` remain authoritative. Model-generated usage is not a
-guarantee that every candidate was reviewed. The handoff version remains
-`Main2MainFlow.INTERFACE_REPORT_VERSION == 1`.
+later-step candidates must be deferred until applicable. Both agents treat it
+as untrusted evidence and distinguish argument/return/instance-state contracts.
+
+For every expanded root, the adapter writes exactly one `interface-assessment`
+JSON fenced block in the existing `step_summary.md`. The block binds
+`report_sha256`, `step_id`, `start_commit` and `end_commit`, with `items` containing
+`root_cause_id`, `decision` (`adapted`, `no_change`, `deferred`, or
+`insufficient_evidence`), a specific `reason` and nonempty source `evidence`.
+Both source sides should be cited where relevant. Preserve the normal summary
+header; replace the block on retries. No additional handoff report is needed.
+
+QA reads the raw report and these decisions and independently verifies them,
+including rejected candidates outside the diff. An empty diff does not skip QA
+while candidate decisions need review. No report/no expanded roots with an
+empty diff retains the no-model fast path. QA adds `interface_report_sha256`,
+`interface_step_id` and `interface_report_usage` to its existing `review.json`.
+Every root needs `judgment` (`agree`, `disagree`, `deferred`, or
+`insufficient_evidence`), `assessment` and source `evidence`. A confirmed unsafe
+decision is a disagreement, requires `verdict: fail` and an actionable issue.
+Uncertainty alone is not proof of a break or of safety.
+
+Missing/duplicate/unknown roots, stale report/step/range identity and empty
+reasons/evidence are mechanical handoff failures. They retry through existing
+adapter-fix error feedback and cannot use the semantic QA one-fix escape. A
+malformed handoff cannot reach NPU tests by exhausting that escape. Source
+citations are checked for presence, not semantic truth: model output and even a
+QA agreement do not prove runtime correctness. Existing pre-CI, semantic QA
+one-fix policy and hardware/final gates remain necessary. Handoff version remains
+`Main2MainFlow.INTERFACE_REPORT_VERSION == 1` (the scan report format is unchanged).
 
 ## CPU-only standalone validation
 

@@ -10,6 +10,7 @@ from unittest.mock import patch
 # The import probes for the CLI. No CLI is executed by these tests.
 with patch("shutil.which", return_value="opencode"):
     from main2main_flow.flow import Main2MainFlow
+from main2main_flow.interface_report.handoff import load_report
 
 
 class InterfaceReportTests(unittest.TestCase):
@@ -18,7 +19,13 @@ class InterfaceReportTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.report = self.root / "qa-review.md"
-        self.report.write_text("# Evidence {root}\n候选风险", encoding="utf-8")
+        self.report.write_text("# Evidence\n## abcdef0123456789 — 候选风险\n", encoding="utf-8")
+        report = load_report(str(self.report))
+        self.assessment = dict(report_sha256=report.sha256, step_id="fixture", start_commit="", end_commit="",
+                               items=[dict(root_cause_id=report.roots[0], decision="no_change",
+                                           reason="keyword callers", evidence=["vllm/api.py:10", "vllm_ascend/op.py:20"])])
+        (self.root / "step_summary.md").write_text(
+            "- fixture: No-op\n```interface-assessment\n" + json.dumps(self.assessment) + "\n```\n", encoding="utf-8")
         self.args = dict(ascend_path=str(self.root), vllm_path=str(self.root),
                          step_id="fixture", step_dir=str(self.root), release_tag="0.1.0")
         self.flow = Main2MainFlow()
@@ -32,7 +39,11 @@ class InterfaceReportTests(unittest.TestCase):
 
     def review(self, prompt, **kwargs):
         self.prompt = prompt
-        (self.root / "review.json").write_text(json.dumps({"verdict": "pass", "issues": []}), encoding="utf-8")
+        (self.root / "review.json").write_text(json.dumps({
+            "verdict": "pass", "issues": [], "interface_report_sha256": self.assessment["report_sha256"],
+            "interface_step_id": "fixture", "interface_report_usage": [{
+                "root_cause_id": "abcdef0123456789", "judgment": "agree",
+                "assessment": "Checked keyword caller", "evidence": ["vllm_ascend/op.py:20"]}]}), encoding="utf-8")
         return "review saved", "qa-session"
 
     def test_report_is_optional_and_scoped(self):
@@ -41,7 +52,7 @@ class InterfaceReportTests(unittest.TestCase):
             model.assert_called_once()
         self.assertIn(str(self.report.resolve()), self.prompt)
         self.assertIn("PRE-adaptation", self.prompt)
-        self.assertIn("defer future-step", self.prompt)
+        self.assertIn("future steps", self.prompt)
         self.assertIn("untrusted evidence", self.prompt)
         self.assertIn("interface_report_usage", self.prompt)
         os.environ.pop("MAIN2MAIN_INTERFACE_REPORT")
@@ -63,6 +74,7 @@ class InterfaceReportTests(unittest.TestCase):
             model.assert_not_called()
 
     def test_empty_diff_skips_review(self):
+        os.environ.pop("MAIN2MAIN_INTERFACE_REPORT")
         with patch("main2main_flow.flow.subprocess.run",
                    return_value=subprocess.CompletedProcess([], 0, stdout="")):
             with patch("main2main_flow.flow.run_opencode_review") as model:

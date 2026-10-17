@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from main2main_flow.interface_report import runtime
+from main2main_flow.interface_report.handoff import load_report
 from main2main_flow.interface_report.run import git
 import test_interface_scan as fixtures
 
@@ -140,10 +141,21 @@ class RuntimeTests(unittest.TestCase):
 
         prompts = []
         step_dir = workspace / "steps/step-1"
+        report = load_report(flow.state.interface_report)
+        assessment = dict(report_sha256=report.sha256, step_id="step-1", start_commit=self.old, end_commit=self.new,
+                          items=[dict(root_cause_id=root, decision="adapted", reason="required argument provided",
+                                      evidence=["vllm/api.py:1", "vllm_ascend/client.py:4"]) for root in report.roots])
+        (step_dir / "step_summary.md").write_text(
+            "```interface-assessment\n" + json.dumps(assessment) + "\n```\n", encoding="utf-8")
 
         def review(prompt, **kwargs):
             prompts.append(prompt)
-            (step_dir / "review.json").write_text('{"verdict":"pass","issues":[]}', encoding="utf-8")
+            (step_dir / "review.json").write_text(json.dumps({
+                "verdict": "pass", "issues": [], "interface_report_sha256": report.sha256,
+                "interface_step_id": "step-1", "interface_report_usage": [dict(
+                    root_cause_id=root, judgment="agree", assessment="confirmed source contract",
+                    evidence=["vllm/api.py:1", "vllm_ascend/client.py:4"]) for root in report.roots],
+            }), encoding="utf-8")
             return "saved", "qa-session"
 
         # An unrelated environment override cannot replace this flow's report.

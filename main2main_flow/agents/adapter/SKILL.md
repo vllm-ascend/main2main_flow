@@ -424,6 +424,16 @@ mypy per error code — see `reference/common-pitfalls.md` §"mypy error
 codes". Mechanical fixes — do NOT re-analyze the upstream patch. After
 fixing, e2e re-runs; if it fails, the fix regressed — revert and retry.
 
+## Interface contract candidates
+
+{interface_report_context}
+
+This requirement applies in both adapter and adapter-fix modes. The report is
+candidate evidence. Verify it against the current step's upstream source and
+actual downstream code before deciding whether to adapt. A no-op may still
+require a detailed interface assessment for independent QA; in that case the
+one-line no-op summary below is only the header, not the entire output.
+
 ## Output
 
 Write to {step_dir}/:
