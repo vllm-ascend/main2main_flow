@@ -13,6 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from main2main_flow.interface_report.runtime import scan_for_flow
 from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter, run_opencode_review
 from main2main_flow.scripts.utils import ci_config_guard
 from main2main_flow.scripts.utils.detect_commits import detect
@@ -49,7 +50,7 @@ from main2main_flow.scripts.utils.utils import (
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
     FINAL_CODE_STRUCTURE_GUIDE_FILE, GENERATED_ARTIFACT_DIRS, run_git, ts_print,
-    GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE, FINAL_STATUS_FILE,
+    GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE, FINAL_STATUS_FILE, INTERFACE_RUN_DIR,
 )
 
 # Files that are tracking/metadata, not real adaptation changes — excluded
@@ -417,6 +418,8 @@ class Main2MainState(BaseModel):
     vllm_path: str = ""
     vllm_ascend_path: str = ""
     target_commit: str = ""
+    # One pre-adaptation report for the full range, reused by every QA retry.
+    interface_report: str = ""
 
     steps: list = []
     release_tag: str = ""
@@ -544,7 +547,7 @@ class Main2MainFlow:
 Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
 DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
-        interface_report = os.environ.get("MAIN2MAIN_INTERFACE_REPORT", "")
+        interface_report = self.state.interface_report or os.environ.get("MAIN2MAIN_INTERFACE_REPORT", "")
         if interface_report:
             report = Path(interface_report).resolve()
             try:
@@ -1017,6 +1020,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                     self.state.target_commit or None)
         self.state.release_tag = result.get("compat_tag") or ""
         self.state.base_commit = result.get("base_commit", "")
+        self.state.target_commit = result["target_commit"]
+        self.state.interface_report = ""
 
         (WORKSPACE_DIR / DETECT_FILE).write_text(
             json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -1027,6 +1032,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         if not has_commit:
             return HasNoCommit
+
+        # The existing kickoff job owns detection too. This is deliberately
+        # outside adaptation/QA retry loops and uses the exact detected range.
+        self.state.interface_report = str(scan_for_flow(
+            vllm_path, vllm_ascend_path, result["base_commit"], result["target_commit"],
+            WORKSPACE_DIR / INTERFACE_RUN_DIR,
+        ))
 
         # generate steps.json in workspace
         plan = run_plan(vllm_path, result["base_commit"], result["target_commit"],

@@ -31,7 +31,9 @@ HasNoCommit = "HasNoCommit"
 import os as _os
 _ws_env = _os.environ.get("MAIN2MAIN_WORKSPACE", "")
 WORKSPACE_DIR = Path(_ws_env) if _ws_env else (Path(__file__).parent.parent.parent / "workspace")
-# Interface producer artifacts live outside volatile workspace/ and source trees.
+# Standalone reports live outside source checkouts; kickoff owns workspace copies.
+INTERFACE_RUN_DIR = "interface_scan"
+INTERFACE_RUNTIME_CACHE_DIR = "main2main_flow/interface-reports"
 INTERFACE_QA_REPORT_FILE = "qa-review.md"
 INTERFACE_METADATA_FILE = "run-metadata.json"
 INTERFACE_STATUS_FILE = "run-status.json"

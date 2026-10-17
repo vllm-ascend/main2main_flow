@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run a pinned source-only main2main scan with verified report reuse.
 
-The analyzer is a separate checkout. This entry never installs vLLM, invokes
-kickoff, modifies source, calls a model, or publishes to GitHub.
+The standalone entry requires clean pinned checkouts. It never installs vLLM,
+invokes kickoff, modifies source, calls a model, or publishes to GitHub. The
+flow-owned runtime reuses its scan/cache/render pipeline with source snapshots.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+from typing import Callable
 from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import (
@@ -164,10 +166,30 @@ def cached_report(directory: Path, inputs: dict) -> dict:
 def scan(args: argparse.Namespace) -> None:
     output = args.output.resolve()
     metadata = json.loads((output / INTERFACE_METADATA_FILE).read_text(encoding="utf-8"))
+    roots = {name: Path(value) for name, value in metadata["roots"].items()}
+
+    def validate_sources() -> None:
+        for name, key in (
+            ("engine_root", "engine_sha"),
+            ("vllm_root", "vllm_new_sha"),
+            ("ascend_root", "vllm_ascend_sha"),
+        ):
+            clean_head(roots[name], metadata["inputs"][key])
+
+    _scan_prepared(args, metadata, validate_sources, list(roots.values()))
+
+
+def _scan_prepared(
+    args: argparse.Namespace,
+    metadata: dict,
+    validate_sources: Callable[[], None],
+    source_roots: list[Path],
+) -> None:
+    """Shared scan/cache/render pipeline for clean CLI inputs or flow snapshots."""
+    output = args.output.resolve()
     inputs = metadata["inputs"]
     roots = {name: Path(value) for name, value in metadata["roots"].items()}
-    for name, key in (("engine_root", "engine_sha"), ("vllm_root", "vllm_new_sha"), ("ascend_root", "vllm_ascend_sha")):
-        clean_head(roots[name], inputs[key])
+    validate_sources()
     if inputs["vllm_old_sha"] == inputs["vllm_new_sha"]:
         message = (
             "# Main2Main QA 审阅材料\n\n无需升级：选定 Ascend marker 与 vLLM 目标一致。\n\n"
@@ -191,7 +213,7 @@ def scan(args: argparse.Namespace) -> None:
     cache = args.cache_dir.resolve()
     if cache == output or cache in output.parents or output in cache.parents:
         raise ValueError("Cache and output must be separate directories")
-    for root in roots.values():
+    for root in source_roots:
         if cache == root or root in cache.parents:
             raise ValueError("Cache must be outside source checkouts")
     start = time.monotonic()
@@ -255,8 +277,7 @@ def scan(args: argparse.Namespace) -> None:
                 timeout=args.timeout_seconds,
             )
         report = verify_report(destination, inputs)
-    for name, key in (("engine_root", "engine_sha"), ("vllm_root", "vllm_new_sha"), ("ascend_root", "vllm_ascend_sha")):
-        clean_head(roots[name], inputs[key])
+    validate_sources()
     # Copy into a dedicated sibling cache directory; never delete source paths.
     if cache.is_symlink():
         raise ValueError("Cache directory must not be a symlink")
