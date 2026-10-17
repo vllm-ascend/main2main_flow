@@ -1026,18 +1026,64 @@ _MODEL_DOWNLOAD_FAILURE_RE = re.compile(
     r"|(?:modelscope|huggingface).*connection (?:error|failed)",
     re.IGNORECASE)
 
-# A real (non-download) exception after a traceback means the log carries a
-# genuine code/compile bug NEXT TO the download noise — run 31952700363:
-# an offline safetensors warning (Qwen3-8B-speculator.eagle3) appeared in the
-# same log as the npu_fx_compiler "too many values to unpack (expected 20)"
-# crash, and the download signature alone misclassified the whole test as an
-# env flake, hiding the real bug from the adapter.
-_REAL_ERROR_SIGNATURES = re.compile(
-    r"Traceback \(most recent call last\).*?(?:ValueError|RuntimeError|"
+# A real (non-download) raised error means the log carries a genuine
+# code/compile bug NEXT TO the download noise — run 31952700363: an offline
+# safetensors warning (Qwen3-8B-speculator.eagle3) appeared in the same log
+# as the npu_fx_compiler "too many values to unpack (expected 20)" crash,
+# and the download signature alone misclassified the whole test as an env
+# flake, hiding the real bug from the adapter.
+#
+# The raised error is judged from TERMINAL error lines, not "any exception
+# name after a Traceback header": the download failure itself arrives
+# wrapped in a full traceback (modelscope raises "ValueError: Cannot find
+# the requested files..." from snapshot_download — run 38220121641), so the
+# traceback + exception-name shape matches the download error too.  A
+# terminal line is the raised exception at column 0 (raw subprocess
+# traceback, e.g. a server child process whose output the conftest tees)
+# or pytest's rendered "E   ValueError: ..." form once ANSI codes are
+# stripped.  Only a terminal error that is NOT itself the download error
+# counts as real.
+_TERMINAL_ERROR_MSG_RE = re.compile(
+    r"^(?:E\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:ValueError|RuntimeError|"
     r"TypeError|KeyError|AttributeError|AssertionError|ImportError|"
-    r"IndexError|OverflowError|NameError|NotImplementedError|EngineDeadError)",
-    re.DOTALL | re.IGNORECASE,
+    r"IndexError|OverflowError|NameError|NotImplementedError|"
+    r"EngineDeadError): ",
+    re.MULTILINE)
+
+# Symptom wrappers re-raise a CHILD process's death (vllm server / DP
+# worker / engine core): the real cause and its traceback appear elsewhere
+# in the same log.  They are effects, not causes — never count them as the
+# real error.  EngineDeadError and "Engine core initialization failed" are
+# the v1 engine's re-raises of a worker death ("See stack trace (above) for
+# the root cause" — run 38512795089: whisper AND sampler both died of an
+# NPU OOM, yet the only terminal raised error was EngineDeadError, which
+# used to block the OOM env-flake classification).
+#
+# vllm-ascend's NPUModelRunner re-raises its own init failure the same way:
+# "(Worker pid=N) ... RuntimeError: NPUModelRunner failed, error is NPU out
+# of memory. Tried to allocate ...".  The phrase is generic (it renders
+# whatever `e` was), so it belongs here rather than being matched on the
+# OOM text — and leaving it out cost run 38705391440 the whole run: the
+# line's own payload IS the OOM, but it survived the wrapper strip,
+# matched _RAISED_ERROR_MSG_RE, and so returned False from BOTH
+# _is_oom_env_failure (step 3 of the classifier chain) and the
+# signal-kill fallback _no_observed_failure (step 7).  test_sampler was
+# the round's only blocker, and env_flake_pass is in PASS_RESULTS — one
+# missing phrase meant 0/6 steps and no PR.
+_SYMPTOM_WRAPPER_PHRASES = (
+    "Worker failed with error",
+    "vllm server exited during startup",
+    "Server at 127.0.0.1 exited unexpected",
+    "Failed to start data parallel worker",
+    "EngineDeadError",
+    "Engine core initialization failed",
+    "NPUModelRunner failed, error is",
 )
+_SYMPTOM_WRAPPER_RE = re.compile(
+    "|".join(re.escape(p) for p in _SYMPTOM_WRAPPER_PHRASES))
+_SYMPTOM_LINE_RE = re.compile(
+    r"^.*(?:" + "|".join(re.escape(p) for p in _SYMPTOM_WRAPPER_PHRASES)
+    + r").*$", re.MULTILINE)
 
 
 def _is_model_download_failure(log_path: Path) -> bool:
@@ -1046,14 +1092,38 @@ def _is_model_download_failure(log_path: Path) -> bool:
     try:
         if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
             return False
-        text = log_path.read_text(encoding="utf-8", errors="replace")
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                   errors="replace"))
         if not _MODEL_DOWNLOAD_FAILURE_RE.search(text):
             return False
-        if _REAL_ERROR_SIGNATURES.search(text):
-            ts_print("  [env-flake] real traceback exception found next to "
-                     "download noise — NOT classifying as env flake")
-            return False
+        for m in _TERMINAL_ERROR_MSG_RE.finditer(text):
+            nl = text.find("\n", m.start())
+            msg = text[m.start():] if nl == -1 else text[m.start():nl]
+            if _SYMPTOM_WRAPPER_RE.search(msg):
+                continue
+            if not _MODEL_DOWNLOAD_FAILURE_RE.search(msg):
+                ts_print("  [env-flake] real raised error found next to "
+                         f"download noise — NOT classifying as env flake: "
+                         f"{msg[:120]}")
+                return False
         return True
+    except OSError:
+        return False
+
+
+# pytest exits 4 with "ERROR: not found: <nodeid>" when a selected case
+# doesn't exist in the tree.  The static case-level drop in
+# _drop_missing_cases catches renamed/removed functions; this runtime net
+# catches what it can't see — parameter-set drift that keeps the function
+# name (run 38220121641: eagle3_sliding_window wedged the step here).  A
+# selection leak is never an adaptation bug: the adapter cannot add tests.
+def _is_selection_not_found(log_path: Path) -> bool:
+    """True if pytest exited 4 because a selected case doesn't exist."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        return "ERROR: not found:" in _ANSI_RE.sub(
+            "", log_path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return False
 
@@ -1083,9 +1153,17 @@ _RAISED_ERROR_MSG_RE = re.compile(
     r"NameError|NotImplementedError|EngineDeadError)\b:\s+\S")
 
 
-def _is_oom_hang_failure(log_path: Path) -> bool:
+def _is_oom_env_failure(log_path: Path) -> bool:
     """True if the test log shows an NPU-OOM engine death with no real code
-    error alongside it (the suite timed out waiting for the dead engine)."""
+    error alongside it.
+
+    Two shapes carry the same root cause: the engine hangs after the OOM
+    until the suite timeout SIGKILLs pytest (exit -9, runs
+    33314256232/33406387872), and the death re-raised to the test as
+    EngineDeadError fails pytest outright (exit 1, run 38512795089
+    test_vlm/test_whisper).  Symptom-wrapper lines are stripped before the
+    real-error scan — they re-render the OOM death as "RuntimeError: ..."
+    / "EngineDeadError: ..." without being one."""
     try:
         if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
             return False
@@ -1093,11 +1171,7 @@ def _is_oom_hang_failure(log_path: Path) -> bool:
                                                    errors="replace"))
         if not _NPU_OOM_RE.search(text):
             return False
-        # Strip the worker-error wrapper lines before scanning for real
-        # errors: the wrapper itself renders as "RuntimeError: ..." with the
-        # OOM message inside.
-        rest = re.sub(r"^.*Worker failed with error.*$", "", text,
-                      flags=re.MULTILINE)
+        rest = _SYMPTOM_LINE_RE.sub("", text)
         if _RAISED_ERROR_MSG_RE.search(rest):
             ts_print("  [env-flake] real error with message found next to "
                      "the OOM — NOT classifying as env flake")
@@ -1162,9 +1236,9 @@ def _no_observed_failure(summary: dict | None, log_path: Path) -> bool:
     adaptation (run 34018086282: deepseek_pruning killed at 3600s while
     hung on a flaky wait was classified failed and burned two adapter-fix
     rounds; gemma4, killed identically, was env_flake via its OOM
-    signature — the two must not diverge).  Worker-error wrapper lines are
-    stripped first: they re-render an OOM worker death as
-    "RuntimeError: ..." without being a code bug."""
+    signature — the two must not diverge).  Symptom-wrapper lines are
+    stripped first: they re-render an engine death as "RuntimeError: ..."
+    / "EngineDeadError: ..." without being a code bug."""
     if _count(summary, "failed_test_cases") or _count(summary, "failed_test_files"):
         return False
     try:
@@ -1174,8 +1248,7 @@ def _no_observed_failure(summary: dict | None, log_path: Path) -> bool:
                                                   errors="replace"))
     except OSError:
         return False
-    rest = re.sub(r"^.*Worker failed with error.*$", "", text,
-                  flags=re.MULTILINE)
+    rest = _SYMPTOM_LINE_RE.sub("", text)
     return not _RAISED_ERROR_MSG_RE.search(rest)
 
 
@@ -1187,6 +1260,33 @@ def _is_npu_memory_pressure(log_path: Path) -> bool:
     except OSError:
         return False
     return bool(_NPU_MEMORY_PRESSURE_RE.search(text))
+
+
+# A test whose engine child died leaves the pytest-side cleanup enumerating
+# processes that no longer exist — psutil raises NoSuchProcess reading
+# /proc/<pid>/stat (run 38512795089: two_card/test_pipeline_parallel's
+# engine died under shared-host memory pressure, then test_models_pp2_tp2
+# failed on psutil.NoSuchProcess with bugs=0).  A psutil exception never
+# points at vllm_ascend code; a genuine code bug crashing the engine would
+# leave its own raised error in the log, which the scan below refuses to
+# classify past.
+_PSUTIL_PROCESS_RACE_RE = re.compile(
+    r"psutil\.(?:NoSuchProcess|AccessDenied|ZombieProcess)\b")
+
+
+def _is_psutil_cleanup_race(log_path: Path) -> bool:
+    """True if the only failure evidence is a psutil process-lookup race
+    against a process that already exited."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size > 50 * 1024 * 1024:
+            return False
+        text = _ANSI_RE.sub("", log_path.read_text(encoding="utf-8",
+                                                   errors="replace"))
+    except OSError:
+        return False
+    if not _PSUTIL_PROCESS_RACE_RE.search(text):
+        return False
+    return not _RAISED_ERROR_MSG_RE.search(_SYMPTOM_LINE_RE.sub("", text))
 
 
 _ERROR_SIGNATURES = re.compile(
@@ -1242,7 +1342,8 @@ class TestSelectionError(RuntimeError):
 
 
 def _drop_missing_cases(test_files: list[str], ascend_path: Path) -> list[str]:
-    """Drop selected cases whose files don't exist in the ascend tree.
+    """Drop selected cases whose file or test function doesn't exist in the
+    ascend tree.
 
     The fixed policy set is maintained by hand; a case picked against a
     stale tree (run 34745454795: test_w8a16/test_w8a8_dynamic don't exist
@@ -1251,15 +1352,36 @@ def _drop_missing_cases(test_files: list[str], ascend_path: Path) -> list[str]:
     with no PR.  A missing file here is a policy bug, not an adaptation
     bug: drop it loudly and let the run degrade to fewer cases instead of
     wedging on an unfixable suite.
+
+    The file-level check is not enough (run 38220121641:
+    test_eagle3_sliding_window — the FILE exists but the selected function
+    was renamed upstream, same exit-4 wedge), so the bare function name of
+    each selected case is checked against the file too.  Parametrized ids
+    are reduced to the function name; parameter-set drift that keeps the
+    name is left to the pytest "not found" safety net in _run_one_test.
     """
     kept: list[str] = []
     for t in test_files:
         rel = t.split("::", 1)[0]
-        if (ascend_path / rel).exists():
-            kept.append(t)
+        path = ascend_path / rel
+        if not path.exists():
+            ts_print(f"[run_tests] WARNING: selected case not found in the ascend "
+                     f"tree, dropping (fix test_policy.json): {t}", flush=True)
             continue
-        ts_print(f"[run_tests] WARNING: selected case not found in the ascend "
-                 f"tree, dropping (fix test_policy.json): {t}", flush=True)
+        case = t.split("::", 1)[1] if "::" in t else ""
+        if case:
+            bare = case.split("[", 1)[0].rsplit("::", 1)[-1].strip()
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                kept.append(t)  # unreadable: let pytest surface it
+                continue
+            if bare and not re.search(rf"\bdef {re.escape(bare)}\s*\(", body):
+                ts_print(f"[run_tests] WARNING: selected case function "
+                         f"'{bare}' not found in {rel}, dropping "
+                         f"(fix test_policy.json): {t}", flush=True)
+                continue
+        kept.append(t)
     return kept
 
 
@@ -1319,11 +1441,23 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
         ts_print(f"  [env-flake] {test}: model download/cache failure "
                  f"classified as environment, not blocking")
         ci_result = "env_flake_pass"
-    if (ci_result != "passed" and exit_code == -9
-            and _is_oom_hang_failure(log_path)):
-        ts_print(f"  [env-flake] {test}: engine died of NPU OOM and hung to "
-                 f"the suite timeout — classified as environment, not "
+    if (ci_result != "passed" and exit_code == 4
+            and _is_selection_not_found(log_path)):
+        ts_print(f"  [env-flake] {test}: selected case does not exist in "
+                 f"the tree (pytest 'not found') — selection leak, not "
                  f"blocking")
+        ci_result = "env_flake_pass"
+    if (ci_result != "passed"
+            and _is_oom_env_failure(log_path)):
+        ts_print(f"  [env-flake] {test}: engine died of NPU OOM (hang to the "
+                 f"suite timeout, or the death re-raised as "
+                 f"EngineDeadError) — classified as environment, not "
+                 f"blocking")
+        ci_result = "env_flake_pass"
+    if ci_result == "failed" and _is_psutil_cleanup_race(log_path):
+        ts_print(f"  [env-flake] {test}: only failure evidence is a psutil "
+                 f"process-lookup race after an engine death — classified "
+                 f"as environment, not blocking")
         ci_result = "env_flake_pass"
     if ci_result == "failed" and _is_precision_failure(log_path):
         ts_print(f"  [precision-pass] {test}: numeric-precision assertion "

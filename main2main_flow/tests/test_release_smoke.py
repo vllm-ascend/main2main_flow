@@ -1,11 +1,12 @@
 """Regression pins for the release-tag e2e smoke in the final quality gate:
 
 - the smoke runs once per tree AFTER the main-lane e2e is green, memoized
-  by tree sha (passed and upstream-inherited trees are not re-smoked)
+  by tree sha (passed trees and skipped rounds are not re-smoked)
 - a failed smoke retries once on the same tree (flake absorption) before
   triage; an adapter fix round is only burned for OWN-diff failures
 - upstream-inherited failures (traceback files entirely outside the
-  adaptation diff — the PR 16382 shape) are recorded, not blocking
+  adaptation diff — the PR 16382 shape) are recorded AND block the gate
+  (2026-10-15 ruling: red e2e does not ship a PR)
 - remote e2e mode / missing release worktree / no smoke cases all
   self-skip without touching the main-lane env
 - the lane probe (env + tree identity) runs before any NPU time is
@@ -28,7 +29,6 @@ def _make_flow():
     f.state.steps = [{"id": "step-1", "start_commit": "aaa", "end_commit": "bbb"}]
     f.state.total_steps = 1
     f.state.current_step = 0
-    f.state.last_step_is_noop = False
     return f
 
 
@@ -132,10 +132,11 @@ def test_gate_smoke_own_failure_exhausts_budget(monkeypatch, tmp_path):
     assert len(calls) == 12
 
 
-def test_gate_smoke_inherited_records_and_does_not_block(monkeypatch, tmp_path):
-    # Both attempts fail (initial + flake retry) but the root cause is
+def test_gate_smoke_inherited_records_and_blocks(monkeypatch, tmp_path):
+    # Both attempts fail (initial + flake retry) and the root cause is
     # outside the adaptation diff -> recorded as evidence, no adapter
-    # round, gate passes.
+    # round, and — 2026-10-15 ruling — the gate FAILS (red e2e does not
+    # ship; reverses the old inherited-suppressed pass).
     f = _gate_flow(monkeypatch, tmp_path)
     calls = _script_smoke(monkeypatch, f,
                           [_smoke_result(False), _smoke_result(False)])
@@ -144,7 +145,7 @@ def test_gate_smoke_inherited_records_and_does_not_block(monkeypatch, tmp_path):
         f, "_classify_smoke_failure",
         lambda smoke: ("inherited",
                        ["vllm_ascend/worker/block_table.py"]))
-    assert f._final_quality_gate() is True
+    assert f._final_quality_gate() is False
     assert len(calls) == 2
     assert payloads == []
     evidence = json.loads(
@@ -158,8 +159,8 @@ def test_gate_smoke_inherited_records_and_does_not_block(monkeypatch, tmp_path):
 def test_gate_smoke_never_runs_when_e2e_regression_blocks(monkeypatch, tmp_path):
     # Ordering pin: the smoke only runs after the main-lane e2e is green
     # on that tree; a BLOCKING e2e verdict (static_failed breaks the
-    # statics — exhausted/stop-loss are tolerated since 2026-09-20)
-    # breaks the gate before the smoke is ever reached.
+    # statics — and since the 2026-10-15 ruling every red e2e verdict
+    # blocks) breaks the gate before the smoke is ever reached.
     f = _gate_flow(monkeypatch, tmp_path)
     f.state.last_step_e2e_passed = False
     monkeypatch.setattr(f, "_run_gate_e2e",

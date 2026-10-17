@@ -10,9 +10,10 @@ Key mechanisms:
   ``npu-smi info`` to decide whether to mock torch_npu.  A fake npu-smi
   (exit 1) forces the mock path even on an NPU runner, exactly like CI's
   CPU runner.
-- **Single-process batch**: all files in one pytest process (CI-aligned,
-  fast); files known to pollute the shared process (module-level
-  monkeypatches without cleanup) run in their own subprocess.
+- **Single-process batch**: ALL files in one pytest process (CI-aligned,
+  fast) in pytest's collection order — no per-file isolation list, which
+  would rot as upstream's tests evolve (see the order note in
+  _collect_cpu_ut_files and the polluter note in check_ut).
 - **--continue-on-collection-errors**: one file failing to import no
   longer aborts the whole batch and masks every other test.
 - **ut_namespace plugin**: PYTHONPATH=<ascend>:<vllm> makes
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from main2main_flow.scripts.utils.utils import (
@@ -113,6 +115,20 @@ def _collect_cpu_ut_files(repo: Path) -> list[str]:
                 elif _is_npu_convention_ut_path(rel):
                     continue
                 files.append(rel)
+    # Sort the batch into pytest's collection order (recursively name-sorted
+    # with directories interleaved among files).  os.walk hands back
+    # root-level files BEFORE subdirectories, which inverts pytest's order:
+    # ``test_logger.py`` then runs early in the batch while
+    # ``runtime_config/`` runs after it.  That order breaks the batch:
+    # test_logger's file-logging test leaks a handler bound to its deleted
+    # TemporaryDirectory on the ``vllm_ascend`` logger, and a later
+    # ``configure_ascend_file_logging()`` closes the module handler, so
+    # every subsequent log emit re-opens the dead stream and raises
+    # FileNotFoundError (parity run 38405850804: 371 violations on the
+    # os.walk order vs 1 failure in pytest's own order on the SAME tree).
+    # Sorting matches upstream CI's single-process order and keeps the
+    # polluter-then-reconfigurer inversion out of the batch.
+    files.sort()
     return files
 
 
@@ -132,15 +148,45 @@ def _failure_excerpt(clean: str, failure_line: str, max_chars: int = 900) -> str
     pytest output and return the surrounding window (the code line that
     raised, plus the tail of the call stack).
     """
-    err = failure_line.split(" - ", 1)[-1] if " - " in failure_line else failure_line
+    if " - " in failure_line:
+        node_part, err = failure_line.split(" - ", 1)
+    else:
+        node_part, err = "", failure_line
     needle = err.strip()[:80]
     idx = clean.find(needle)
+    # The error text can occur EARLIER in the run than the failing test
+    # (two tests raising the same error): clean.find() then quotes another
+    # test's traceback — run 38405850804's request_lifecycle violations
+    # carried a build_cache test's excerpt, which sent the root-cause
+    # analysis to the wrong file.  Anchor the search at the failing
+    # test's own pytest failure-section header when it exists.
+    section_start = 0
+    if idx >= 0 and node_part:
+        test_name = node_part.split("::")[-1]
+        # pytest renders each failure under a `_____ name _____` header;
+        # methods show `Class.name`, parametrized add `[id]` — substring
+        # match covers both.
+        section_m = None
+        for hm in re.finditer(r"^_{5,}.*_{5,}$", clean, re.MULTILINE):
+            if test_name in hm.group(0):
+                section_m = hm
+                break
+        if section_m:
+            anchored = clean.find(needle, section_m.start())
+            if anchored >= 0:
+                idx = anchored
+                # Keep the context window inside this test's section —
+                # a 200-char reach backward must not quote the previous
+                # test's traceback.
+                section_start = section_m.start()
+            # else: needle wording differs between the short summary and
+            # the traceback — keep the first-occurrence idx.
     if idx < 0:
         m = _EXCERPT_SIG_RE.search(clean)
         if not m:
             return ""
         idx = m.start()
-    start = max(0, idx - 200)
+    start = max(section_start, idx - 200)
     end = min(len(clean), idx + max_chars)
     excerpt = clean[start:end].strip()
     # 截断到下一个测试标题/分隔（pytest 的 ____ name ____ 或 ==== 段）。
@@ -217,31 +263,82 @@ def _triton_numpy_spec(label: str = "ut") -> str:
     return ""
 
 
+def _venv_numpy_version(venv_python: Path | str) -> str:
+    """numpy version actually importable inside the venv ("" if none).
+
+    The probe runs the venv python itself, so the resolution it reports
+    (--system-site-packages: venv site-packages first, then system) is
+    exactly what mypy/pytest will see.
+    """
+    try:
+        r = subprocess.run(
+            [str(venv_python), "-c",
+             "import numpy; print(numpy.__version__)"],
+            capture_output=True, text=True, timeout=30)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _numpy_drifted(spec: str, installed: str) -> bool:
+    """True when a venv's numpy no longer satisfies its pin.
+
+    The marker records only the *spec*, so a venv whose numpy really
+    lives in system site-packages (pip skipped the install as "already
+    satisfied" behind --system-site-packages) drifts silently when the
+    e2e vllm install upgrades system numpy — run 38220121641 12:02:
+    1.26.4 -> 2.3.5, three lint rounds of spurious [var-annotated]
+    errors.  Drift here means "recreating can fix it": an unimportable
+    numpy, or one outside the spec.  A 2.x the spec admits is NOT drift
+    (rebuilding would reinstall the same thing; _check_mypy keeps
+    warning about that case instead).
+    """
+    if not installed:
+        return True
+    try:
+        from packaging.specifiers import SpecifierSet
+        return not SpecifierSet(spec).contains(installed)
+    except Exception:
+        return False
+
+
 def _ensure_ut_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
     """Create-or-reuse the persistent UT venv; return (venv_dir, venv_python).
 
     The venv lives across pre_ci attempts and steps (the runner is
     ephemeral, so no end-of-run cleanup is needed).  Reuse requires
     bin/python to exist AND the numpy spec recorded in the marker to
-    match what the current triton-ascend metadata asks for.  Any
-    failure falls back to the system pytest (returns (None, "")).
+    match what the current triton-ascend metadata asks for AND the
+    actually importable numpy to satisfy it — the marker can look
+    healthy while the venv never owned its numpy (pip "already
+    satisfied" behind --system-site-packages) and drifts with system
+    upgrades (run 38220121641).  Any failure falls back to the system
+    pytest (returns (None, "")).
     """
     venv_dir = _ut_base_dir()
     venv_python = venv_dir / "bin" / "python"
     if venv_python.exists():
+        reason = ""
         try:
             meta = json.loads((venv_dir / _UT_VENV_MARKER).read_text(
                 encoding="utf-8"))
-            if meta.get("numpy_spec") == target_numpy_spec:
-                ts_print(f"[pre_ci] ut: reusing persistent venv at {venv_dir}")
-                return venv_dir, str(venv_python)
-            ts_print(f"[pre_ci] ut: persistent venv numpy spec mismatch "
-                     f"({meta.get('numpy_spec')!r} != "
-                     f"{target_numpy_spec!r}) — recreating")
+            if meta.get("numpy_spec") != target_numpy_spec:
+                reason = (f"numpy spec mismatch ({meta.get('numpy_spec')!r} "
+                          f"!= {target_numpy_spec!r})")
         except Exception:
-            ts_print("[pre_ci] ut: persistent venv marker unreadable "
-                     "— recreating")
-        shutil.rmtree(venv_dir, ignore_errors=True)
+            reason = "marker unreadable"
+        if not reason and target_numpy_spec:
+            # Probe the ACTUAL numpy, not just the marker.
+            installed = _venv_numpy_version(venv_python)
+            if _numpy_drifted(target_numpy_spec, installed):
+                reason = (f"installed numpy {installed or 'MISSING'} "
+                          f"violates numpy{target_numpy_spec}")
+        if reason:
+            ts_print(f"[pre_ci] ut: persistent venv {reason} — recreating")
+            shutil.rmtree(venv_dir, ignore_errors=True)
+        else:
+            ts_print(f"[pre_ci] ut: reusing persistent venv at {venv_dir}")
+            return venv_dir, str(venv_python)
 
     ts_print(f"[pre_ci] ut: creating persistent venv at {venv_dir} "
              f"(numpy{target_numpy_spec} from triton-ascend)")
@@ -257,9 +354,17 @@ def _ensure_ut_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
                      "falling back to system pytest")
             return None, ""
         if target_numpy_spec:
+            # --ignore-installed: behind --system-site-packages a satisfying
+            # system numpy turns this into a pip no-op ("already satisfied")
+            # and the venv never owns its pin — the e2e vllm install then
+            # upgrades system numpy out from under it (run 38220121641).
+            # Forcing the wheel into the venv makes the pin immune to
+            # system-side flips.
             try:
                 r2 = pip_install_with_fallback(
-                    venv_python, ["-q", f"numpy{target_numpy_spec}"])
+                    venv_python,
+                    ["-q", "--ignore-installed",
+                     f"numpy{target_numpy_spec}"])
             except subprocess.TimeoutExpired:
                 ts_print("[pre_ci] ut: WARNING numpy install TIMED OUT — "
                          "falling back to system pytest")
@@ -268,6 +373,15 @@ def _ensure_ut_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
                 ts_print("[pre_ci] ut: WARNING numpy install FAILED "
                          f"({r2.stderr.strip()[:200]}) — falling back "
                          "to system pytest")
+                return None, ""
+            # pip exiting 0 is not proof the wheel landed in the venv;
+            # the probe catches any remaining silent no-op.
+            if _numpy_drifted(target_numpy_spec,
+                              _venv_numpy_version(venv_python)):
+                ts_print(f"[pre_ci] ut: WARNING post-install numpy probe "
+                         f"violates numpy{target_numpy_spec} — falling "
+                         "back to system pytest")
+                shutil.rmtree(venv_dir, ignore_errors=True)
                 return None, ""
         (venv_dir / _UT_VENV_MARKER).write_text(
             json.dumps({"numpy_spec": target_numpy_spec}),
@@ -292,13 +406,104 @@ def _make_fake_npu_smi() -> Path:
     return fake_bin_dir
 
 
-def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict:
+# What upstream's cpu-UT lane gets from a SOC-less build: setup.py's
+# gen_build_info() writes the device family resolved from SOC_VERSION, and
+# on the CPU runner every SOC step is gated `npu_type != 'cpu'`, so
+# _build_info.py carries the no-SOC default — device_config.py maps a
+# missing __device_type__/ASCEND910B1 to AscendDeviceType.A2.
+_PURE_CPU_DEVICE_TYPE = "A2"
+_BUILD_INFO_DEVICE_TYPE_RE = re.compile(
+    r"^(__device_type__\s*=\s*)['\"][^'\"]*['\"]", re.MULTILINE)
+
+
+def _swap_pure_cpu_build_info(repo: Path) -> tuple[Path | None, str | None]:
+    """Point the tree's own ``_build_info`` device type at the CPU default.
+
+    The device profile is baked at BUILD time: ``_build_info.py`` is
+    generated in-tree by the install (a3 SOC here) and
+    ``get_current_hardware_profile()`` reads it at import — no env var can
+    change it.  The production a3 install is correct for the e2e lanes,
+    but the UT batch must simulate the same pure-CPU environment as
+    upstream's cpu-UT lane (device semantics A2), otherwise unpatched
+    profile-dependent tests diverge from CI for build reasons that have
+    nothing to do with the code under test (run 38412395758: the W4A8
+    SiTU fusion path fires on A3 and crashes on its own mock).
+
+    Rewrite the ``__device_type__`` line IN PLACE for the duration of the
+    batch; the caller restores the original bytes when it finishes.  A
+    PYTHONPATH shadow cannot do this job: pytest resolves each collected
+    module's basedir by walking up the ``__init__.py`` chain (tests/ and
+    tests/ut/ are packages) and ``sys.path.insert(0, ...)``s the repo root
+    in prepend import mode — the graded tree sits AHEAD of any PYTHONPATH
+    entry for every ``import vllm_ascend`` (runs 38421012498 and
+    38494406932: a shadow view was active at PYTHONPATH[0] with
+    PYTHONSAFEPATH=1 and W4A8 still fired).  The resolution target itself
+    must say A2.
+
+    ``_build_info.py`` is a gitignored build artifact (generated by
+    setup.py at install time, never tracked), so the untouched-tree guard
+    is unaffected, and the e2e lanes see the a3 profile again as soon as
+    the batch restores it.  A3-specific tests patch the profile in-test
+    (as upstream's do), so A3 coverage survives.  Returns
+    ``(path, original_text)`` for the restore, or ``(None, None)`` when
+    there is nothing to swap (kill switch MAIN2MAIN_UT_PURE_CPU=0, not a
+    built tree, or no recognizable device-type line).
+    """
+    if os.environ.get("MAIN2MAIN_UT_PURE_CPU", "1").lower() in (
+            "0", "false", "no", "off"):
+        return None, None
+    info = repo / "vllm_ascend" / "_build_info.py"
+    try:
+        original = info.read_text(encoding="utf-8")
+    except OSError:
+        # Not a built/installed ascend tree — grade the tree as-is rather
+        # than failing the check here.
+        return None, None
+    if not _BUILD_INFO_DEVICE_TYPE_RE.search(original):
+        ts_print(f"[pre_ci] ut: {info} has no __device_type__ line — "
+                 "grading the tree's own build profile")
+        return None, None
+    info.write_text(
+        _BUILD_INFO_DEVICE_TYPE_RE.sub(
+            lambda m: m.group(1) + repr(_PURE_CPU_DEVICE_TYPE), original),
+        encoding="utf-8")
+    return info, original
+
+
+def _restore_build_info(info: Path | None, original: str | None) -> None:
+    """Put back the build profile the install generated (best effort)."""
+    if info is None or original is None:
+        return
+    try:
+        info.write_text(original, encoding="utf-8")
+        ts_print("[pre_ci] ut: restored the tree's own _build_info "
+                 "(e2e lanes keep their build profile)")
+    except OSError as exc:
+        ts_print(f"[pre_ci] ut: WARNING — could not restore {info}: {exc}")
+
+
+def _build_ut_env(repo: Path, vllm_path: str | Path,
+                  fake_bin_dir: Path) -> dict:
     """Env replicating CI's CPU-UT lane: pure CPU, mocked NPU, offline hub.
 
     The flow repo root is appended to PYTHONPATH so the ut_namespace
     plugin resolves even when the caller's environment doesn't carry it.
+    The pure-CPU device profile itself is NOT an env matter — it is the
+    in-tree ``_build_info`` swap in :func:`_swap_pure_cpu_build_info`.
     """
     env = os.environ.copy()
+    # Production main2main runs csrc-l1-restore in the SAME job, which
+    # exports these into GITHUB_ENV (prepare_csrc_l1_restore.py) — every
+    # later step inherits them.  Upstream's cpu-UT lane never sees them
+    # (every csrc cache step there is gated `npu_type != 'cpu'`), and
+    # VLLM_ASCEND_BUILD_CACHE_DIR defeats the CMake
+    # `VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache` default
+    # that tests/ut/_tools/test_build_cache.py asserts (run 38383045302
+    # step-1).  The UT batch must judge the tree the way upstream CI
+    # does, so strip the workflow's own cache plumbing from the env.
+    for leaked in ("VLLM_ASCEND_BUILD_CACHE_DIR",
+                   "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"):
+        env.pop(leaked, None)
     ascend_abs = str(repo.resolve())
     vllm_abs = str(Path(vllm_path).resolve())
     flow_root = str(Path(__file__).resolve().parents[3])
@@ -310,6 +515,15 @@ def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict
     env["PYTHONPATH"] = ":".join(parts)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
     env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    # Upstream CI runs the pytest CONSOLE script, whose sys.path[0] is the
+    # script's own directory — the repo cwd is never on sys.path.
+    # `python -m pytest` instead prepends the cwd (the graded tree) ahead
+    # of PYTHONPATH (run 38421012498: the venv shares the system pytest
+    # and has no bin/pytest script, so the -m fallback ran).  PYTHONSAFEPATH
+    # (py3.11+) gives -m the console-script sys.path semantics on both
+    # invocation paths — invocation parity with upstream, whatever the
+    # batch ends up importing.
+    env["PYTHONSAFEPATH"] = "1"
     # Match CI: offline mode so get_model_file / hf_hub_download
     # fails immediately (385s→0.5s for test_maybe_update_config_
     # non_directory_raises) instead of retrying network timeouts.
@@ -325,6 +539,45 @@ def _build_ut_env(repo: Path, vllm_path: str | Path, fake_bin_dir: Path) -> dict
 
 
 _RELEASE_UT_BASELINE_FILE = Path(__file__).parent / "release_ut_baseline.json"
+
+# Main-lane base-tree known failures, recorded once per run while the
+# ascend tree is still pristine (run 38383045302: step-1 burned all 5
+# attempts on 11 failures the adapter proved pre-existing — rope-cache
+# batch-order state and a runner-env build-cache assertion — none
+# caused by its 20-commit upstream delta).
+_MAIN_UT_BASELINE_FILE = WORKSPACE_DIR / "base_ut_failures.json"
+
+
+def _load_main_baseline() -> set[str]:
+    """Known-failing main-lane UT node IDs of this run's base tree.
+
+    Recorded by :func:`compute_base_ut_baseline` at kickoff, before the
+    adapter touches anything.  Matching failures are reported in the
+    detail and the full log but never block — the same contract as the
+    release lane's static ``release_ut_baseline.json``, except the
+    snapshot is per-run and per-tree (fresh mode's base = upstream main,
+    whose own UT health is upstream's, not the adapter's, to fix).
+    MAIN2MAIN_BASE_UT_BASELINE=0 disables the filtering (see everything).
+    """
+    if os.environ.get("MAIN2MAIN_BASE_UT_BASELINE", "1").lower() in (
+            "0", "false", "no", "off"):
+        return set()
+    try:
+        data = json.loads(
+            _MAIN_UT_BASELINE_FILE.read_text(encoding="utf-8"))
+        return set(data.get("excluded", []))
+    except Exception:
+        return set()
+
+
+def _node_matches_baseline(node: str, baseline: set[str]) -> bool:
+    """Exact node match, or the node's whole file is baselined.
+
+    ``tests/ut/x.py::test_a`` matches key ``tests/ut/x.py::test_a`` and
+    also a whole-file key ``tests/ut/x.py`` (which additionally absorbs
+    the file's collection error, whose node id is the bare path).
+    """
+    return node in baseline or node.split("::")[0] in baseline
 
 
 def _load_release_baseline() -> set[str]:
@@ -351,7 +604,8 @@ def _load_release_baseline() -> set[str]:
 
 def check_ut(repo: Path, vllm_path: str | Path | None = None,
              vllm_release_path: str | Path | None = None,
-             release_tag: str = "") -> dict:
+             release_tag: str = "",
+             known_failures: set[str] | None = None) -> dict:
     """Run the CPU-UT batch, aligned with CI's single-process execution.
 
     Runs the same CPU-routed tests/ut/* files as CI's CPU runner
@@ -367,7 +621,14 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     cpu-ut, so this is the only UT-level signal for the release lane.
     Release-batch node IDs listed in ``release_ut_baseline.json`` are
     reported but never block (pre-existing release-lane failures are not
-    the adaptation's fault).
+    the adaptation's fault).  Main-lane node IDs matching this run's
+    base-tree snapshot (``known_failures``, defaulting to the workspace
+    ``base_ut_failures.json`` recorded at kickoff by
+    :func:`compute_base_ut_baseline`) are reported but never block the
+    same way — run 38383045302 burned 5 attempts on failures the adapter
+    proved pre-existing on the fresh-mode base tree.  Pass an explicit
+    ``set()`` to disable the exemption (that is exactly how the snapshot
+    itself is taken).
 
     ``test_schedule_body_matches_pinned_release_tag`` is excluded on BOTH
     batches — see ``_BALANCE_TAG_BODY_TEST``.
@@ -392,7 +653,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 "log_path": "", "venv_python": ""}
 
     ts_print(f"\n[pre_ci] ut: collected {len(cpu_files)} CPU test files "
-             f"(per-file isolation, NPU-convention a2/ and a3_2/ excluded)")
+             f"(single process, NPU-convention a2/ and a3_2/ excluded)")
 
     # Read numpy constraint from triton-ascend metadata (mirror _check_mypy).
     target_numpy_spec = _triton_numpy_spec()
@@ -408,18 +669,41 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         ts_print("\n[pre_ci] ut: SKIPPED — no usable venv and pytest not installed")
         return {"violations": [], "detail": "pytest not installed", "skipped": True,
                 "log_path": "", "venv_python": ""}
-    pytest_cmd = [str(venv_python), "-m", "pytest"] if venv_dir else [pytest_bin]
+    # Upstream CI invokes the pytest CONSOLE script (`pytest -sv ...`),
+    # whose sys.path[0] is the script's own directory.  `python -m pytest`
+    # instead prepends the cwd — the graded tree — AHEAD of PYTHONPATH.
+    # The pure-CPU profile no longer depends on sys.path order (the
+    # in-tree _build_info swap above), so this is invocation parity with
+    # upstream, not a correctness knob.  Prefer the venv's pytest script;
+    # fall back loudly if it is missing.
+    pytest_cmd = [pytest_bin]
     if venv_dir:
-        ts_print(f"[pre_ci] ut: using venv pytest via {venv_python} -m pytest")
+        venv_pytest = Path(venv_python).parent / "pytest"
+        if venv_pytest.exists():
+            pytest_cmd = [str(venv_pytest)]
+            ts_print(f"[pre_ci] ut: using venv pytest script {venv_pytest}")
+        else:
+            # No venv-local pytest (shared system site-packages): -m with
+            # PYTHONSAFEPATH (see _build_ut_env) matches upstream's
+            # console-script sys.path semantics.
+            ts_print("[pre_ci] ut: venv has no pytest script — using "
+                     f"{venv_python} -m pytest (PYTHONSAFEPATH keeps the "
+                     "cwd off sys.path)")
+            pytest_cmd = [str(venv_python), "-m", "pytest"]
 
     # Full pytest stdout is persisted here so the adapter (fix mode) can
     # grep complete tracebacks when a violation's excerpt was truncated.
     log_path = (venv_dir or WORKSPACE_DIR) / UT_FULL_LOG_NAME
 
     fake_bin_dir = _make_fake_npu_smi()
+    # Defined before the try so the finally below can always restore, even
+    # if the swap itself never ran (kill switch, missing/malformed file).
+    build_info: Path | None = None
+    build_info_original: str | None = None
 
     all_violations: list[str] = []
     baseline_violations: list[str] = []
+    main_failed_nodes: list[str] = []
     all_files_clean = True
     details: list[str] = []
     # Nodeless ERROR lines are collection errors ("ERROR tests/ut/x.py -
@@ -431,23 +715,27 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
     # Release-lane batches only: node IDs known to fail on the release
     # lane independent of the current adaptation (never block).
     baseline = _load_release_baseline() if vllm_release_path else set()
+    # Main lane: node IDs this run's pristine base tree already failed
+    # (see _load_main_baseline).  known_failures=None → load the snapshot;
+    # an explicit set() disables the exemption (snapshot mode).
+    main_baseline = (known_failures if known_failures is not None
+                     else _load_main_baseline())
 
-    # Files known to pollute the shared process get their own
-    # subprocess.  Verified on the A2 env: test_batch_invariant.py
-    # installs a global torch.library.Library monkeypatch that breaks
-    # test_gdn_layerwise_kv.py when run in the same process.
-    # test_vocab_parallel_embedding.py assigns module-level
-    # parallel_state._MLP_TP/_OTP = MagicMock without cleanup,
-    # polluting test_linear.py / test_gdn_layerwise_kv.py in the
-    # same process (verified on A2, run 2026-08-12).
-    # test_gdn_layerwise_kv.py itself fails only inside the batch
-    # (qwen_gdn_attention_core CPU-backend NotImplementedError;
-    # passes standalone) — isolate it too so the batch stays clean.
-    isolated = [f for f in cpu_files
-                if f.endswith(("test_batch_invariant.py",
-                               "test_vocab_parallel_embedding.py",
-                               "test_gdn_layerwise_kv.py"))]
-    batch = [f for f in cpu_files if f not in isolated]
+    # One pytest process over ALL CPU-UT files — exactly upstream's
+    # cpu-UT lane shape, so no per-file list can rot as upstream's tests
+    # evolve.  In pytest's collection order (which the batch now uses)
+    # the known module-level polluters cannot bite their victims:
+    # test_vocab_parallel_embedding.py leaks parallel_state MagicMocks
+    # at module scope and test_batch_invariant.py a global
+    # torch.library.Library, but both sort AFTER the ops/ files they
+    # used to break (test_gdn_layerwise_kv / test_linear), and the
+    # upstream-recipe control lane has been single-process green on the
+    # same trees (parity runs 38416535777 / 38497619728: only W4A8, a
+    # build-profile artifact, ever failed there).  The per-file
+    # isolation this replaced was an os.walk-order-era guard (root
+    # files ran before subdirs, polluters before victims — run
+    # 38405850804's 371-violation cascade); the order fix removed its
+    # reason, and a hardcoded filename list is a maintenance trap.
 
     # (label, vllm tree for this batch, VLLM_VERSION value or "").  The
     # release tuple is appended only when both the worktree and the tag
@@ -458,6 +746,16 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
         versions.append((rel_ver, Path(vllm_release_path), rel_ver))
 
     try:
+        # Swap INSIDE the try: any raise between here and the loop (or in
+        # it) still reaches the finally and restores the install's bytes.
+        build_info, build_info_original = _swap_pure_cpu_build_info(repo)
+        if build_info is not None:
+            ts_print(f"[pre_ci] ut: pure-CPU device profile active "
+                     f"({build_info} __device_type__ -> "
+                     f"{_PURE_CPU_DEVICE_TYPE}, upstream's SOC-less cpu-ut "
+                     f"default; restored after the batch); set "
+                     f"MAIN2MAIN_UT_PURE_CPU=0 to grade the tree's own "
+                     f"profile")
         for label, batch_vllm, vllm_version in versions:
             env = _build_ut_env(repo, batch_vllm, fake_bin_dir)
             if vllm_version:
@@ -514,7 +812,7 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                     [*pytest_cmd, "-q", "--tb=short", "--no-header",
                      "--continue-on-collection-errors",
                      "-p", "main2main_flow.scripts.utils.ut_namespace",
-                     *batch, "-k", exclude_expr],
+                     *cpu_files, "-k", exclude_expr],
                     cwd=str(repo), capture_output=True, text=True,
                     env=env, timeout=1200,
                 )
@@ -523,17 +821,6 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 ts_print(f"[pre_ci] ut: [{label}] batch TIMEOUT(1200s)")
                 all_files_clean = False
                 details.append(f"{label}/batch: TIMEOUT(1200s)")
-            for f in isolated:
-                try:
-                    rr = subprocess.run(
-                        [*pytest_cmd, "-q", "--tb=short", "--no-header", f],
-                        cwd=str(repo), capture_output=True, text=True,
-                        env=env, timeout=300,
-                    )
-                    runs.append((f, rr))
-                except subprocess.TimeoutExpired:
-                    ts_print(f"[pre_ci] ut: [{label}] {f} TIMEOUT(300s)")
-                    all_files_clean = False
 
             for name, rr in runs:
                 clean = strip_ansi(rr.stdout + rr.stderr)
@@ -553,6 +840,12 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                         if vllm_version and m.group(2) in baseline:
                             baseline_violations.append(v)
                             continue
+                        if not vllm_version:
+                            main_failed_nodes.append(m.group(2))
+                            if _node_matches_baseline(m.group(2),
+                                                      main_baseline):
+                                baseline_violations.append(v)
+                                continue
                         all_violations.append(v)
                         run_blocking += 1
                 if rr.returncode != 0:
@@ -574,19 +867,20 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
 
         baseline_note = ""
         if baseline_violations:
-            baseline_note = (f"; {len(baseline_violations)} release-lane "
-                             f"failure(s) matched the known baseline "
-                             f"(not blocking)")
-            ts_print(f"[pre_ci] ut: {len(baseline_violations)} release-lane "
-                     f"failure(s) matched the known baseline (not blocking)")
+            baseline_note = (f"; {len(baseline_violations)} failure(s) "
+                             f"matched the known baseline (not blocking)")
+            ts_print(f"[pre_ci] ut: {len(baseline_violations)} failure(s) "
+                     f"matched the known baseline (not blocking)")
 
+        failed_nodes = sorted(set(main_failed_nodes))
         if all_files_clean:
             ts_print(f"\n[pre_ci] ut: OK — all {len(cpu_files)} files clean")
             return {"violations": [],
                     "detail": f"UT clean ({len(cpu_files)} files, "
                               f"single-process batch)" + baseline_note,
                     "log_path": str(log_path),
-                    "venv_python": str(venv_python) if venv_dir else ""}
+                    "venv_python": str(venv_python) if venv_dir else "",
+                    "failed_nodes": failed_nodes}
         ts_print(f"\n[pre_ci] ut: {len(all_violations)} failure(s):")
         for v in all_violations[:20]:
             ts_print(f"  {v}")
@@ -596,9 +890,73 @@ def check_ut(repo: Path, vllm_path: str | Path | None = None,
                 "detail": f"{len(all_violations)} UT failure(s): "
                           + "; ".join(details) + baseline_note,
                 "log_path": str(log_path),
-                "venv_python": str(venv_python) if venv_dir else ""}
+                "venv_python": str(venv_python) if venv_dir else "",
+                "failed_nodes": failed_nodes}
     finally:
         # The venv persists across attempts/steps (recreated only on numpy
         # spec mismatch) — only the throwaway fake-bin dir is deleted here.
         if fake_bin_dir.exists():
             shutil.rmtree(fake_bin_dir, ignore_errors=True)
+        # Restore the build profile the install generated, whatever the
+        # batch outcome — the e2e lanes grade the same tree afterwards.
+        _restore_build_info(build_info, build_info_original)
+
+
+def compute_base_ut_baseline(repo: Path, vllm_path: str | Path) -> dict | None:
+    """Snapshot the base tree's known-failing main-lane UT node IDs.
+
+    Called by the flow ONCE per run, at kickoff, while the vllm tree is
+    still pristine at the base commit (before any pointer bump).  Runs the
+    same batch check_ut runs, but with the exemption disabled
+    (``known_failures=set()``) so every real failure is captured, then
+    writes :data:`_MAIN_UT_BASELINE_FILE` so later ``check_ut`` calls in
+    this run treat those node IDs (or their whole file) as non-blocking.
+
+    Returns the written record, or None on any failure (missing vllm
+    checkout, empty repo) — a failed snapshot simply means the run has no
+    baseline and the gate stays as strict as before.  Set
+    ``MAIN2MAIN_BASE_UT_BASELINE=0`` to skip entirely.
+    """
+    if os.environ.get("MAIN2MAIN_BASE_UT_BASELINE", "1").lower() in (
+            "0", "false", "no", "off"):
+        ts_print("[pre_ci] ut: base-tree baseline disabled by env, skipping")
+        return None
+    vllm_path = Path(vllm_path)
+    if not (vllm_path / ".git").exists():
+        ts_print(f"[pre_ci] ut: no vllm checkout at {vllm_path}, "
+                 f"base-tree baseline skipped")
+        return None
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vllm_path),
+            capture_output=True, text=True, timeout=30,
+        )
+        recorded_head = head.stdout.strip() if head.returncode == 0 else ""
+        ts_print(f"[pre_ci] ut: snapshotting base-tree UT baseline "
+                 f"@ {recorded_head[:12] or 'unknown'} ...")
+        result = check_ut(repo, vllm_path=vllm_path, known_failures=set())
+    except Exception as exc:  # noqa: BLE001 — snapshot must never kill a run
+        ts_print(f"[pre_ci] ut: base-tree baseline snapshot failed: {exc}")
+        return None
+    failed_nodes = sorted(set(result.get("failed_nodes", [])))
+    if result.get("skipped"):
+        # Nothing ran (broken venv, no pytest) — a written record would
+        # falsely certify the base tree as clean.
+        ts_print("[pre_ci] ut: base-tree baseline snapshot skipped "
+                 f"({result.get('detail', '')}), no record written")
+        return None
+    record = {
+        "excluded": failed_nodes,
+        "recorded_head": recorded_head,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "detail": result.get("detail", ""),
+    }
+    try:
+        _MAIN_UT_BASELINE_FILE.write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        ts_print(f"[pre_ci] ut: failed to write base-tree baseline: {exc}")
+        return None
+    ts_print(f"[pre_ci] ut: base-tree baseline written "
+             f"({len(failed_nodes)} node(s)) -> {_MAIN_UT_BASELINE_FILE}")
+    return record

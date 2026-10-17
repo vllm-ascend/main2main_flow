@@ -215,7 +215,10 @@ def test_run_check_runs_mypy_ut_concurrently(monkeypatch, tmp_path: Path) -> Non
 # Replaces the per-call temp venv (mkdtemp + rmtree): the lint venv is built
 # once under MAIN2MAIN_MYPY_VENV (default workspace/mypy_venv) and reused
 # while the marker's numpy_spec matches triton-ascend's constraint; every
-# failure path falls back to the system mypy ((None, "")).
+# failure path falls back to the system mypy ((None, "")).  Reuse also
+# probes the ACTUAL importable numpy — a marker-healthy venv whose numpy
+# lives in system site-packages drifts when e2e's vllm install upgrades
+# system numpy (run 38220121641: 1.26.4 -> 2.3.5) — and drift rebuilds.
 SPEC = ">=1.26.4,<2.1"
 
 
@@ -232,9 +235,40 @@ def _ok_run(monkeypatch, calls):
 
     def fake_run(cmd, **kw):
         calls.append(list(cmd))
+        # the numpy health probe (reuse + post-install) must report a
+        # healthy pin, or the venv is treated as drifted
+        if "import numpy" in str(cmd[-1]):
+            return SimpleNamespace(returncode=0, stdout="1.26.4\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(pre_ci_check.subprocess, "run", fake_run)
+
+
+def _probe_run(monkeypatch, calls, versions=("1.26.4",)):
+    """subprocess fake answering the numpy health probes in sequence.
+
+    Each "import numpy" probe consumes the next version (the last one
+    repeats); None = probe fails (rc=1).  Non-probe calls (venv creation)
+    return the plain ok shape.
+    """
+    from types import SimpleNamespace
+    seq = list(versions)
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if "import numpy" in str(cmd[-1]):
+            v = seq.pop(0) if len(seq) > 1 else seq[0]
+            if v is None:
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            return SimpleNamespace(returncode=0, stdout=f"{v}\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pre_ci_check.subprocess, "run", fake_run)
+
+
+def _venv_created(calls) -> bool:
+    # venv creation is [sys.executable, "-m", "venv", <path>, "--system-site-packages"]
+    return any("venv" in c and "-m" in c for c in calls)
 
 
 def _ok_pip(monkeypatch, calls):
@@ -250,14 +284,60 @@ def test_mypy_venv_reused_when_marker_matches(monkeypatch, tmp_path):
     base = tmp_path / "mypy_venv"
     _make_venv(base)
     monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+    calls = []
+    _probe_run(monkeypatch, calls)  # reuse probes numpy, must NOT create
 
-    def no_run(*a, **k):  # reuse must not shell out at all
-        raise AssertionError("venv creation on the reuse path")
-
-    monkeypatch.setattr(pre_ci_check.subprocess, "run", no_run)
     venv_dir, venv_python = pre_ci_check._ensure_mypy_venv(SPEC)
     assert venv_dir == base
     assert venv_python == str(base / "bin" / "python")
+    assert calls and not _venv_created(calls)
+
+
+def test_mypy_venv_rebuilt_when_numpy_drifted(monkeypatch, tmp_path):
+    # Run 38220121641: e2e's vllm install upgraded system numpy under a
+    # --system-site-packages venv that never owned its own copy — the
+    # marker stayed healthy while `import numpy` flipped 1.26.4 -> 2.3.5.
+    # Reuse must detect the drift and rebuild instead of linting on 2.x.
+    base = tmp_path / "mypy_venv"
+    _make_venv(base)
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+    run_calls, pip_calls = [], []
+    _probe_run(monkeypatch, run_calls, versions=["2.3.5", "1.26.4"])
+    _ok_pip(monkeypatch, pip_calls)
+
+    venv_dir, _ = pre_ci_check._ensure_mypy_venv(SPEC)
+    assert venv_dir == base
+    assert _venv_created(run_calls)
+    # the rebuild forces the wheel into the venv (immune to system flips)
+    assert any("--ignore-installed" in a for a in pip_calls)
+    import json
+    assert json.loads((base / "m2m_meta.json").read_text())["numpy_spec"] == SPEC
+
+
+def test_mypy_venv_rebuilt_when_numpy_unimportable(monkeypatch, tmp_path):
+    base = tmp_path / "mypy_venv"
+    _make_venv(base)
+    monkeypatch.setenv("MAIN2MAIN_MYPY_VENV", str(base))
+    run_calls, pip_calls = [], []
+    _probe_run(monkeypatch, run_calls, versions=[None, "1.26.4"])
+    _ok_pip(monkeypatch, pip_calls)
+
+    venv_dir, venv_python = pre_ci_check._ensure_mypy_venv(SPEC)
+    assert venv_dir == base
+    assert venv_python == str(base / "bin" / "python")
+    assert _venv_created(run_calls)
+
+
+def test_numpy_drifted_predicate():
+    from main2main_flow.scripts.utils.ut_check import _numpy_drifted
+    assert not _numpy_drifted("==1.26.4", "1.26.4")
+    assert _numpy_drifted("==1.26.4", "2.3.5")    # run 38220121641
+    assert _numpy_drifted("==1.26.4", "")         # unimportable counts
+    # a 2.x the spec admits is NOT drift: rebuilding would reinstall the
+    # same thing (infinite churn); _check_mypy warns about it instead
+    assert not _numpy_drifted(">=1.26", "2.3.5")
+    # empty spec = no pin to violate
+    assert not _numpy_drifted("", "1.26.4")
 
 
 def test_mypy_venv_rebuilt_on_spec_mismatch(monkeypatch, tmp_path):

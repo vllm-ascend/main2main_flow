@@ -16,13 +16,15 @@ from pydantic import BaseModel
 from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter, run_opencode_review
 from main2main_flow.scripts.utils import ci_config_guard
 from main2main_flow.scripts.utils.detect_commits import detect
-from main2main_flow.scripts.utils.plan_steps import run_plan
+from main2main_flow.scripts.utils.plan_steps import emit_plan_summary, run_plan
 from main2main_flow.scripts.utils.pre_ci_check import run_check
 from main2main_flow.scripts.utils.lessons import (
     persist_lessons, submit_step_lesson, submit_gate_lesson,
     submit_pre_ci_exhausted_lesson, submit_pre_ci_lesson)
 from main2main_flow.scripts.utils.push_to_github import push_and_create_pr, resolve_squash_baseline
 from main2main_flow.scripts.utils.pr_ci_monitor import watch_and_fix
+from main2main_flow.scripts.utils.run_summary import (
+    emit_run_summary, record_pre_ci_attempt)
 from main2main_flow.scripts.utils.run_tests import (
     PASS_RESULTS,
     _load_estimated_times,
@@ -40,13 +42,14 @@ from main2main_flow.scripts.utils.extended_e2e import (
 )
 from main2main_flow.scripts.utils.commit_ref import run_update
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
+from main2main_flow.scripts.utils.ut_check import compute_base_ut_baseline
 from main2main_flow.scripts.utils.utils import (
     UpgradeCompleted, UpgradeFailed, UpgradePartial,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
     FINAL_CODE_STRUCTURE_GUIDE_FILE, GENERATED_ARTIFACT_DIRS, run_git, ts_print,
-    GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE,
+    GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE, FINAL_STATUS_FILE,
 )
 
 # Files that are tracking/metadata, not real adaptation changes — excluded
@@ -243,13 +246,12 @@ def _gate_e2e_summary() -> str:
     if data.get("status") == "inherited":
         line += (" — failures are upstream-inherited (outside this PR's "
                  f"diff: {', '.join((data.get('inherited_files') or [])[:2])}"
-                 "), recorded not blocking")
+                 ")")
     elif n_fail:
         line += f", {n_fail} own-diff suite(s) failing"
         if data.get("status") in ("exhausted", "stop_loss_no_progress",
                                   "time_budget", "collection_error_own"):
-            line += (" — fix budget spent, not blocking: upstream PR CI "
-                     "is the verifier")
+            line += " — fix budget spent"
     if n_coll:
         line += f", {n_coll} collection-error suite(s)"
     return line
@@ -281,9 +283,9 @@ def _resolve_test_timeouts() -> dict[str, int] | None:
 def _has_source_changes(changed_files: list[str]) -> bool:
     """True if any changed file is real adaptation code.
 
-    Steps that only bump .github/vllm-main-verified.commit (or touch
-    docs/configs) don't need an e2e run — previously they ran the full
-    suite (~40 min) for nothing.
+    Steps whose diff is only the .github/vllm-main-verified.commit bump
+    (or docs/configs) defer their e2e to the final gate instead of paying
+    a full suite round for a no-source-delta tree.
     """
     for f in changed_files:
         if not f:
@@ -449,15 +451,16 @@ class Main2MainState(BaseModel):
 
     # Whether the LAST step's e2e ran and passed.  The last step's e2e runs
     # on the cumulative state (all prior steps' commits + this step's patch),
-    # so it subsumes earlier steps.  When the last step skipped its e2e (or
-    # failed), the cumulative state is unvalidated and the final quality gate
-    # must run the regression e2e — the agent's no-op judgment can be wrong.
+    # so it subsumes earlier steps.  When it skipped (no-op steps defer to
+    # the gate) or failed, the cumulative state is unvalidated and the final
+    # quality gate must run the regression e2e — once, regardless of how
+    # many no-op steps stacked up.
     last_step_e2e_passed: bool = False
 
     # Set by _ai_analysis: True if the adapter's analysis found the step
-    # needs no vllm-ascend code change (modified files excluding the
-    # tracking file).  process_steps uses this to skip the per-step e2e
-    # round; final_quality_gate's regression e2e still runs.
+    # needs no vllm-ascend code change.  process_steps skips the per-step
+    # e2e for such steps and leaves last_step_e2e_passed False, so the
+    # final quality gate covers them with one regression e2e at the end.
     last_step_is_noop: bool = False
 
     # Persistent opencode session ID for full conversational context
@@ -601,65 +604,78 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
 
     def run(self, inputs: dict | None = None):
-        if inputs:
-            for k, v in inputs.items():
-                setattr(self.state, k, v)
-        self.initialize()
-        signal = self.analyze_commit_and_plan_step()
-        if signal == HasNoCommit:
-            self.has_no_commit()
-            return
-        self.process_steps()
-        # Final quality gate runs whenever at least one step succeeded
-        # (current_step > 0), including partial runs: format + mypy + UT
-        # must always execute so lint issues never leak into the PR (run
-        # 174 pushed an E501 line because the gate only ran on the
-        # all-steps-passed path).  Failures enter adapter-fix mode.
-        gate_passed = True
-        if self.state.current_step > 0:
-            # Re-verify against the LAST VERIFIED vllm commit, not the
-            # target.  A step that exhausted its retries was reverted, but
-            # the vllm checkout was left on that step's commit — running
-            # the gate there pairs the committed (older-shape) adaptation
-            # with vllm changes it never adapted to, failing spuriously
-            # (2026-09-03 run 33638863120: step-21 exhausted, gate then
-            # died on a mamba get_mamba_groups shape the 20 committed
-            # steps never saw).  On the all-steps-completed path
-            # last_verified_commit == the target, so this is a no-op.
-            if self.state.last_verified_commit:
-                run_git(self.state.vllm_path, "checkout",
-                        self.state.last_verified_commit)
-                ts_print(f"[run] gate against last verified vllm "
-                         f"{self.state.last_verified_commit[:12]}")
-            gate_passed = self._final_quality_gate()
+        # The run summary is emitted from `finally` so that every exit — the
+        # two early returns below, the push path, and an exception mid-run —
+        # leaves a job page saying how far the run actually got.  pr_url is
+        # filled only on the push path; the early returns set pr_note instead,
+        # because "no PR" is the single most-asked question about a failed run.
+        pr_url = ""
+        pr_note = ""
+        try:
+            if inputs:
+                for k, v in inputs.items():
+                    setattr(self.state, k, v)
+            self.initialize()
+            signal = self.analyze_commit_and_plan_step()
+            if signal == HasNoCommit:
+                pr_note = "nothing to adapt — already at the target"
+                self.has_no_commit()
+                return
+            self.process_steps()
+            # Final quality gate runs whenever at least one step succeeded
+            # (current_step > 0), including partial runs: format + mypy + UT
+            # must always execute so lint issues never leak into the PR (run
+            # 174 pushed an E501 line because the gate only ran on the
+            # all-steps-passed path).  Failures enter adapter-fix mode.
+            gate_passed = True
+            if self.state.current_step > 0:
+                # Re-verify against the LAST VERIFIED vllm commit, not the
+                # target.  A step that exhausted its retries was reverted, but
+                # the vllm checkout was left on that step's commit — running
+                # the gate there pairs the committed (older-shape) adaptation
+                # with vllm changes it never adapted to, failing spuriously
+                # (2026-09-03 run 33638863120: step-21 exhausted, gate then
+                # died on a mamba get_mamba_groups shape the 20 committed
+                # steps never saw).  On the all-steps-completed path
+                # last_verified_commit == the target, so this is a no-op.
+                if self.state.last_verified_commit:
+                    run_git(self.state.vllm_path, "checkout",
+                            self.state.last_verified_commit)
+                    ts_print(f"[run] gate against last verified vllm "
+                             f"{self.state.last_verified_commit[:12]}")
+                gate_passed = self._final_quality_gate()
+                if not gate_passed:
+                    self.state.final_status = UpgradeFailed
+            self.generate_final_post()
+            # Persist adaptation lessons (E2E fix rounds) back to vllm-report
+            # before push — the clone is recreated every run, so unsaved
+            # lessons would be lost.
+            persist_lessons(self.state.vllm_report_path)
+            # The release worktree is workspace-scoped (initialize rmtree's
+            # workspace), but a leftover worktree registration in the vllm repo
+            # would break the next run's `worktree add` — remove it cleanly.
+            self._cleanup_release_worktree()
+            if self.state.current_step == 0:
+                # No step ever passed e2e: there is no successful adaptation to
+                # submit, so creating a PR would only ship a "failed" description
+                # and the last-attempted (broken) diff (PR #14376).  Skip the
+                # push entirely.
+                pr_note = "no step passed e2e"
+                ts_print("[push] no steps completed, skipping PR creation")
+                return
             if not gate_passed:
-                self.state.final_status = UpgradeFailed
-        self.generate_final_post()
-        # Persist adaptation lessons (E2E fix rounds) back to vllm-report
-        # before push — the clone is recreated every run, so unsaved
-        # lessons would be lost.
-        persist_lessons(self.state.vllm_report_path)
-        # The release worktree is workspace-scoped (initialize rmtree's
-        # workspace), but a leftover worktree registration in the vllm repo
-        # would break the next run's `worktree add` — remove it cleanly.
-        self._cleanup_release_worktree()
-        if self.state.current_step == 0:
-            # No step ever passed e2e: there is no successful adaptation to
-            # submit, so creating a PR would only ship a "failed" description
-            # and the last-attempted (broken) diff (PR #14376).  Skip the
-            # push entirely.
-            ts_print("[push] no steps completed, skipping PR creation")
-            return
-        if not gate_passed:
-            # Format/mypy/UT could not be satisfied after the gate's fix
-            # rounds — pushing would ship known-broken code (run 174's E501).
-            # The manual review issue is created by the workflow's
-            # final-status step; do not create a PR.
-            ts_print("[push] final quality gate failed after fix rounds, "
-                     "skipping PR creation")
-            return
-        pr_url = self.push_to_github()
-        self._monitor_pr_ci(pr_url)
+                # Format/mypy/UT could not be satisfied after the gate's fix
+                # rounds — pushing would ship known-broken code (run 174's E501).
+                # The manual review issue is created by the workflow's
+                # final-status step; do not create a PR.
+                pr_note = "final quality gate failed"
+                ts_print("[push] final quality gate failed after fix rounds, "
+                         "skipping PR creation")
+                return
+            pr_url = self.push_to_github()
+            self._monitor_pr_ci(pr_url)
+        finally:
+            emit_run_summary(self.state, pr_url=pr_url, pr_note=pr_note)
 
     def _monitor_pr_ci(self, pr_url: str) -> None:
         """Closed-loop watch of the submitted PR's upstream CI.
@@ -1035,6 +1051,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             sp.pop("upstream_patch", None)
             steps_preview.append(sp)
         ts_print(json.dumps(steps_preview, indent=2, ensure_ascii=False))
+        emit_plan_summary(plan)
 
         # generate every step folder in workspace
         for index in range(self.state.total_steps):
@@ -1043,6 +1060,21 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             step_dir.mkdir(parents=True, exist_ok=True)
             (step_dir / VLLM_GIT_PATCH_FILE).write_text(step["upstream_patch"], encoding="utf-8")
             (step_dir / VLLM_GIT_CHANGED_FILES).write_text(step["changed_files"], encoding="utf-8")
+
+        # Snapshot the base tree's known-failing UT node IDs ONCE per run.
+        # Runs consume a moving vllm main; a fresh-mode step can start from
+        # a base whose CPU-UT batch already fails (run 38383045302: step-1
+        # burned all 5 attempts on failures the adapter proved pre-existing
+        # on the pristine base pairing, with no exemption channel).  Only
+        # at the true kickoff (no step completed, first attempt) is the
+        # pairing vllm@base + ascend@kickoff — later, the tree belongs to
+        # the steps in flight and must not be repositioned.
+        if self.state.current_step == 0 and self.state.retry_count == 0:
+            try:
+                run_git(vllm_path, "checkout", self.state.base_commit)
+                compute_base_ut_baseline(vllm_ascend_path, vllm_path)
+            except Exception as exc:  # noqa: BLE001 — never kill the run here
+                ts_print(f"[analyze] base-tree UT baseline snapshot failed: {exc}")
 
         return HasCommit
 
@@ -1114,11 +1146,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     continue
                 noop_fix_retried = False
 
-            # Adapter analyzed the step and confirmed no vllm-ascend code
-            # change needed → skip the per-step e2e round (only on the first
-            # attempt; if a later step's regression e2e in the final gate
-            # surfaces a baseline bug, that gate's fix loop handles it).
-            # The final quality gate always runs the regression e2e at the end.
+            # No-op step (adapter found no vllm-ascend code change): skip
+            # the per-step e2e and move straight to the next step's
+            # adaptation.  The commit still lands (the verified.commit
+            # bump), but last_step_e2e_passed stays False, so the final
+            # quality gate runs the regression e2e ONCE for the whole
+            # streak of no-op steps — the only validation their untested
+            # "no change needed" judgment ever gets.  N no-op steps cost
+            # one gate e2e round, not N (user ruling 2026-10-15).
             if self.state.last_step_is_noop and self.state.retry_count == 0:
                 ts_print(f"[process_steps] {step_id}: adapter marked step as "
                          f"no-op (no vllm-ascend code change), skipping e2e")
@@ -1131,7 +1166,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self.state.current_step += 1
                 self.state.retry_count = 0
                 self.state.last_verified_commit = self.state.cur_vllm_commit
-                self.state.last_step_e2e_passed = False  # final gate must run regression
+                self.state.last_step_e2e_passed = False  # gate owes this run one e2e
                 last_e2e_blocking = None
                 continue
 
@@ -1248,19 +1283,19 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
           coverage set now (2026-09-15 merge, _run_gate_e2e): 34 cases
           whose failures are triaged — one delta re-run absorbs flakes;
           tracebacks entirely outside the adaptation diff are
-          upstream-inherited (recorded, not blocking); own-diff failures
-          enter adapter-fix rounds that re-run ONLY the failed suites.
-          Once the fix budget exhausts (MAIN2MAIN_EXTENDED_FIX_ROUNDS,
-          default 3) the failing set is RECORDED, NOT BLOCKING (2026-09-20
-          decision) — the PR body's Gate e2e line carries the evidence and
-          upstream PR CI is the verifier; only static_failed / error still
-          block the gate.
+          upstream-inherited; own-diff failures enter adapter-fix rounds
+          that re-run ONLY the failed suites.  Since the 2026-10-15
+          ruling every red verdict BLOCKS the gate — inherited, exhausted
+          fix budget, stop-loss, time budget, own-diff collection errors,
+          static_failed, error are all recorded for diagnosis and none of
+          them ships a PR (this reverses the 2026-09-20 record-and-push
+          tolerance; a red gate no longer defers to upstream PR CI).
           MAIN2MAIN_EXTENDED_E2E=0 falls back to the legacy 23-case
           regression e2e (same-tree flake retry + revert on determinism).
           Static checks are memoized by working-tree diff sha (HEAD never
           changes during the gate, so the diff sha identifies the tree);
-          the gate e2e is memoized the same way — a green or
-          inherited-suppressed tree is not re-run until the tree changes.
+          the gate e2e is memoized the same way — a green tree is not
+          re-run until the tree changes; a red tree breaks the gate.
         """
         ascend_path = self.state.vllm_ascend_path
         vllm_path = self.state.vllm_path
@@ -1282,13 +1317,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # final_gate); the default routes through _run_gate_e2e.
         extended_e2e_enabled = os.getenv("MAIN2MAIN_EXTENDED_E2E", "1") == "1"
         # Gate-e2e memoization (same tree-sha pattern as the smoke below):
-        # a passed or suppressed (upstream-inherited) tree is not re-run
-        # until the tree changes.
+        # a passed tree is not re-run until the tree changes.  A red tree
+        # never memoizes — it breaks the gate (2026-10-15 ruling).
         gate_e2e_passed_sha: str | None = None
-        gate_e2e_suppressed_sha: str | None = None
         # Release-smoke memoization (same tree-sha pattern as the static
-        # checks): a passed or suppressed (upstream-inherited) tree is not
-        # re-smoked until the tree changes.
+        # checks): a passed tree is not re-smoked until the tree changes;
+        # a skipped round (no worktree, remote mode) also marks the tree
+        # so it isn't retried every iteration.  A red tree breaks the gate.
         smoke_passed_sha: str | None = None
         smoke_suppressed_sha: str | None = None
 
@@ -1363,12 +1398,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     need_regression_e2e = False
                 else:
                     cur_sha = self._working_tree_diff_sha(ascend_path)
-                    if cur_sha in (gate_e2e_passed_sha,
-                                   gate_e2e_suppressed_sha):
-                        # Same tree already green or inherited-suppressed —
-                        # don't re-run the wide set on a memo hit (a smoke
-                        # fix round re-arms the regression e2e; only a tree
-                        # change justifies another full entry).
+                    if cur_sha == gate_e2e_passed_sha:
+                        # Same tree already green — don't re-run the wide
+                        # set on a memo hit (a smoke fix round re-arms the
+                        # regression e2e; only a tree change justifies
+                        # another full entry).
                         need_regression_e2e = False
                     elif e2e_attempts_left <= 0:
                         break
@@ -1376,8 +1410,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         e2e_attempts_left -= 1
                         e2e = self._run_gate_e2e(gate_dir)
                         verdict = e2e.get("status")
-                        if verdict in ("passed", "inherited", "empty",
-                                       "skipped"):
+                        if verdict in ("passed", "empty", "skipped"):
                             need_regression_e2e = False
                             if e2e.get("fixes_applied"):
                                 fixes_applied = True
@@ -1390,41 +1423,23 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                 verified = e2e.get("statics_verified_sha")
                                 if verified:
                                     static_passed_sha = verified
-                            if verdict == "inherited":
-                                gate_e2e_suppressed_sha = (
-                                    self._working_tree_diff_sha(ascend_path))
-                            else:
-                                gate_e2e_passed_sha = (
-                                    self._working_tree_diff_sha(ascend_path))
-                        elif verdict in ("exhausted", "stop_loss_no_progress",
-                                         "time_budget",
-                                         "collection_error_own"):
-                            # 2026-09-20 decision: the fix budget is spent
-                            # with own-diff failures still standing —
-                            # record and keep pushing.  Memoized like the
-                            # inherited verdict so a re-armed loop doesn't
-                            # re-burn the wide set on the same tree; the
-                            # failing suites stay visible in the PR body's
-                            # Gate e2e line and upstream PR CI is the
-                            # verifier.
-                            ts_print(
-                                f"[final_quality_gate] gate e2e {verdict} "
-                                f"— own-diff failures unresolved after fix "
-                                f"rounds; recorded, NOT blocking PR "
-                                f"creation")
-                            error_logs = (e2e.get("last_error_logs") or [
-                                str(Path(gate_dir) / GATE_E2E_RESULT_FILE)])
-                            if e2e.get("fixes_applied"):
-                                fixes_applied = True
-                                verified = e2e.get("statics_verified_sha")
-                                if verified:
-                                    static_passed_sha = verified
-                            gate_e2e_suppressed_sha = cur_sha
-                            need_regression_e2e = False
+                            gate_e2e_passed_sha = (
+                                self._working_tree_diff_sha(ascend_path))
                         else:
+                            # 2026-10-15 ruling: red e2e blocks the PR.
+                            # inherited (root cause outside the diff),
+                            # exhausted fix budgets, stop-loss, time
+                            # budget, and own-diff collection errors are
+                            # all recorded for diagnosis (gate_e2e_
+                            # inherited.json, the PR body's Gate e2e line)
+                            # — and none of them ships.  Reverses the
+                            # 2026-09-20 record-and-push tolerance:
+                            # upstream PR CI is no longer the verifier for
+                            # a gate the flow already knows is red.
                             ts_print(
                                 f"[final_quality_gate] gate e2e {verdict} "
-                                f"— gate fails")
+                                f"— recorded, BLOCKING: red e2e does not "
+                                f"ship a PR (2026-10-15 ruling)")
                             error_logs = (e2e.get("last_error_logs") or [
                                 str(Path(gate_dir) / GATE_E2E_RESULT_FILE)])
                             break
@@ -1452,14 +1467,20 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     else:
                         verdict, root_files = self._classify_smoke_failure(smoke)
                         if verdict == "inherited":
+                            # Recorded for diagnosis, and — 2026-10-15
+                            # ruling — blocking: red e2e does not ship.
                             ts_print(f"[final_quality_gate] release smoke failure is "
                                      f"UPSTREAM-INHERITED (root cause in "
                                      f"{', '.join(root_files[:3])} — none of them "
-                                     f"is in this adaptation's diff); recording, "
-                                     f"not blocking")
-                            smoke_suppressed_sha = static_passed_sha
+                                     f"is in this adaptation's diff); recorded, "
+                                     f"BLOCKING")
                             self._record_inherited_smoke(smoke, gate_dir,
                                                          root_files)
+                            error_logs = smoke["detail_files"] or [
+                                str(Path(gate_dir)
+                                    / "final-quality-gate-release-smoke"
+                                    / "tests" / "round-0-result.json")]
+                            break
                         elif fix_rounds_left == 0:
                             break
                         else:
@@ -1529,21 +1550,19 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         set: one delta re-run of the failed suites absorbs flakes; a
         failure whose traceback files all sit OUTSIDE the cumulative
         adaptation diff is upstream-inherited (the PR 16382 shape) —
-        recorded in gate_e2e_inherited.json, NOT blocking.  Own-diff
+        recorded in gate_e2e_inherited.json.  Own-diff
         failures enter adapter-fix rounds (MAIN2MAIN_EXTENDED_FIX_ROUNDS,
         default 3) that re-run ONLY the failed suites, with a wall-clock
         backstop (MAIN2MAIN_EXTENDED_MAX_MIN), a stop-loss on an identical
         failing set, and a statics re-check when a fix edited the tree.
-        Unlike the old post-gate phase this runs INSIDE the gate, but
-        since 2026-09-20 exhausting the budgets on an own-diff failing set
-        is RECORDED, NOT BLOCKING — the PR body's Gate e2e line carries
-        the failing-suite evidence and upstream PR CI is the verifier.
+        Since the 2026-10-15 ruling EVERY red verdict blocks the gate
+        (run 38512795089 shipped PR 18766 on a red, inherited-suppressed
+        gate) — the evidence is recorded, the PR is not created.
 
         Returns a dict whose "status" the gate loop routes on:
-        passed / inherited / empty / skipped are non-blocking;
+        passed / empty / skipped are non-blocking; inherited /
         exhausted / stop_loss_no_progress / time_budget /
-        collection_error_own are tolerated (recorded, not blocking since
-        2026-09-20); static_failed / error block the gate.
+        collection_error_own / static_failed / error block the gate.
         """
         if not self.state.steps:
             return {"status": "skipped", "reason": "no steps"}
@@ -1766,7 +1785,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                  f"(root cause in "
                                  f"{', '.join(failure_files[:3])} — none of "
                                  f"them is in this adaptation's diff); "
-                                 f"recording, not blocking")
+                                 f"recorded, BLOCKING (2026-10-15 ruling)")
                         self._record_inherited_smoke(
                             {"detail_files": [str(result_path)],
                              "result": {"suite_results": triage_suites}},
@@ -2474,6 +2493,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 ascend_path, self.state.release_tag, vllm_path=vllm_path,
                 vllm_release_path=self._release_gate_path())
             pre_ci_passed = check_result["all_passed"]
+            # Durable per-attempt trace for the run summary.  Only FAILING
+            # attempts leave a file otherwise (pre_ci_check.json, overwritten
+            # each time), so a job page could say "the step passed" but never
+            # "it took 3 format/mypy/UT rounds to get there".  retry_count is
+            # the e2e round this pre_ci precedes — the same number that names
+            # tests/round-<n>-result.json.
+            record_pre_ci_attempt(step_dir, step_id, self.state.retry_count,
+                                  check_result)
             ut_check = next((c for c in check_result.get("checks", [])
                              if c.get("name") == "ut"), None)
             if ut_check and not ut_check.get("skipped", False):
@@ -2584,10 +2611,9 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         self.state.test_errors = []
 
-        # Track whether the adapter made any vllm-ascend code change (excluding
-        # the tracking file).  process_steps uses this to skip the per-step
-        # e2e for true no-op steps; the final quality gate's regression e2e
-        # still runs at the end.
+        # Track whether the adapter made any vllm-ascend code change.
+        # process_steps skips the per-step e2e for no-op steps and defers
+        # their validation to the final gate's single regression round.
         self.state.last_step_is_noop = bool(adapt_result and adapt_result.is_noop)
 
         summary_path = step_dir / EACH_STEP_SUMMARY_FILE
@@ -2653,8 +2679,13 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             ts_print("[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
             return True
 
+        # Zero-source-delta first attempt (marker bump / docs / configs
+        # only): defer validation to the final gate's regression e2e, same
+        # as an adapter-judged no-op.  On fix rounds (retry_count > 0) a
+        # red e2e is outstanding — it must actually re-run, never skip its
+        # way into a commit.
         changed = [f for f in (self.state.changed_files or []) if f]
-        if not _has_source_changes(changed):
+        if self.state.retry_count == 0 and not _has_source_changes(changed):
             self.state.last_step_e2e_passed = False
             ts_print(f"[run_e2e_test] {step_id}: only non-source changes "
                      f"({changed or '(none)'}), skipping e2e")
@@ -2933,7 +2964,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             (WORKSPACE_DIR / FINAL_SUMMARY_FILE).write_text(
                 "main2main adaptation failed — no steps completed.\n", encoding="utf-8"
             )
-            (WORKSPACE_DIR / "final_status.json").write_text(
+            (WORKSPACE_DIR / FINAL_STATUS_FILE).write_text(
                 json.dumps({"status": "failed", "steps_completed": 0, "steps_total": self.state.total_steps,
                             "reached_commit": "", "old_commit": self.state.base_commit,
                             "new_commit": self.state.target_commit or ""}, indent=2, ensure_ascii=False) + "\n",
@@ -3267,7 +3298,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             "old_commit": self.state.base_commit,
             "new_commit": self.state.target_commit or self.state.cur_vllm_commit,
         }
-        (WORKSPACE_DIR / "final_status.json").write_text(
+        (WORKSPACE_DIR / FINAL_STATUS_FILE).write_text(
             json.dumps(status_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 

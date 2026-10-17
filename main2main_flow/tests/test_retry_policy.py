@@ -10,6 +10,11 @@
   a revert doesn't re-run format/mypy/UT on an already-verified tree
 - the pre_ci fix loop skips a redundant format+mypy+UT round when the retry
   reproduces the already-failed tree byte-for-byte
+- adapter-judged no-op steps skip their per-step e2e and advance; the
+  final gate owes the run ONE regression e2e for the whole no-op streak
+  (last_step_e2e_passed stays False).  A zero-source-delta FIRST attempt
+  (marker bump / docs only) defers the same way; a fix round with a red
+  e2e outstanding always re-runs run_tests
 """
 
 import inspect
@@ -24,7 +29,6 @@ def _make_flow():
     f.state.steps = [{"id": "step-1", "start_commit": "aaa", "end_commit": "bbb"}]
     f.state.total_steps = 1
     f.state.current_step = 0
-    f.state.last_step_is_noop = False
     return f
 
 
@@ -102,6 +106,105 @@ def test_e2e_no_stop_loss_when_blocking_set_changes(monkeypatch):
     assert len(calls) == 3  # full budget consumed
     assert reverts == ["step step-1 e2e exhausted"]
     assert f.state.final_status == flow_mod.UpgradePartial
+
+
+def _head(repo) -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _noop_step_flow(repo, monkeypatch):
+    """The old no-op shape: adapter succeeds without touching any file
+    (adapt_result.is_noop would have been True under the removed skip)."""
+    f = _make_flow()
+    f.state.vllm_ascend_path = str(repo)
+    monkeypatch.setattr(f, "_ai_analysis", lambda: True)
+    return f
+
+
+def test_noop_step_skips_e2e_and_advances(monkeypatch, tmp_path):
+    # User model (2026-10-15): a no-op step (adapter found no vllm-ascend
+    # change) skips its per-step e2e and moves straight to the next step's
+    # adaptation.  The marker-bump commit still lands, but the run owes
+    # the final gate one regression e2e — last_step_e2e_passed stays False.
+    repo = _init_ascend_repo(tmp_path)
+    base_head = _head(repo)
+    # The realistic no-op tree: only the verified.commit bump, zero source
+    # changes — exactly PR 18766's anatomy.
+    (repo / ".github").mkdir()
+    (repo / ".github" / "vllm-main-verified.commit").write_text(
+        "0f8b398158f01fb3ea0e81b5adc93338fdf3db9c\n")
+    f = _noop_step_flow(repo, monkeypatch)
+    f.state.last_step_is_noop = True
+    e2e_calls: list[int] = []
+    monkeypatch.setattr(f, "_run_e2e_test",
+                        lambda: e2e_calls.append(f.state.retry_count) or True)
+
+    f.process_steps()
+
+    assert e2e_calls == []  # the no-op step never pays a per-step e2e
+    assert _head(repo) != base_head  # the marker bump still commits
+    assert f.state.current_step == 1
+    assert f.state.last_step_e2e_passed is False  # gate owes this run one e2e
+    assert f.state.final_status == flow_mod.UpgradeCompleted
+
+
+def test_noop_streak_costs_zero_per_step_e2e(monkeypatch, tmp_path):
+    # N consecutive no-op steps skip every per-step e2e; the flag stays
+    # False so the final quality gate runs its regression e2e exactly once
+    # for the whole streak.
+    repo = _init_ascend_repo(tmp_path)
+    f = _make_flow()
+    f.state.vllm_ascend_path = str(repo)
+    f.state.steps = [
+        {"id": "step-1", "start_commit": "aaa", "end_commit": "bbb"},
+        {"id": "step-2", "start_commit": "bbb", "end_commit": "ccc"},
+    ]
+    f.state.total_steps = 2
+    f.state.current_step = 0
+    f.state.last_step_is_noop = True
+    monkeypatch.setattr(f, "_ai_analysis", lambda: True)
+    e2e_calls: list[int] = []
+    monkeypatch.setattr(f, "_run_e2e_test",
+                        lambda: e2e_calls.append(f.state.retry_count) or True)
+
+    f.process_steps()
+
+    assert e2e_calls == []  # two no-op steps, zero per-step e2e rounds
+    assert f.state.current_step == 2
+    assert f.state.last_step_e2e_passed is False  # → the gate's single e2e
+    assert f.state.final_status == flow_mod.UpgradeCompleted
+
+
+def test_non_source_first_attempt_defers_e2e_to_gate(monkeypatch, tmp_path):
+    # Docs/configs-only diff on the FIRST attempt: skip the per-step e2e,
+    # leave the flag False so the final gate's regression e2e covers it.
+    f = _make_flow()
+    f.state.changed_files = [".github/vllm-main-verified.commit", "docs/note.md"]
+    f.state.retry_count = 0
+    monkeypatch.setattr(flow_mod, "WORKSPACE_DIR", tmp_path)
+    run_calls: list[dict] = []
+    monkeypatch.setattr(flow_mod, "run_tests",
+                        lambda **kw: run_calls.append(kw) or {"can_commit": True})
+
+    assert f._run_e2e_test() is True
+    assert run_calls == []
+    assert f.state.last_step_e2e_passed is False
+
+
+def test_non_source_fix_round_still_runs_e2e(monkeypatch, tmp_path):
+    # A fix round has a RED e2e outstanding: a docs-only tweak must not
+    # skip its way into a commit — run_tests is invoked regardless.
+    f = _make_flow()
+    f.state.changed_files = ["docs/note.md"]
+    f.state.retry_count = 1
+    monkeypatch.setattr(flow_mod, "WORKSPACE_DIR", tmp_path)
+    run_calls: list[dict] = []
+    monkeypatch.setattr(flow_mod, "run_tests",
+                        lambda **kw: run_calls.append(kw) or {"can_commit": True})
+
+    assert f._run_e2e_test() is True
+    assert len(run_calls) == 1
 
 
 def test_budgets_are_hardcoded(monkeypatch):
