@@ -107,13 +107,14 @@ cases it contains (PR 16575 shipped green on pre_ci while upstream CI
 failed legs it never touched).
 
 Case source (`extended_e2e.py`): by default the FIXED curated
-`test_policy.json` `extended_e2e` key — 36 cases (2026-09-16 trim of the
-55-case set; 24 one-card, 7 two-card, 5 four-card) weighted
-toward the surfaces that recently failed CI (extract_hidden_states,
-gumbel, mamba, Kimi-K3 DSpark, DSparkSpeculator, PCP), and excluding
-every `_310p` suite (the a3-16 pool absolutely
-cannot run 310P hardware paths — the exclusion is structural, applied at
-runtime in BOTH modes, overrides included).
+`test_policy.json` `extended_e2e` key — 32 cases (19 one-card, 9 two-card,
+4 four-card) weighted toward the surfaces that recently failed CI
+(extract_hidden_states, gumbel, mamba, Kimi-K3 DSpark, DSparkSpeculator,
+PCP; 2026-10-18 PR-CI feedback swap adds dspark/dflash/guided-decoding
+anchors and drops the six phantom files plus the flaky SP precision nodes;
+2026-09-16 trimmed 55 → 32), and excluding every `_310p` suite (the a3-16
+pool absolutely cannot run 310P hardware paths — the exclusion is
+structural, applied at runtime in BOTH modes, overrides included).
 Curation is offline; runtime guards drop entries the per-step allowlist
 already covers (drift), upstream `skip_tests` has since claimed, `_310p`
 suites, or files missing from the tree.
@@ -121,15 +122,19 @@ suites, or files missing from the tree.
 (tree scan of `tests/e2e/pull_request/**/test_*.py` − `skip_tests` −
 fixed-set coverage − `_310p` − blocklist, hours).  In both modes, cases
 whose test file imports a module touched by the adaptation diff run first
-(import-closure tier); the rest follow, both by estimated time ascending
-(`run_tests` is called with `preserve_order=True`).
+(import-closure tier); the rest follow, both by estimated time ascending.
+The gate does NOT pass `preserve_order` — the rolling scheduler re-sorts
+the queue by LPT (more cards, then longer estimate) so the four-card
+giants claim devices before small suites fill the pool behind them.
+Estimates come from `estimated_times.yaml` (the dedicated table upstream
+split out of `test_config.yaml`; both are read, dedicated wins).
 
 Failure handling is the release-smoke triage applied to the wide set: one
 delta re-run of the failed suites absorbs flakes; traceback files
 entirely outside the adaptation diff → upstream-inherited (the PR 16382
 shape) → recorded in `quality_gate/gate_e2e_inherited.json`, not
 blocking; own-diff failures enter adapter-fix rounds
-(`MAIN2MAIN_EXTENDED_FIX_ROUNDS`, default 2, re-running ONLY the failed
+(`MAIN2MAIN_EXTENDED_FIX_ROUNDS`, default 3, re-running ONLY the failed
 suites) with a wall-clock backstop (`MAIN2MAIN_EXTENDED_MAX_MIN`, default
 360) and a stop-loss on an identical failing set; pytest exit 4
 (collection error) suites are excluded from fix rounds permanently (when
@@ -202,9 +207,9 @@ upstream CI stays the only test executor — the watcher runs no tests itself.
 | `MAIN2MAIN_PR_WATCH_POLL_SEC` | Check-run poll interval seconds (default: `300`). |
 | `MAIN2MAIN_PR_WATCH_BASELINE` | `0` skips the `main2main_baseline` write-back after an accepted fix (default: `1`). |
 | `MAIN2MAIN_PR_WATCH_COMMENT` | `0` skips the PR comment on exhausted/timeout/inherited (default: `1`). |
-| `MAIN2MAIN_EXTENDED_E2E` | `0` reverts the gate's main e2e to the legacy 23-case regression set (default: `1` runs the wide 36-case set with triage). |
-| `MAIN2MAIN_EXTENDED_MODE` | `fixed` (default) runs the curated `test_policy.json` `extended_e2e` set (~17min); `full` resolves the whole label minus subtraction (hours). |
-| `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | Adapter-fix rounds for extended e2e failures after the first round (default: `2`). |
+| `MAIN2MAIN_EXTENDED_E2E` | `0` reverts the gate's main e2e to the legacy 23-case regression set (default: `1` runs the wide 32-case set with triage). |
+| `MAIN2MAIN_EXTENDED_MODE` | `fixed` (default) runs the curated `test_policy.json` `extended_e2e` set (~19min); `full` resolves the whole label minus subtraction (hours). |
+| `MAIN2MAIN_EXTENDED_FIX_ROUNDS` | Adapter-fix rounds for extended e2e failures after the first round (default: `3`). |
 | `MAIN2MAIN_EXTENDED_MAX_MIN` | Extended e2e wall-clock backstop in minutes, `0` = off (default: `360`). |
 | `MAIN2MAIN_EXTENDED_TEST_CASES` | Space/newline-separated extended e2e cases replacing both sources entirely (drift guards still apply). |
 | `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | `1` keeps upstream `skip_tests` files in the `full`-mode set (default: `0`; no effect in `fixed` mode). |

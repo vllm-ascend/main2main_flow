@@ -89,6 +89,49 @@ def test_estimated_times_missing_file(tmp_path: Path) -> None:
     assert _load_estimated_times(tmp_path / "empty") == {}
 
 
+DEDICATED_YAML = """\
+estimated_times:
+  tests/e2e/pull_request/one_card/test_a.py: 690
+  tests/e2e/pull_request/two_card/test_c.py: 1020
+"""
+
+
+def _add_dedicated(repo: Path, text: str) -> None:
+    (repo / ".github" / "workflows" / "scripts"
+     / "estimated_times.yaml").write_text(text, encoding="utf-8")
+
+
+def test_estimated_times_dedicated_file_only(tmp_path: Path) -> None:
+    # Upstream moved the table out of test_config.yaml; the dedicated file
+    # alone must still drive scheduling.
+    repo = _make_repo(tmp_path, "partition: ascend\n")
+    _add_dedicated(repo, DEDICATED_YAML)
+    t = _load_estimated_times(repo)
+    assert t["tests/e2e/pull_request/one_card/test_a.py"] == 690
+    assert t["tests/e2e/pull_request/two_card/test_c.py"] == 1020
+
+
+def test_estimated_times_dedicated_file_wins(tmp_path: Path) -> None:
+    # Both tables present: legacy-only keys survive, conflicting keys take
+    # the dedicated file's value.
+    repo = _make_repo(tmp_path, NEW_YAML)
+    _add_dedicated(repo, DEDICATED_YAML)
+    t = _load_estimated_times(repo)
+    assert t["tests/e2e/pull_request/one_card/test_a.py"] == 690
+    assert t["tests/e2e/pull_request/two_card/test_b.py"] == 300
+    assert t["tests/e2e/pull_request/two_card/test_c.py"] == 1020
+
+
+def test_estimated_times_corrupt_dedicated_keeps_legacy(tmp_path: Path) -> None:
+    # A corrupt file must not discard the other table (that is exactly the
+    # silent-degradation failure this loader was fixed for).
+    repo = _make_repo(tmp_path, NEW_YAML)
+    _add_dedicated(repo, "estimated_times: [unclosed\n")
+    t = _load_estimated_times(repo)
+    assert t["tests/e2e/pull_request/one_card/test_a.py"] == 60
+    assert t["tests/e2e/pull_request/two_card/test_b.py"] == 300
+
+
 def test_collect_cpu_ut_files_matches_pytest_order(tmp_path: Path) -> None:
     """The CPU-UT batch must run in pytest's collection order.
 

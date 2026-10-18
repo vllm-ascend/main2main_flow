@@ -27,6 +27,7 @@ from main2main_flow.scripts.utils.run_summary import (
     emit_run_summary, record_pre_ci_attempt)
 from main2main_flow.scripts.utils.run_tests import (
     PASS_RESULTS,
+    _DEFAULT_ESTIMATED_SECONDS,
     _load_estimated_times,
     build_test_errors_detail,
     pin_free_npu_chips,
@@ -196,12 +197,14 @@ def _resolve_release_smoke_cases() -> list[str]:
 def _resolve_gate_e2e_policy_cases() -> list[str]:
     """Fixed case selection for the gate's main e2e.
 
-    The curated ``test_policy.json`` ``extended_e2e`` key — 34 cases
-    (2026-09-16 trim of the 55-case second revision; 2026-09-20 removal of
-    the deterministic-failing test_dspark.py and test_kimi_k3.py) weighted
-    toward
-    recently-failing CI surfaces, two/four-card coverage (12 entries),
-    free of ``_310p`` suites, sized to one bounded ~17min batch.  Formerly
+    The curated ``test_policy.json`` ``extended_e2e`` key — 32 cases
+    (2026-10-18 PR-CI feedback swap: dspark/dflash/guided-decoding anchors
+    added, the six phantom files and the flaky SP precision nodes removed;
+    earlier: 2026-09-16 trim of the 55-case second revision, 2026-09-20
+    removal of the deterministic-failing test_dspark.py and test_kimi_k3.py)
+    weighted toward recently-failing CI surfaces, two/four-card coverage
+    (13 entries: 9 two-card + 4 four-card), free of ``_310p`` suites,
+    sized to one bounded ~19min batch.  Formerly
     the post-gate "extended e2e" phase; it IS the gate's main e2e now
     (2026-09-15 merge).  MAIN2MAIN_EXTENDED_TEST_CASES overrides entirely (handled by
     the caller); an empty key disables the wide set — same fallback
@@ -1252,7 +1255,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
           31691299310's attempt-3 fix was correct and PR CI passed, but the
           gate had already exhausted).
         - 4 gate-e2e entries.  The gate's main e2e IS the extended
-          coverage set now (2026-09-15 merge, _run_gate_e2e): 34 cases
+          coverage set now (2026-09-15 merge, _run_gate_e2e): 32 cases
           whose failures are triaged — one delta re-run absorbs flakes;
           tracebacks entirely outside the adaptation diff are
           upstream-inherited; own-diff failures enter adapter-fix rounds
@@ -1514,7 +1517,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         PR 16575 shipped green on pre_ci while upstream CI failed legs
         (dflash/dspark release lane, PCP spec decode) it never touched.
         The default source is the FIXED curated set (test_policy.json
-        "extended_e2e", 34 cases weighted toward recently-failing CI
+        "extended_e2e", 32 cases weighted toward recently-failing CI
         surfaces); MAIN2MAIN_EXTENDED_MODE=full opts into the whole-label
         resolver; MAIN2MAIN_EXTENDED_TEST_CASES overrides both.
 
@@ -1551,7 +1554,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
             # ---- case resolution (same sources as the old post-gate phase) ----
             # Default: the FIXED extended set (test_policy.json
-            # "extended_e2e", 34 cases ≈ ~17min wall).  MODE=full opts
+            # "extended_e2e", 32 cases ≈ ~19min wall).  MODE=full opts
             # into the whole-label resolver (hours).
             # MAIN2MAIN_EXTENDED_TEST_CASES overrides both.
             override_env = os.getenv("MAIN2MAIN_EXTENDED_TEST_CASES",
@@ -1619,9 +1622,14 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             changed_modules = changed_module_names(changed_files)
             tier1, _tier2 = partition_by_import_closure(
                 cases, changed_modules, ascend_path)
-            ordered = order_cases(
-                cases, tier1,
-                _load_estimated_times(Path(ascend_path)))
+            estimated_times = _load_estimated_times(Path(ascend_path))
+            if not estimated_times:
+                ts_print("[gate_e2e] WARNING: no estimated_times loaded "
+                         "(test_config.yaml / estimated_times.yaml missing "
+                         "or unreadable) — every suite falls back to the "
+                         f"{_DEFAULT_ESTIMATED_SECONDS}s default and the "
+                         "scheduler is duration-blind")
+            ordered = order_cases(cases, tier1, estimated_times)
             result_out["tier1"] = tier1
             ts_print(f"[gate_e2e] {len(cases)} case(s) "
                      f"({len(tier1)} in the diff's import closure), "

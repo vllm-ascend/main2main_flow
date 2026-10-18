@@ -279,6 +279,26 @@ def test_prune_fixed_set_drops_310p_structurally(tmp_path):
         "tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py"]
 
 
+def test_prune_fixed_set_drops_node_under_skipped_file(tmp_path):
+    # Node-level entries must inherit their FILE's upstream skip: checking
+    # only `c in skip` would schedule a node from a suite upstream has
+    # disabled wholesale (2026-10-18 node-granularity audit).
+    from main2main_flow.scripts.utils.extended_e2e import prune_fixed_set
+
+    seq = ("tests/e2e/pull_request/four_card/"
+           "test_sequence_parallel_linear.py")
+    ascend = _make_ascend(tmp_path, [seq])
+    cfg = tmp_path / "ascend/.github/workflows/scripts"
+    cfg.mkdir(parents=True)
+    (cfg / "test_config.yaml").write_text(yaml.safe_dump({
+        "skip_tests": [seq],
+    }), encoding="utf-8")
+    candidate = f"{seq}::test_sequence_parallel_moe_dp2_tp2_functional"
+    out = prune_fixed_set(ascend, [candidate], [])
+    assert out["cases"] == []
+    assert out["dropped_skip"] == [candidate]
+
+
 def test_resolve_extended_cases_drops_310p_from_tree_scan(tmp_path):
     ascend = _make_ascend(tmp_path, [
         "tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py",

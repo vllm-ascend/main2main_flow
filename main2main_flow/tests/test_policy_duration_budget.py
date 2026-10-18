@@ -210,6 +210,24 @@ three kimi_k3 nodes die at APIServer startup (pydantic ValidationError
 on SpeculativeConfig with MoE+EP).  Same day the gate e2e stops
 blocking PR creation once its fix rounds (now default 3) exhaust —
 upstream PR CI is the verifier.
+
+User decision 2026-10-18 (sixth revision): feed PR-CI failures back into
+the gate set.  PR 19103's gate ran 28 effective cases green (2474s
+wall) while upstream PR CI (run 39093717461) failed 7 shards.  Four
+A3-runnable anchors enter: the two_card spec_decode_heavy DSpark node
+(1020s upstream), two_card MRV2 test_qwen3_6_dspark.py (600s),
+test_qwen3_6_dflash.py (600s), and one_card/test_guided_decoding.py
+(690s).  They replace the SIX phantom files that no longer exist
+upstream (the five w4a4/w8a16/w8a8 entries + kimi_kda) and the
+test_sequence_parallel_linear.py FILE entry, whose two precision nodes
+burned 2393s of the 2474s wall on data-parallel worker-start timeouts
+before being classified env_flake_pass; the file's stable functional
+node (312s measured) stays.  The set is 32 cases (19/9/4).  The gate's
+rolling-dispatch makespan pin is 1800s on the observed 14-card pool:
+the set simulates to 1117s (16 cards: 1101s), well under the 2474s run
+it replaces.  Same revision fixes the estimated-times loader: upstream
+moved the table to estimated_times.yaml, and reading only
+test_config.yaml made every suite a 600s default (duration-blind LPT).
 Re-sync these numbers whenever the allowlist changes or a fresh run
 re-measures.
 """
@@ -312,9 +330,123 @@ _OVERRIDERS = {
     "tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py",
 }
 
+# ---------------------------------------------------------------------------
+# Gate extended set (2026-10-18 sixth revision)
+# ---------------------------------------------------------------------------
+
+# The a3-16 runner exposed 14 usable cards in the measured gate run
+# (Phy-IDs 2..15; two dies were occupied).  A clean pool of 16 only
+# shortens the makespan (1101s), so the 14-card pin is the conservative
+# number the gate must honour.
+_GATE_E2E_CARDS = 14
+_EXTENDED_WALL_S = 1800  # 30min; the 28-case run it replaces measured 2474s
+
+# test path -> recorded seconds.  The 27 retained cases are cold a3-16
+# suite durations from gate run 38996027002 (2026-10-17) by diffing suite
+# start/done timestamps; the SP functional node measured 312s in that run
+# (the file entry's 2393s was the two precision nodes timing out).  The
+# four new PR-CI anchors carry upstream file-level estimates from
+# estimated_times.yaml until the first real gate run replaces them.
+_EXTENDED_RECORDED_S = {
+    "tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py": 379,
+    "tests/e2e/pull_request/four_card/test_minimax_m3.py": 98,
+    "tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py": 81,
+    "tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py::"
+    "test_sequence_parallel_moe_dp2_tp2_functional": 312,
+    "tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py": 48,
+    "tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py": 36,
+    "tests/e2e/pull_request/one_card/lora/test_ilama_lora.py": 26,
+    "tests/e2e/pull_request/one_card/lora/test_olmoe_lora.py": 27,
+    "tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py": 25,
+    "tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8B.py": 162,
+    "tests/e2e/pull_request/one_card/pooling/test_classification.py": 21,
+    "tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py": 22,
+    "tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py": 255,
+    "tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py": 212,
+    "tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py": 153,
+    "tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py": 21,
+    "tests/e2e/pull_request/one_card/test_eplb_map_to_physical_npu.py": 34,
+    "tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py": 44,
+    "tests/e2e/pull_request/one_card/test_guided_decoding.py": 690,
+    "tests/e2e/pull_request/one_card/test_gumbel_sampling.py": 122,
+    "tests/e2e/pull_request/one_card/test_mla_precision.py": 48,
+    "tests/e2e/pull_request/one_card/test_model_runner_v1_with_device.py": 30,
+    "tests/e2e/pull_request/one_card/test_sfa_v1_precision.py": 161,
+    "tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py": 24,
+    "tests/e2e/pull_request/two_card/model_runner_v2/test_mamba_hybrid.py": 90,
+    "tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py": 600,
+    "tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py": 600,
+    "tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py": 258,
+    "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py::"
+    "test_qwen36_35b_dspark_spec_decoding": 1020,
+    "tests/e2e/pull_request/two_card/test_activation.py": 55,
+    "tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py": 24,
+    "tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py": 48,
+}
+
+_EXTENDED_ANCHORS = {
+    "tests/e2e/pull_request/one_card/test_guided_decoding.py",
+    "tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py",
+    "tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py",
+    "tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py::"
+    "test_qwen36_35b_dspark_spec_decoding",
+}
+
+# Files that no longer exist on the upstream tree (the 2026-09-13 phantom
+# lesson: selecting them yields pytest exit 4 that no adapter can fix).
+_EXTENDED_PHANTOMS = {
+    "tests/e2e/pull_request/one_card/test_w4a4_flatquant.py",
+    "tests/e2e/pull_request/one_card/test_w4a4_laos_dynamic.py",
+    "tests/e2e/pull_request/one_card/test_w8a16.py",
+    "tests/e2e/pull_request/one_card/test_w8a8_dynamic.py",
+    "tests/e2e/pull_request/one_card/test_w8a8_static.py",
+    "tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py",
+}
+
 
 def _allowlist() -> list[str]:
     return json.loads(_POLICY.read_text())["allowlist"]
+
+
+def _extended() -> list[str]:
+    return json.loads(_POLICY.read_text())["extended_e2e"]
+
+
+def _rolling_makespan(cases: list[str], times: dict[str, int],
+                      cards: int) -> int:
+    """Event-driven simulation of run_tests' rolling executor.
+
+    Mirrors ``_RollingAllocator`` + ``_rolling_priority`` + the dispatch
+    loop in ``_execute_rolling``: after every completion the pending queue
+    is rescanned best-priority-first and anything that fits launches at
+    once — no round barriers.  The gate deliberately calls run_tests
+    WITHOUT ``preserve_order``, so the LPT priority is what executes.
+    """
+    allocator = rt._RollingAllocator(list(range(cards)), pair_aligned=True)
+    pending = rt._rolling_priority(cases, times, preserve_order=False)
+    now = 0
+    running: list[tuple[int, list[int]]] = []
+    while pending or running:
+        while True:
+            for test in list(pending):
+                devices = allocator.allocate(test)
+                if devices is None:
+                    continue
+                pending.remove(test)
+                running.append((now + rt._lookup_time(test, times), devices))
+                break
+            else:
+                break
+        if not running:
+            raise AssertionError(
+                f"{pending[0]} needs {rt._test_cards(pending[0])} cards but "
+                f"no free window exists in a {cards}-card pool")
+        finished = min(end for end, _ in running)
+        now = finished
+        for end, devices in [r for r in running if r[0] == finished]:
+            allocator.release(devices)
+            running.remove((end, devices))
+    return now
 
 
 def _scheduled() -> list[list[str]]:
@@ -371,3 +503,57 @@ def test_extended_set_has_no_310p_and_no_per_step_overlap():
             f"{t} is a 310P suite — the a3-16 pool cannot run it")
         assert t not in policy["allowlist"], (
             f"{t} is already covered per-step — extended would re-run it")
+
+
+# ---------------------------------------------------------------------------
+# Gate extended set: duration and shape pins (2026-10-18 sixth revision)
+# ---------------------------------------------------------------------------
+
+def test_every_extended_case_has_a_recorded_duration():
+    extended = _extended()
+    missing = [t for t in extended if t not in _EXTENDED_RECORDED_S]
+    extra = [t for t in _EXTENDED_RECORDED_S if t not in extended]
+    assert not missing, (
+        f"{missing} have no recorded duration — measure them and update "
+        "_EXTENDED_RECORDED_S before they can be selected")
+    assert not extra, (
+        f"{extra} are recorded but no longer selected — drop them so the "
+        "pin cannot go stale")
+
+
+def test_extended_set_shape_and_anchors():
+    extended = _extended()
+    lanes = {
+        "one": sum(1 for t in extended if "/one_card/" in t),
+        "two": sum(1 for t in extended if "/two_card/" in t),
+        "four": sum(1 for t in extended if "/four_card/" in t),
+    }
+    assert (len(extended), lanes) == (32, {"one": 19, "two": 9, "four": 4}), (
+        f"extended set is {len(extended)} cases {lanes}; the 2026-10-18 "
+        "swap pins 32 = 19 one-card + 9 two-card + 4 four-card")
+    assert _EXTENDED_ANCHORS <= set(extended), (
+        f"PR-CI anchors missing from extended_e2e: "
+        f"{sorted(_EXTENDED_ANCHORS - set(extended))}")
+    assert not (_EXTENDED_PHANTOMS & set(extended)), (
+        f"phantom files selected: {sorted(_EXTENDED_PHANTOMS & set(extended))}")
+    seq = "tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py"
+    assert seq not in extended, (
+        "the SP file-level entry is back — its precision nodes time out on "
+        "worker startup (2393s of a 2474s gate run); select the functional "
+        "node instead")
+    assert f"{seq}::test_sequence_parallel_moe_dp2_tp2_functional" in extended
+
+
+def test_extended_gate_wall_within_pin():
+    # The old 28-case run measured 2474s (run 38996027002, 2026-10-17).
+    # The replacement must not grow the gate: rolling dispatch on the
+    # observed 14-card pool simulates to 1117s; a clean 16-card pool is
+    # shorter (1101s).  See _rolling_makespan for the executor contract.
+    extended = _extended()
+    wall14 = _rolling_makespan(extended, _EXTENDED_RECORDED_S,
+                               _GATE_E2E_CARDS)
+    wall16 = _rolling_makespan(extended, _EXTENDED_RECORDED_S, 16)
+    assert wall14 <= _EXTENDED_WALL_S, (
+        f"gate e2e simulates to {wall14}s on {_GATE_E2E_CARDS} cards — "
+        f"exceeds the {_EXTENDED_WALL_S}s pin; drop or swap a case")
+    assert wall16 <= _EXTENDED_WALL_S

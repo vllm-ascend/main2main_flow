@@ -100,8 +100,16 @@ def _test_cards(test_path: str) -> int:
 # scheduling
 # =============================================================================
 
-# Default estimated time for tests not listed in test_config.yaml.
+# Default estimated time for tests not listed in the workflow timing tables.
 _DEFAULT_ESTIMATED_SECONDS = 600
+
+# Timing tables, oldest first.  Upstream moved ``estimated_times`` out of
+# test_config.yaml into a dedicated file; reading both keeps working across
+# the transition, and the later file wins on conflicts.
+_ESTIMATED_TIMES_FILES = (
+    ".github/workflows/scripts/test_config.yaml",
+    ".github/workflows/scripts/estimated_times.yaml",
+)
 
 # After a timeout/hang SIGKILL, how long to wait for the stdout pipe to
 # close before force-breaking the read loop (an escaped grandchild can
@@ -110,29 +118,38 @@ _KILL_GRACE_S = 15
 
 
 def _load_estimated_times(ascend_path: Path) -> dict[str, int]:
-    """Load ``estimated_times`` from vllm-ascend's test_config.yaml.
+    """Load ``estimated_times`` from vllm-ascend's workflow timing tables.
+
+    Upstream moved the table from ``test_config.yaml`` into a dedicated
+    ``estimated_times.yaml`` (file-level only).  Read both in order; a
+    missing or corrupt file never discards entries from the other, and
+    the dedicated table wins on conflicting keys.
 
     Returns a dict mapping test path → seconds.  Node-level entries
-    (``file::node``) take priority over file-level entries, and unlisted
-    tests default to ``_DEFAULT_ESTIMATED_SECONDS``.
+    (``file::node``) take priority over file-level entries via
+    :func:`_lookup_time`, and unlisted tests default to
+    ``_DEFAULT_ESTIMATED_SECONDS``.
     """
-    config_path = ascend_path / ".github/workflows/scripts/test_config.yaml"
-    if not config_path.exists():
-        return {}
-    try:
-        import yaml
-        docs = list(yaml.safe_load_all(
-            config_path.read_text(encoding="utf-8")))
-    except Exception:
-        return {}
-    # OLD format: meta is the 2nd doc; NEW (upstream main): single doc with
-    # everything at top level.  Merge estimated_times from every dict doc.
+    import yaml
+
     times: dict[str, int] = {}
-    for doc in docs:
-        raw = doc.get("estimated_times", {}) if isinstance(doc, dict) else {}
-        for k, v in (raw or {}).items():
-            if isinstance(v, (int, float)):
-                times[k] = int(v)
+    for rel in _ESTIMATED_TIMES_FILES:
+        config_path = ascend_path / rel
+        if not config_path.exists():
+            continue
+        try:
+            docs = list(yaml.safe_load_all(
+                config_path.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+        # OLD format: meta is the 2nd doc; NEW (upstream main): single doc
+        # with everything at top level.  Merge estimated_times from every
+        # dict doc.
+        for doc in docs:
+            raw = doc.get("estimated_times", {}) if isinstance(doc, dict) else {}
+            for k, v in (raw or {}).items():
+                if isinstance(v, (int, float)):
+                    times[k] = int(v)
     return times
 
 
