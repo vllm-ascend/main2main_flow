@@ -31,6 +31,15 @@ from main2main_flow.scripts.utils.pre_ci_check import (
 )
 from main2main_flow.scripts.utils.utils import exclude_generated_artifacts, ts_print
 
+# The only tests/examples failures that count as gate violations.  CI's
+# tools/mypy.sh type-checks the whole tests tree; this runner also reports
+# ~336 mock-pattern [call-arg]/[union-attr] errors that the lint image
+# does not, so everything except "a vllm module no longer resolves" is
+# noise at the gate.
+_VLLM_MISSING_MODULE_SIGS = (
+    'Cannot find implementation or library stub for module named "vllm.',
+)
+
 
 def run_final_quality_gate(
     ascend_path: str | Path,
@@ -44,7 +53,10 @@ def run_final_quality_gate(
     UT gate runs the CPU-UT batch against the target main vllm checkout.
     When ``vllm_release_path`` (a worktree of the pinned release tag) is
     given, mypy runs a second pass against the release tree — the same
-    dual-lane validation as per-step pre_ci.
+    dual-lane validation as per-step pre_ci.  mypy runs with a fresh
+    (non-incremental) cache, and a second gate-only pass resolves the
+    full tests/examples tree against vllm, mirroring CI's whole-tree
+    tools/mypy.sh.
 
     Returns (passed, error_logs).  error_logs is empty when passed;
     otherwise contains a single path to quality_gate.json (which holds
@@ -74,7 +86,27 @@ def run_final_quality_gate(
              + (" + UT" if ut_enabled else " (UT DISABLED)") + " on final diff...")
 
     fmt = _check_format(repo)
-    mypy = _check_mypy(repo, vllm_path, vllm_release_path)
+    # fresh_cache: the gate certifies the final diff.  An incremental
+    # cache entry written by an earlier round whose mypy.ini edit was
+    # later discarded must never decide the verdict (PR 19089: a
+    # [mypy-vllm...glm5_next] ignore_missing_imports override from a dead
+    # branch whitewashed the next run's gate while CI, with a clean cache,
+    # failed on the same import).
+    mypy = _check_mypy(repo, vllm_path, vllm_release_path, fresh_cache=True)
+    # CI's tools/mypy.sh checks the WHOLE tests/examples tree; pre_ci only
+    # checks vllm_ascend + *changed* test files, so an unchanged test that
+    # imports a module the target vllm deleted is invisible to every step
+    # (PR 19089: tests/ut/models/test_glm5_next_mtp.py still imported the
+    # GLM5-Next config that vllm#57387 moved into transformers, and CI's
+    # pre-commit rejected the PR).  One pass is enough: import resolution
+    # does not vary across 3.10/3.11/3.12 for these module-level imports.
+    test_imports = _check_mypy(
+        repo, vllm_path,
+        fresh_cache=True,
+        targets=("examples", "tests"),
+        filter_sigs=_VLLM_MISSING_MODULE_SIGS,
+        python_versions=("3.10",),
+    )
     if ut_enabled:
         ut = _check_ut(repo, vllm_path,
                        vllm_release_path=vllm_release_path,
@@ -87,8 +119,10 @@ def run_final_quality_gate(
 
     fmt_ok = len(fmt["violations"]) == 0 or fmt.get("skipped", False)
     mypy_ok = len(mypy["violations"]) == 0 or mypy.get("skipped", False)
+    imports_ok = (len(test_imports["violations"]) == 0
+                  or test_imports.get("skipped", False))
     ut_ok = len(ut["violations"]) == 0 or ut.get("skipped", False)
-    all_passed = fmt_ok and mypy_ok and ut_ok
+    all_passed = fmt_ok and mypy_ok and imports_ok and ut_ok
 
     checks: list[dict] = []
     checks.append({
@@ -106,6 +140,13 @@ def run_final_quality_gate(
         "skipped": mypy.get("skipped", False),
     })
     checks.append({
+        "name": "mypy-tests-imports",
+        "passed": imports_ok,
+        "detail": test_imports.get("detail", ""),
+        "violations": test_imports.get("violations", []),
+        "skipped": test_imports.get("skipped", False),
+    })
+    checks.append({
         "name": "ut",
         "passed": ut_ok,
         "detail": ut.get("detail", ""),
@@ -118,7 +159,8 @@ def run_final_quality_gate(
                          encoding="utf-8")
 
     if all_passed:
-        ts_print("\n[final_quality_gate] PASSED (format + mypy + UT clean)")
+        ts_print("\n[final_quality_gate] PASSED (format + mypy + "
+                 "tests imports + UT clean)")
         return True, []
     ts_print(f"\n[final_quality_gate] FAILED -> {gate_path}")
     for c in checks:

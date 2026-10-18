@@ -15,6 +15,7 @@ Design note:
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import platform
@@ -341,8 +342,56 @@ def _ensure_mypy_venv(target_numpy_spec: str) -> tuple[Path | None, str]:
         return None, ""
 
 
+_MYPY_CACHE_ROOT = (Path.home() / ".cache"
+                    / f"main2main-mypy-a3-16-{platform.machine()}")
+
+
+def _mypy_cache_key(repo: Path, vllm_root: str | Path | None,
+                    numpy_spec: str = "") -> str | None:
+    """Bucket key over the inputs mypy's own cache does NOT track.
+
+    mypy 1.11.1 (the repo's pin) reuses green entries when its cache
+    validity checks should have invalidated them:
+
+    * removing a per-module ``ignore_missing_imports`` override from
+      mypy.ini does not invalidate cached "module resolved" results (run
+      38943025557's discarded adapter branch added one for
+      ``vllm.transformers_utils.configs.glm5_next``; run 38996027002's
+      gate then reused the green entry although the module was gone from
+      the tree);
+    * switching PYTHONPATH to a vllm tree where the imported module no
+      longer exists does not invalidate them either.
+
+    Partition the persistent cache by mypy.ini bytes, the vllm tree HEAD
+    and the numpy constraint (installed numpy types leak into results).
+    Returns None when an input is unreadable — callers must then run with
+    ``--no-incremental``, never fall back to a shared directory.
+    """
+    if vllm_root is None:
+        return None
+    try:
+        ini = (repo / "mypy.ini").read_bytes()
+    except OSError:
+        return None
+    try:
+        r = subprocess.run(["git", "-C", str(vllm_root), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    head = r.stdout.strip()
+    if r.returncode != 0 or not head:
+        return None
+    digest = hashlib.sha256(ini + b"\0" + head.encode() + b"\0"
+                            + numpy_spec.encode())
+    return digest.hexdigest()[:12]
+
+
 def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
-                vllm_release_path: str | Path | None = None) -> dict:
+                vllm_release_path: str | Path | None = None, *,
+                fresh_cache: bool = False,
+                targets: tuple[str, ...] | None = None,
+                filter_sigs: tuple[str, ...] | None = None,
+                python_versions: tuple[str, ...] | None = None) -> dict:
     """Run mypy with the same core command and environment as vllm-ascend's CI.
 
     Mirrors the CI pre-commit job's "Run mypy" step: for each python version
@@ -367,6 +416,22 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
     different *grammar*; python-version-specific breakage is fully covered
     by the main pass's 3-version loop.
 
+    Cache isolation: the persistent incremental cache is bucketed per
+    (mypy.ini, vllm HEAD, numpy spec) so a verdict produced against one
+    tree/config cannot leak into another (``_mypy_cache_key``).
+    ``fresh_cache=True`` disables incremental reuse entirely — the
+    push-time gate certifies the final diff, so it must not trust a cache
+    written by an earlier round whose mypy.ini edit may have been
+    discarded in between (PR 19089's false green).
+
+    ``targets`` overrides the checked paths (default: ``vllm_ascend`` plus
+    changed tests/examples).  With ``filter_sigs`` only output lines
+    containing one of the given substrings count as violations and drive
+    the result — used by the gate's full-tests import-resolution pass,
+    where this runner's mock-pattern noise is expected but a missing
+    ``vllm.*`` module is not.  ``python_versions`` overrides the main
+    tree's version matrix.
+
     Returns all errors mypy reports across all python versions - no
     added-line filtering.  CI mypy is the source of truth; if it fails,
     the adaptation must be fixed.
@@ -381,15 +446,6 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
         existing = base_env.get("PYTHONPATH", "")
         base_env["PYTHONPATH"] = f"{vllm_abs}:{existing}" if existing else vllm_abs
         ts_print(f"\n[pre_ci] mypy: PYTHONPATH includes vllm source: {vllm_abs}")
-
-    # Persistent incremental cache on the runner's bind-mounted ~/.cache
-    # volume: the first run pays the full check, later runs reuse it.
-    # mypy namespaces the cache by target --python-version internally, and
-    # stale entries revalidate by source/dependency hash, so a changed
-    # vllm target or numpy version cannot produce false results.
-    base_env["MYPY_CACHE_DIR"] = str(
-        Path.home() / ".cache" / f"main2main-mypy-a3-16-{platform.machine()}")
-    ts_print(f"[pre_ci] mypy: cache dir {base_env['MYPY_CACHE_DIR']}")
 
     # CI's lint image runs mypy in a clean environment: no vllm package
     # installed (mypy uses PYTHONPATH for vllm source), numpy 1.26.4
@@ -454,8 +510,28 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
         mypy_cmd = [venv_python, "-m", "mypy"]
         ts_print(f"[pre_ci] mypy: using venv mypy via {venv_python} -m mypy")
 
-    # The incremental cache lives in MYPY_CACHE_DIR (~/.cache, persistent
-    # volume) instead of the repo — nothing to clear between runs.
+    # Persistent cache root, bucketed per tree by _mypy_cache_key: mypy's
+    # own invalidation misses mypy.ini overrides and the identity of the
+    # vllm tree behind PYTHONPATH (see the helper).  The push-time gate
+    # passes fresh_cache=True: it certifies the final diff, so it must not
+    # reuse a verdict produced by an earlier — possibly discarded — round
+    # (PR 19089's false green).
+    def _cache_env(env: dict[str, str], vllm_root: str | Path | None,
+                   label: str) -> tuple[dict[str, str], bool]:
+        """Return (env with this tree's cache bucket, incremental_ok)."""
+        key = None if fresh_cache else _mypy_cache_key(
+            repo, vllm_root, target_numpy_spec)
+        if key is None:
+            env.pop("MYPY_CACHE_DIR", None)
+            why = ("fresh_cache" if fresh_cache
+                   else "cache key unavailable (mypy.ini / vllm HEAD)")
+            ts_print(f"[pre_ci] mypy [{label}]: incremental cache disabled "
+                     f"({why}) -> --no-incremental")
+            return env, False
+        env["MYPY_CACHE_DIR"] = str(_MYPY_CACHE_ROOT / key)
+        ts_print(f"[pre_ci] mypy [{label}]: cache dir "
+                 f"{env['MYPY_CACHE_DIR']}")
+        return env, True
 
     # Adapter-edited tests/examples files are type-checked individually:
     # full-repo tests/ mypy fails on mock-pattern noise in THIS runner's
@@ -463,16 +539,22 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
     # clean), but checking only vllm_ascend let adapter-edited
     # tests/e2e/conftest.py ship a type error that PR CI mypy caught
     # (PR #14135).  Diff against the adaptation base so both committed
-    # step changes and uncommitted gate-fix edits are covered.
-    changed_extra = _changed_test_py_files(repo)
-    if changed_extra:
-        ts_print(f"[pre_ci] mypy: also checking {len(changed_extra)} "
-                 f"changed tests/examples file(s)")
+    # step changes and uncommitted gate-fix edits are covered.  ``targets``
+    # overrides the set entirely (gate-only full tests/examples audit).
+    if targets is None:
+        changed_extra = _changed_test_py_files(repo)
+        if changed_extra:
+            ts_print(f"[pre_ci] mypy: also checking {len(changed_extra)} "
+                     f"changed tests/examples file(s)")
+        check_targets = ["vllm_ascend", *changed_extra]
+    else:
+        check_targets = list(targets)
 
     all_violations: list[str] = []
     all_output: list[str] = []
     any_failed = False
     failed_units: list[str] = []
+    matched: list[str] = []
 
     # Type-check against each vllm tree: the pinned main checkout plus,
     # when available, the release-tag worktree.  The release pass catches
@@ -481,8 +563,11 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
     # main).  No "diff looks version-sensitive" heuristic: the
     # max_seq_len_np class (PR #16296) is a plain call-site edit with no
     # vllm_version_is string anywhere near it.
-    trees: list[tuple[str, dict[str, str], tuple[str, ...]]] = [
-        ("main", base_env, ("3.10", "3.11", "3.12"))]
+    main_env, main_incremental = _cache_env(base_env, vllm_path or None,
+                                            "main")
+    main_vers = python_versions or ("3.10", "3.11", "3.12")
+    trees: list[tuple[str, dict[str, str], tuple[str, ...], bool]] = [
+        ("main", main_env, main_vers, main_incremental)]
     if vllm_release_path:
         release_abs = str(Path(vllm_release_path).resolve())
         release_env = base_env.copy()
@@ -494,20 +579,25 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
             existing = existing.replace(vllm_abs, "").strip(":")
         release_env["PYTHONPATH"] = (f"{release_abs}:{existing}"
                                      if existing else release_abs)
-        trees.append((f"release({Path(vllm_release_path).name})",
-                      release_env, ("3.10",)))
+        release_label = f"release({Path(vllm_release_path).name})"
+        release_env, release_incremental = _cache_env(
+            release_env, vllm_release_path, release_label)
+        trees.append((release_label, release_env, ("3.10",),
+                      release_incremental))
         ts_print(f"[pre_ci] mypy: also checking against release tree: "
                  f"{release_abs}")
 
-    for tree_label, tree_env, py_vers in trees:
+    for tree_label, tree_env, py_vers, incremental_ok in trees:
         for py_ver in py_vers:
             ts_print(f"[pre_ci] === mypy [{tree_label}] --python-version "
                      f"{py_ver} output begin ===")
+            cmd = [*mypy_cmd, "--follow-imports", "skip",
+                   "--check-untyped-defs", "--python-version", py_ver,
+                   "--exclude", "_cann_ops_custom/"]
+            if not incremental_ok:
+                cmd.append("--no-incremental")
             r = subprocess.run(
-                [*mypy_cmd, "--follow-imports", "skip", "--check-untyped-defs",
-                 "--python-version", py_ver,
-                 "--exclude", "_cann_ops_custom/",
-                 "vllm_ascend", *changed_extra],
+                [*cmd, *check_targets],
                 cwd=str(repo), capture_output=True, text=True, env=tree_env,
             )
             output = r.stdout + "\n" + r.stderr
@@ -516,15 +606,49 @@ def _check_mypy(repo: Path, vllm_path: str | Path | None = None,
                      f"(py={py_ver}, exit={r.returncode}) ===")
             all_output.append(f"--- [{tree_label}] python {py_ver} "
                               f"(exit={r.returncode}) ---\n{output}")
-            if r.returncode != 0:
+            if filter_sigs is not None:
+                # Whole-tree passes are expected to exit non-zero on this
+                # runner (mock-pattern noise); only kept lines count.
+                kept = [ln.strip() for ln in output.splitlines()
+                        if ln.strip() and any(s in ln for s in filter_sigs)]
+                matched.extend(kept)
+                hit = bool(kept)
+                if not kept and r.returncode not in (0, 1):
+                    # mypy 0 = clean, 1 = type errors (expected noise here),
+                    # 2+ = fatal (unreadable config, crash).  Never record a
+                    # fatal as clean just because no line matched.
+                    matched.append(output.strip()[-2000:]
+                                   or f"mypy exited {r.returncode}")
+                    hit = True
+            else:
+                hit = r.returncode != 0
+            if hit:
                 any_failed = True
                 failed_units.append(f"{tree_label}/{py_ver}")
 
     if not any_failed:
         trees_ran = "main + release" if vllm_release_path else "main"
+        vers = "/".join(main_vers)
         ts_print("\n[pre_ci] mypy: OK (all python versions clean on all trees)")
         return {"violations": [],
-                "detail": f"mypy clean (3.10/3.11/3.12, {trees_ran})"}
+                "detail": f"mypy clean ({vers}, {trees_ran})"}
+
+    if filter_sigs is not None:
+        uniq: list[str] = []
+        seen_filtered: set[str] = set()
+        for line in matched:
+            if line not in seen_filtered:
+                seen_filtered.add(line)
+                uniq.append(line)
+        ts_print(f"\n[pre_ci] mypy: {len(uniq)} filtered issue(s) "
+                 f"({', '.join(failed_units)})")
+        for v in uniq[:20]:
+            ts_print(f"  {v}")
+        if len(uniq) > 20:
+            ts_print(f"  ... and {len(uniq) - 20} more")
+        return {"violations": uniq,
+                "detail": f"{len(uniq)} mypy issue(s) "
+                          f"({', '.join(failed_units)})"}
 
     _MYPY_ERR_RE = re.compile(r"^(.+\.py):(\d+):(?:\d+:)?\s*error:")
     seen: set[str] = set()

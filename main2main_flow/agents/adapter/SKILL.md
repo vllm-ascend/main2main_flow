@@ -111,6 +111,24 @@ these rules to stay on the critical path:
   remains (PR #14517: the call site was guarded but the module-level
   `BatchReqState` import broke the whole v0.27.1 lane — ImportError + a
   third positional arg to `init_workspace_manager`).
+- **Never hide a relocated or removed upstream module behind ignores.**
+  If pre_ci / CI reports `import-not-found` for a `vllm.*` module that
+  exists on the release tree but not on main, upstream moved it — follow
+  it to its new home (vllm#57387 moved the GLM5-Next config classes into
+  `transformers`) and adjust the pin in BOTH `requirements.txt` and
+  `pyproject.toml` to a version that satisfies both lanes. Grep the WHOLE
+  vllm-ascend tree for the old path — `vllm_ascend/`, `tests/`, and
+  `examples/` — because the failure is often in a file your diff never
+  touched and CI type-checks the whole tree; delete any
+  `# type: ignore[import-not-found]` or
+  `# mypy: disable-error-code=import-not-found` in the files you do touch,
+  and confirm the new home exports the symbol at the pinned version. A
+  `[mypy-vllm...] ignore_missing_imports` section, a broad
+  `# type: ignore`, or an `exclude` entry only silences the checker:
+  the runtime import still fails, CI type-checks with a clean cache and
+  rejects the PR, and the flow's persistent mypy cache carries that
+  false green into later runs (PR #19089). Full procedure:
+  `common-pitfalls.md` § "Relocated or removed upstream module".
 - **No execution at all in this session.** All checks (format, mypy, UT)
   run flow-side in pre_ci / the push-time gate — the tool guard blocks
   test and lint commands. Never launch models/servers, never require
@@ -410,19 +428,26 @@ stub in `vllm_ascend/__init__.py` (module-level, before vllm imports) — see
 If the stub imports a module without `py.typed` (e.g. triton), add
 `# type: ignore[import-untyped]` to the import.
 
-**Final quality gate failures (push-time format + mypy)**: after all steps,
-format + mypy run once on the cumulative diff.  If they fail, `error_logs`
-contains `quality_gate.json` (NOT `pre_ci_check.json`):
+**Final quality gate failures (push-time format + mypy + tests imports +
+UT)**: after all steps the gate runs once on the cumulative diff.  If it
+fails, `error_logs` contains `quality_gate.json` (NOT `pre_ci_check.json`):
 ```json
 {{"all_passed": false, "checks": [
   {{"name": "format", "violations": ["file.py:LINE:CODE ..."]}},
-  {{"name": "mypy",  "violations": ["file.py:LINE:COL: error: ... [override]"]}}
+  {{"name": "mypy",  "violations": ["file.py:LINE:COL: error: ... [override]"]}},
+  {{"name": "mypy-tests-imports", "violations": ["tests/x.py:8: error: Cannot find implementation or library stub for module named vllm...."]}},
+  {{"name": "ut", "violations": ["..."]}}
 ]}}
 ```
 Fix format by `file:LINE:CODE` (E501 break line, F401 delete import); fix
 mypy per error code — see `reference/common-pitfalls.md` §"mypy error
-codes". Mechanical fixes — do NOT re-analyze the upstream patch. After
-fixing, e2e re-runs; if it fails, the fix regressed — revert and retry.
+codes".  A `mypy-tests-imports` violation means an UNCHANGED test still
+imports a `vllm.*` module the target main moved or removed: follow the
+module to its new home (moving the transformers pin in BOTH
+`requirements.txt` and `pyproject.toml` if it went there) — never add a
+mypy override.  Mechanical fixes — do NOT re-analyze the upstream patch.
+After fixing, e2e re-runs; if it fails, the fix regressed — revert and
+retry.
 
 ## Output
 

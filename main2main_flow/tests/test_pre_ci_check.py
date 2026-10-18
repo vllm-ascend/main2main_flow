@@ -11,10 +11,12 @@ release_lane check — never silently absent.
 from __future__ import annotations
 
 import inspect
+import json
 import subprocess
 from pathlib import Path
 
 
+from main2main_flow.scripts.utils import final_quality_gate as fqg
 from main2main_flow.scripts.utils import pre_ci_check
 from main2main_flow.scripts.utils.final_quality_gate import run_final_quality_gate
 from main2main_flow.scripts.utils.ut_check import check_ut
@@ -433,3 +435,236 @@ def test_mypy_venv_no_temp_dir_residue(monkeypatch, tmp_path):
     _ok_pip(monkeypatch, pip_calls)
     venv_dir, _ = pre_ci_check._ensure_mypy_venv(SPEC)
     assert venv_dir == base  # success path also stays under MAIN2MAIN_MYPY_VENV
+
+
+# --- mypy cache isolation (PR 19089 false green) ---------------------------
+#
+# mypy 1.11.1 reuses green cache entries after a mypy.ini per-module
+# override is removed and after the imported module disappears from the
+# PYTHONPATH tree.  The persistent cache must be bucketed by mypy.ini +
+# vllm HEAD (+ numpy), and the push-time gate must not use it at all.
+
+def test_mypy_cache_key_buckets_ini_head_and_numpy(tmp_path: Path) -> None:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    (repo / "mypy.ini").write_text("[mypy]\nstrict = True\n", encoding="utf-8")
+    vllm = tmp_path / "vllm"
+    _init_repo(vllm)
+
+    spec = ">=1.26.4,<2.1"
+    k1 = pre_ci_check._mypy_cache_key(repo, vllm, spec)
+    assert k1 and len(k1) == 12
+    assert pre_ci_check._mypy_cache_key(repo, vllm, spec) == k1
+
+    # A discarded round's mypy.ini override must not share the bucket.
+    (repo / "mypy.ini").write_text(
+        "[mypy-vllm.transformers_utils.configs.glm5_next]\n"
+        "ignore_missing_imports = True\n", encoding="utf-8")
+    k2 = pre_ci_check._mypy_cache_key(repo, vllm, spec)
+    assert k2 and k2 != k1
+
+    # A different vllm tree (main advanced) gets its own bucket.
+    (vllm / "vllm_ascend" / "code.py").write_text("x = 2\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "next"], cwd=str(vllm),
+                   check=True, capture_output=True, text=True)
+    k3 = pre_ci_check._mypy_cache_key(repo, vllm, spec)
+    assert k3 and k3 not in (k1, k2)
+
+    # Installed numpy types leak into results: the constraint is keyed too.
+    assert pre_ci_check._mypy_cache_key(repo, vllm, ">=2.0") != k3
+
+
+def test_mypy_cache_key_none_when_inputs_unreadable(tmp_path: Path) -> None:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)  # no mypy.ini -> must run --no-incremental
+    vllm = tmp_path / "vllm"
+    _init_repo(vllm)
+    assert pre_ci_check._mypy_cache_key(repo, vllm, "") is None
+    assert pre_ci_check._mypy_cache_key(repo, None, "") is None
+    (repo / "mypy.ini").write_text("[mypy]\n", encoding="utf-8")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert pre_ci_check._mypy_cache_key(repo, plain, "") is None
+
+
+def _install_fake_mypy(monkeypatch, results):
+    """Fake only the mypy invocation; git calls still run for real."""
+    real_run = subprocess.run
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(cmd, **kw):
+        if "--python-version" in cmd:
+            calls.append((list(cmd), dict(kw.get("env") or {})))
+            out, rc = results.pop(0) if len(results) > 1 else results[0]
+            return subprocess.CompletedProcess(cmd, rc, out, "")
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(pre_ci_check.shutil, "which", lambda _: "/usr/bin/mypy")
+    monkeypatch.setattr(pre_ci_check, "_triton_numpy_spec",
+                        lambda label="mypy": "")
+    monkeypatch.setattr(pre_ci_check.subprocess, "run", fake_run)
+    return calls
+
+
+def _mypy_repo(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    (repo / "mypy.ini").write_text("[mypy]\n", encoding="utf-8")
+    vllm = tmp_path / "vllm"
+    _init_repo(vllm)
+    return repo, vllm
+
+
+def test_check_mypy_fresh_cache_disables_incremental(
+        monkeypatch, tmp_path: Path) -> None:
+    repo, vllm = _mypy_repo(tmp_path)
+    calls = _install_fake_mypy(monkeypatch, [("", 0)])
+
+    result = pre_ci_check._check_mypy(repo, vllm, fresh_cache=True)
+
+    assert result["violations"] == []
+    assert len(calls) == 3
+    for cmd, env in calls:
+        assert cmd[-1] == "vllm_ascend"
+        assert "--no-incremental" in cmd
+        assert "MYPY_CACHE_DIR" not in env
+
+
+def test_check_mypy_persistent_cache_is_per_tree(
+        monkeypatch, tmp_path: Path) -> None:
+    repo, vllm = _mypy_repo(tmp_path)
+    release = tmp_path / "vllm-release"
+    _init_repo(release)
+    # Distinct HEAD: identical temp repos can produce the same commit sha
+    # when created in the same second, which would share one bucket.
+    (release / "vllm_ascend" / "code.py").write_text("x = 9\n",
+                                                     encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "release"], cwd=str(release),
+                   check=True, capture_output=True, text=True)
+    calls = _install_fake_mypy(monkeypatch, [("", 0)])
+
+    pre_ci_check._check_mypy(repo, vllm, vllm_release_path=release)
+
+    # main x3 (3.10/3.11/3.12) + release x1 (3.10)
+    assert len(calls) == 4
+    dirs = [env.get("MYPY_CACHE_DIR") for _, env in calls]
+    assert all("--no-incremental" not in cmd for cmd, _ in calls)
+    assert len(set(dirs[:3])) == 1
+    assert dirs[3] and dirs[3] != dirs[0]
+
+
+def test_check_mypy_filter_sigs_ignore_runner_noise(
+        monkeypatch, tmp_path: Path) -> None:
+    # The full tests tree exits non-zero on this runner for mock-pattern
+    # noise; only a missing vllm module is a real violation.
+    repo, vllm = _mypy_repo(tmp_path)
+    noise = ('tests/ut/a.py:3: error: Unexpected keyword argument "x"  '
+             "[call-arg]")
+    real = ('tests/ut/models/test_glm5_next_mtp.py:8: error: Cannot find '
+            'implementation or library stub for module named '
+            '"vllm.transformers_utils.configs.glm5_next"  [import-not-found]')
+    calls = _install_fake_mypy(monkeypatch, [(noise + "\n" + real, 1)])
+
+    result = pre_ci_check._check_mypy(
+        repo, vllm, fresh_cache=True, targets=("examples", "tests"),
+        filter_sigs=fqg._VLLM_MISSING_MODULE_SIGS,
+        python_versions=("3.10",))
+
+    assert len(calls) == 1
+    assert calls[0][0][-2:] == ["examples", "tests"]
+    assert result["violations"] == [real]
+
+
+def test_check_mypy_filter_sigs_noise_only_is_clean(
+        monkeypatch, tmp_path: Path) -> None:
+    repo, vllm = _mypy_repo(tmp_path)
+    noise = 'tests/ut/a.py:3: error: Unexpected keyword argument "x"  [call-arg]'
+    _install_fake_mypy(monkeypatch, [(noise, 1)])
+
+    result = pre_ci_check._check_mypy(
+        repo, vllm, fresh_cache=True, targets=("tests",),
+        filter_sigs=fqg._VLLM_MISSING_MODULE_SIGS,
+        python_versions=("3.10",))
+
+    assert result["violations"] == []
+    assert not result.get("skipped")
+
+
+def test_check_mypy_filter_sigs_fatal_exit_is_not_clean(
+        monkeypatch, tmp_path: Path) -> None:
+    # exit 2 = fatal (unreadable mypy.ini / crash); filtering noise must
+    # not turn a crashed audit into a green gate.
+    repo, vllm = _mypy_repo(tmp_path)
+    _install_fake_mypy(monkeypatch, [("mypy: error: Cannot read mypy.ini", 2)])
+
+    result = pre_ci_check._check_mypy(
+        repo, vllm, fresh_cache=True, targets=("tests",),
+        filter_sigs=fqg._VLLM_MISSING_MODULE_SIGS,
+        python_versions=("3.10",))
+
+    assert result["violations"] == ["mypy: error: Cannot read mypy.ini"]
+
+
+# --- final gate wiring -----------------------------------------------------
+
+def test_final_gate_runs_fresh_mypy_and_tests_import_audit(
+        monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    calls = []
+
+    def fake_mypy(repo_arg, vllm_arg, release_arg=None, **kw):
+        calls.append(kw)
+        return {"violations": [], "detail": "mypy clean"}
+
+    monkeypatch.setattr(fqg, "_check_format",
+                        lambda r: {"violations": [], "detail": "clean"})
+    monkeypatch.setattr(fqg, "_check_mypy", fake_mypy)
+    monkeypatch.setattr(fqg, "_check_ut",
+                        lambda *a, **k: {"violations": [], "detail": "clean"})
+
+    passed, errs = run_final_quality_gate(repo, tmp_path / "vllm", tmp_path)
+
+    assert passed and errs == []
+    assert len(calls) == 2
+    assert calls[0]["fresh_cache"] is True
+    audit = calls[1]
+    assert audit["fresh_cache"] is True
+    assert audit["targets"] == ("examples", "tests")
+    assert audit["filter_sigs"] == fqg._VLLM_MISSING_MODULE_SIGS
+    assert audit["python_versions"] == ("3.10",)
+    gate = json.loads((tmp_path / "quality_gate.json").read_text(
+        encoding="utf-8"))
+    assert [c["name"] for c in gate["checks"]] == [
+        "format", "mypy", "mypy-tests-imports", "ut"]
+
+
+def test_final_gate_fails_on_missing_vllm_import_in_tests(
+        monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    violation = ('tests/ut/models/test_glm5_next_mtp.py:8: error: Cannot '
+                 'find implementation or library stub for module named '
+                 '"vllm.transformers_utils.configs.glm5_next"  '
+                 '[import-not-found]')
+
+    def fake_mypy(repo_arg, vllm_arg, release_arg=None, **kw):
+        if kw.get("targets"):
+            return {"violations": [violation],
+                    "detail": "1 mypy issue(s) (main/3.10)"}
+        return {"violations": [], "detail": "mypy clean"}
+
+    monkeypatch.setattr(fqg, "_check_format",
+                        lambda r: {"violations": [], "detail": "clean"})
+    monkeypatch.setattr(fqg, "_check_mypy", fake_mypy)
+    monkeypatch.setattr(fqg, "_check_ut",
+                        lambda *a, **k: {"violations": [], "detail": "clean"})
+
+    passed, errs = run_final_quality_gate(repo, tmp_path / "vllm", tmp_path)
+
+    assert not passed and errs
+    gate = json.loads((tmp_path / "quality_gate.json").read_text(
+        encoding="utf-8"))
+    bad = next(c for c in gate["checks"] if c["name"] == "mypy-tests-imports")
+    assert bad["passed"] is False
+    assert bad["violations"] == [violation]

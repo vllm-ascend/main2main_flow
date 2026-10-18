@@ -9,30 +9,31 @@ Lines are relative to this file; read a section with `sed -n 'A,Bp' <this file>`
 
 | Section | Trigger — read when... | Lines |
 |---------|------------------------|-------|
-| Version guard direction is inverted | any `vllm_version_is` guard you write (self-check) | 35-64 |
-| Importing modules that don't exist | mypy `import-not-found` on guarded imports | 65-83 |
-| Indentation errors | inserting guard blocks into existing code | 84-89 |
-| Variable aliases as base classes | mypy `[valid-type]` / `[misc]` on `class X(_Base)` | 90-111 |
-| Missing attribute on subclass | `AttributeError: no attribute 'Y'` after upstream adds a field | 112-121 |
-| Return type mismatch across branches | release-only `AttributeError` on a return value, main passes | 122-142 |
-| Missing override in sibling class | `TypeError: missing required positional` on an unmodified class | 143-159 |
-| Positional argument order | upstream inserts a param between existing ones | 160-179 |
-| hit_length computation with wrong block_size | v0.25.1 MLA crash (segfault, no traceback) | 180-204 |
-| Processor patch blocked by early return | `Tokenizer is missing required attribute 'image_token'` | 205-225 |
-| Fix covers only ONE of multiple paths | the SAME e2e failure recurs after your fix (HunyuanVL) | 226-288 |
-| Patching symbols from deleted modules | a patch file references a deleted `vllm.X` | 289-298 |
-| `hasattr` / `try-except` instead of guard | code uses `hasattr` or `try: import` for version detection | 299-304 |
-| Output-buffer trap | upstream changes `output[:] = result` to `return result` | 305-310 |
-| Format violations (E501/F821/F841/F401) | pre_ci or gate flags a format code | 311-322 |
-| Common typos (codespell) | gate flags spelling | 323-330 |
-| Additional QA-level checks | proactive checklist before submitting (next(), super(), registries) | 331-357 |
-| Environment compatibility stubs | `ImportError` from a pinned dep (triton etc.) at import time | 358-402 |
-| triton-ascend kernel constraints | porting a Triton kernel; `CompilationError`/`KeyError` at launch | 403-452 |
-| `device_index` must be explicit | NPU device APIs in version-guarded branches | 453-474 |
-| Variable name shadowing | `AttributeError`/wrong-type errors at a call site | 475-498 |
-| mypy error codes (final gate) | final quality gate mypy failures, fix per `[code]` | 499-530 |
-| Dual-version dataclass fields | release-only `TypeError: __init__() missing N required positional argument(s)` or release mypy `[call-arg]`, main green | 531-579 |
-| Forwarding shim loses deleted override's contract | quality metric below golden (spec-decode acceptance), no crash, NO vllm_ascend frames in traceback | 580-end |
+| Version guard direction is inverted | any `vllm_version_is` guard you write (self-check) | 38-66 |
+| Importing modules that don't exist | mypy `import-not-found` on guarded imports | 68-85 |
+| Indentation errors | inserting guard blocks into existing code | 87-91 |
+| Variable aliases as base classes | mypy `[valid-type]` / `[misc]` on `class X(_Base)` | 93-113 |
+| Missing attribute on subclass | `AttributeError: no attribute 'Y'` after upstream adds a field | 115-123 |
+| Return type mismatch across branches | release-only `AttributeError` on a return value, main passes | 125-144 |
+| Missing override in sibling class | `TypeError: missing required positional` on an unmodified class | 146-161 |
+| Positional argument order | upstream inserts a param between existing ones | 163-181 |
+| hit_length computation with wrong block_size | v0.25.1 MLA crash (segfault, no traceback) | 183-206 |
+| Processor patch blocked by early return | `Tokenizer is missing required attribute 'image_token'` | 208-227 |
+| Fix covers only ONE of multiple paths | the SAME e2e failure recurs after your fix (HunyuanVL) | 229-290 |
+| Patching symbols from deleted modules | a patch file references a deleted `vllm.X` | 292-300 |
+| `hasattr` / `try-except` instead of guard | code uses `hasattr` or `try: import` for version detection | 302-306 |
+| Output-buffer trap | upstream changes `output[:] = result` to `return result` | 308-312 |
+| Format violations (E501/F821/F841/F401) | pre_ci or gate flags a format code | 314-324 |
+| Common typos (codespell) | gate flags spelling | 326-332 |
+| Additional QA-level checks | proactive checklist before submitting (next(), super(), registries) | 334-359 |
+| Environment compatibility stubs | `ImportError` from a pinned dep (triton etc.) at import time | 361-404 |
+| triton-ascend kernel constraints | porting a Triton kernel; `CompilationError`/`KeyError` at launch | 406-454 |
+| `device_index` must be explicit | NPU device APIs in version-guarded branches | 456-476 |
+| Variable name shadowing | `AttributeError`/wrong-type errors at a call site | 478-500 |
+| mypy error codes (final gate) | final quality gate mypy failures, fix per `[code]` | 502-532 |
+| Dual-version dataclass fields | release-only `TypeError: __init__() missing N required positional argument(s)` or release mypy `[call-arg]`, main green | 534-581 |
+| Forwarding shim loses deleted override's contract | quality metric below golden (spec-decode acceptance), no crash, NO vllm_ascend frames in traceback | 583-623 |
+| Relocated or removed upstream module | mypy `import-not-found` for a `vllm.*` path/symbol gone from main, often in a file your diff never touched | 625-end |
 
 ## Version guard direction is inverted
 
@@ -620,3 +621,56 @@ absent from the CI log.
 3. Verify with a metric-bearing e2e (acceptance rate), never "it no longer
    crashes" — silent mis-attention passes every smoke that only checks
    termination.
+
+## Relocated or removed upstream module — follow it, never silence it
+
+**Symptom**: mypy `import-not-found` for a `vllm.*` module (or a symbol it
+exported) that exists on the release tree, or on the current base, but is
+gone from the vllm main you are syncing to. The error often lands in a file
+your diff never touched — an unchanged test importing the old path (PR
+#19103: `tests/ut/models/test_glm5_next_mtp.py:8`, while every file the
+adapter edited was suppressed and green).
+
+**Root cause**: upstream did not just rename a definition — it moved the
+classes to another package, or deleted the vendored module outright. The
+import path is part of the upstream contract. Real case: vllm#57387 moved
+the GLM5-Next config classes into `transformers`
+(`Glm5NextConfig` / `Glm5NextTextConfig`, first shipped in `transformers`
+5.16.1) and deleted `vllm/transformers_utils/configs/glm5_next.py`.
+
+**Never do**: add `# type: ignore[import-not-found]`, a file-level
+`# mypy: disable-error-code=import-not-found`, an `[mypy-...]`
+`ignore_missing_imports` entry, or an `exclude`. They silence the
+checker, not the import: the runtime still crashes, and CI type-checks
+the whole tree at the merge commit with a clean cache, so any file —
+touched or not — still importing the old path fails the PR.
+(Version-guarded ignores for a symbol that exists in ONE
+vllm lane remain legitimate — see "Importing modules that don't exist
+(yet)". This section is about code that moved or vanished.)
+
+**Procedure**:
+1. Locate the new home: grep the pinned `transformers` / site-packages tree
+   for the class name, and grep the vllm release tree and target main for
+   the old module path. Read `__init__.py` re-exports — the symbol must be
+   importable at the exact pinned version, not merely present in a source
+   file.
+2. Grep the WHOLE vllm-ascend tree for the old path and symbols:
+   `rg "transformers_utils.configs.glm5_next|Glm5NextTextConfig" .` over
+   `vllm_ascend/`, `tests/`, and `examples/`. Untouched files are in scope.
+3. Rewrite every import to the new home; keep the class name unchanged
+   where the new package preserves it. Delete the suppressions added in the
+   files you touch.
+4. If the new home requires a newer dependency, bump BOTH
+   `requirements.txt` and `pyproject.toml` (they are mirrored) and confirm
+   the version satisfies the release lane as well.
+5. If upstream deleted the module with no new home, vendor the deleted
+   implementation into `vllm_ascend/` — never import a path that no longer
+   exists.
+6. Re-grep until zero references to the old path remain. That grep is your
+   whole-tree check; pre_ci / the gate re-runs mypy on the real tree.
+
+**Why it evades diff review**: the suppression makes your own diff look
+clean and locally green, and the surviving failure sits in a file the diff
+does not contain. The mypy error then reads like an environment problem and
+gets retried instead of fixed (PR #19103's watcher exhausted its reruns on
+it).

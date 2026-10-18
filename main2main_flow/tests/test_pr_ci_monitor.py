@@ -185,6 +185,13 @@ def test_classify_log_signatures():
     assert mon.classify_log(
         "FAILED tests/e2e/one_card/test_basic.py::t - assert") == "content"
     assert mon.classify_log("1 error during collection") == "content"
+    # mypy/pre-commit errors are content (PR 19089: classified infra ->
+    # rerun budget -> "exhausted" instead of an adapter-fix round).
+    assert mon.classify_log(
+        'tests/ut/models/test_glm5_next_mtp.py:8: error: Cannot find '
+        'implementation or library stub for module named '
+        '"vllm.transformers_utils.configs.glm5_next"  [import-not-found]'
+    ) == "content"
     assert mon.classify_log("##[error] The runner has received a shutdown"
                             " signal") == "infra"
 

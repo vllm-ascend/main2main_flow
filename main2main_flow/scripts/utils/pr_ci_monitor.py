@@ -64,6 +64,12 @@ _CONTENT_SIGS = ("=== FAILURES", "=== ERRORS", "AssertionError",
                  "FAILED tests", "FAILED ", "ERROR tests",
                  "error during collection")
 
+# mypy/pre-commit failures print `<path>.py:LINE: error: ...` (e.g. the
+# import-not-found errors CI's pre-commit raised on PR 19089).  They match
+# no signature above, so a real type error was classified infra, spent the
+# rerun budget and ended as "exhausted" instead of an adapter-fix round.
+_MYPY_ERROR_RE = re.compile(r"\.py:\d+: error:")
+
 # Ascend-tree python paths for own-diff triage (CI logs carry the runner's
 # absolute prefix; the regex matches the repo-relative suffix).  Only
 # failure-attribution lines count — job logs also print the full
@@ -149,6 +155,8 @@ def classify_log(text: str) -> str:
     if any(sig in text for sig in _REBASE_SIGS):
         return "rebase"
     if any(sig in text for sig in _CONTENT_SIGS):
+        return "content"
+    if _MYPY_ERROR_RE.search(text):
         return "content"
     # Failed with no recognizable content signature: setup/runner/cache
     # classes, where a rerun is both the diagnosis and the fix.
