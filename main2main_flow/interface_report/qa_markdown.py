@@ -3,95 +3,10 @@
 
 from __future__ import annotations
 
-import ast
 import subprocess
 from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
-
-
-def change_evidence(root: Path, old: str, new: str, endpoint: dict) -> str:
-    """Include bounded diff and exact-name search evidence, including lexical guards."""
-    path, name = endpoint.get("file"), endpoint.get("name")
-    if not path or not name or not path.startswith("vllm/"):
-        return ""
-    difference = subprocess.run(
-        ["git", "-C", str(root), "diff", "--no-ext-diff", "--unified=3", old, new, "--", path],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.splitlines()
-    indexes = set()
-    headers = []
-    for index, line in enumerate(difference):
-        if line.startswith("@@"):
-            headers.append(index)
-        if name in line and line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-            indexes.update(range(max(0, index - 3), min(len(difference), index + 4)))
-            if headers:
-                indexes.add(headers[-1])
-    selected = sorted(indexes)
-    text = [f"### 新旧源码差异与同名检索：`{name}`\n", f"固定区间：`{old}` → `{new}`；文件 `{path}`。\n"]
-    if selected:
-        text += [
-            f"以下为匹配变更附近的 diff 摘录，共 {len(selected)} 行，最多显示 70 行。\n",
-            "```diff",
-            *[difference[i] for i in selected[:70]],
-            "```\n",
-        ]
-    else:
-        text += ["该文件未检出包含此名称的增删行；不能据此证明没有契约变化。\n"]
-    search = subprocess.run(
-        ["git", "-C", str(root), "grep", "-n", "-w", "-F", "-e", name, new, "--", "vllm"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    if search.returncode not in (0, 1):
-        raise ValueError("Pinned upstream name search failed")
-    hits = search.stdout.splitlines()
-    text += [
-        f"检索范围：新版 `{new}` 的全部已跟踪 `vllm/` 文件；"
-        f"方式：git grep -n -w -F，名称 `{name}`；匹配 {len(hits)} 行（最多显示 20 行）。\n",
-        "这只是同名检索，不能排除改名迁移、动态导出或运行期注入；匹配注释也不是可调用定义。\n",
-    ]
-    for hit in hits[:20]:
-        _, filename, number, content = hit.split(":", 3)
-        line_number = int(number)
-        url = f"https://github.com/vllm-project/vllm/blob/{new}/{quote(filename)}#L{line_number}"
-        text += [f"- [{filename}:{number}]({url})：`{content.strip()}`"]
-        if filename.endswith(".py"):
-            source = subprocess.run(
-                ["git", "-C", str(root), "show", f"{new}:{filename}"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            ).stdout
-            try:
-                tree = ast.parse(source)
-            except SyntaxError:
-                text += ["  源码无法用当前 Python 解析，词法上下文未知。"]
-                continue
-            ancestors = sorted(
-                (
-                    node
-                    for node in ast.walk(tree)
-                    if isinstance(node, (ast.If, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-                    and node.lineno <= line_number <= (node.end_lineno or node.lineno)
-                ),
-                key=lambda node: node.lineno,
-            )
-            if ancestors:
-                source_lines = source.splitlines()
-                text += [
-                    "  词法上下文："
-                    + " → ".join(f"L{node.lineno} `{source_lines[node.lineno - 1].strip()}`" for node in ancestors)
-                ]
-    if not hits:
-        text += ["新版检索结果：无同名文本匹配。"]
-    return "\n".join(text) + "\n"
 
 
 def source_excerpt(root: Path, sha: str, endpoint: dict, repository: str) -> str:
@@ -168,12 +83,6 @@ def render_qa(report: dict, inputs: dict, roots: dict[str, Path], resolution: di
         status = "新增不兼容候选" if any(f in selected for f in members) else "待确认：证据不足"
         text += [f"## {root_id} — {status}\n", f"{first['change']}\n", f"关联发现：{len(members)} 条。\n"]
         seen = set()
-        if any(f["classification"] == "introduced_break" for f in members):
-            text += [
-                change_evidence(
-                    roots["vllm_root"], inputs["vllm_old_sha"], inputs["vllm_new_sha"], first["upstream"]["old"]
-                )
-            ]
         for finding in members:
             for side in ("old", "new"):
                 endpoint = finding["upstream"][side]

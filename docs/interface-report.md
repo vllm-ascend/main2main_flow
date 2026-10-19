@@ -58,7 +58,12 @@ the selected source snapshots. A fresh runner without this cache scans again.
 The run's diagnostics live in volatile `workspace/interface_scan/`; only
 `qa-review.md` is given to both agents. The Markdown contains source evidence so deleting
 the temporary clones does not remove its evidence. Local cumulative Ascend
-commits are not given fabricated public GitHub links.
+commits are not given fabricated public GitHub links. The report retains grouped
+candidates, compatibility reasons, exact old/new source locations and downstream
+dependency excerpts. It omits repository-wide same-name search hits and
+short-name-filtered diffs: these do not establish symbol identity or compatibility.
+Missing source locations remain explicit evidence gaps; agents must inspect
+possible migrations when verifying a deletion.
 
 ## Adapter decisions and original QA consumer
 
