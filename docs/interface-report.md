@@ -63,7 +63,11 @@ candidates, compatibility reasons, exact old/new source locations and downstream
 dependency excerpts. It omits repository-wide same-name search hits and
 short-name-filtered diffs: these do not establish symbol identity or compatibility.
 Missing source locations remain explicit evidence gaps; agents must inspect
-possible migrations when verifying a deletion.
+possible migrations when verifying a deletion. For replacement methods,
+the downstream endpoint locates the implementation definition; patch installation
+file/line and guards remain separate evidence and are displayed separately. An
+unresolved definition has an unknown line rather than borrowing the installation
+line, even when both locations are in the same file.
 
 ## Adapter decisions and original QA consumer
 

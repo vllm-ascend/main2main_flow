@@ -97,9 +97,20 @@ def render_qa(report: dict, inputs: dict, roots: dict[str, Path], resolution: di
                 ]
             text += [
                 f"### 下游依赖 `{finding['id']}` / {finding['relation']}\n",
+                "方法定义位置：\n" if finding["relation"] in ("monkey_patch", "override") else "",
                 excerpt(finding["downstream"]),
             ]
             for evidence in finding.get("evidence", []):
+                if finding["relation"] == "monkey_patch" and evidence.get("file"):
+                    installation = ("patch", evidence["file"], evidence.get("line"))
+                    if installation not in seen:
+                        seen.add(installation)
+                        text += ["补丁安装位置：\n"]
+                        if evidence.get("guards"):
+                            text += [f"安装条件：`{' and '.join(evidence['guards'])}`\n"]
+                        text += [
+                            source_excerpt(roots["ascend_root"], inputs["vllm_ascend_sha"], evidence, down_repo)
+                        ]
                 dependency = evidence.get("downstream_file")
                 if dependency and dependency != finding["downstream"].get("file") and dependency not in seen:
                     seen.add(dependency)

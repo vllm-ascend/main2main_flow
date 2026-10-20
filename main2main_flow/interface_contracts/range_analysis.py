@@ -3303,6 +3303,12 @@ def _relation_downstream_endpoint(
     qualified_name = ".".join(item for item in (module, relation.downstream_owner, relation.downstream_name) if item)
     callable_info = engine.downstream.find_callable(qualified_name)
     node = callable_info.node if callable_info is not None else None
+    # The relation evidence points to the patch installation, which may live
+    # in another file. The downstream endpoint must locate the implementation.
+    definition_line = getattr(node, "lineno", None)
+    if definition_line is None:
+        definition_lines = {item.definition_line for item in relation.evidence if item.definition_line is not None}
+        definition_line = next(iter(definition_lines)) if len(definition_lines) == 1 else None
 
     def resolve(expression: str) -> str | None:
         if (
@@ -3343,7 +3349,7 @@ def _relation_downstream_endpoint(
         file=relation.downstream_file,
         owner=relation.downstream_owner,
         name=relation.downstream_name,
-        line=relation.evidence_line,
+        line=definition_line,
         signature=installed_signature,
         descriptor=relation.installed_descriptor_kind,
         symbol_kind="callable",
