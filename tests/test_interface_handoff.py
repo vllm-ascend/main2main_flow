@@ -19,6 +19,20 @@ from main2main_flow.interface_report.handoff import adapter_context, load_assess
 
 
 class HandoffTests(unittest.TestCase):
+    def test_merged_report_retains_all_roots_and_rejects_duplicates(self):
+        self.path.write_text("## 接口：`API.forward`\n### abcdef0123456789 — 入参变化\n"
+                             "### fedcba9876543210 — 返回值变化\n", encoding="utf-8")
+        report = load_report(str(self.path))
+        self.assertEqual(report.roots, ("abcdef0123456789", "fedcba9876543210"))
+        assessment = {**self.assessment, "report_sha256": report.sha256}
+        self.write_assessment(assessment)
+        with self.assertRaisesRegex(ValueError, "missing root"):
+            load_assessment(report, self.step_dir, "s1", "a" * 40, "b" * 40)
+        self.path.write_text(self.path.read_text(encoding="utf-8") +
+                             "## abcdef0123456789 — legacy duplicate\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            load_report(str(self.path))
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 from main2main_flow.interface_contracts.generator import Relation, RelationEvidence
 from main2main_flow.interface_contracts.range_analysis import analyze_range, _relation_downstream_endpoint
+from main2main_flow.interface_report.handoff import load_report
 from main2main_flow.interface_report.qa_markdown import render_qa
 import test_interface_scan as fixtures
 
@@ -55,6 +56,24 @@ class PatchLocationTests(unittest.TestCase):
         self.assertIn(f"/blob/{sha}/vllm_ascend/patch.py#L9", text)
         self.assertNotIn(f"/blob/{sha}/vllm_ascend/impl.py#L8", text)
         self.assertIn("API.forward = Replacement.forward", text)
+        # Parameters and returns share one interface chapter and source block,
+        # while every contract root and relation still needs its own decision.
+        self.assertEqual(text.count("## 接口：`API.forward`"), 1)
+        self.assertEqual(text.count("## 接口：`API.other`"), 1)
+        self.assertIn("入参变化", text)
+        self.assertIn("返回值变化", text)
+        self.assertIn("forward(self, value, output)", text)
+        self.assertIn("forward(self, value)", text)
+        self.assertIn("旧版契约：`None`", text)
+        self.assertIn("新版契约：`builtins.int`", text)
+        self.assertEqual(text.count(f"/blob/{sha}/vllm_ascend/impl.py#L3"), 1)
+        self.assertEqual(text.count(f"/blob/{sha}/vllm_ascend/patch.py#L8"), 1)
+        for finding in report["findings"]:
+            self.assertIn(finding["id"], text)
+        path = self.root / "qa-review.md"
+        path.write_text(text, encoding="utf-8")
+        self.assertEqual(set(load_report(str(path)).roots),
+                         {f["root_cause_id"] for f in report["findings"]})
 
     def test_unresolved_definition_never_borrows_installation_line(self):
         relation = Relation(relation="monkey_patch", upstream_file="vllm/api.py", upstream_owner="API",

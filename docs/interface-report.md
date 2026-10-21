@@ -69,6 +69,15 @@ file/line and guards remain separate evidence and are displayed separately. An
 unresolved definition has an unknown line rather than borrowing the installation
 line, even when both locations are in the same file.
 
+The Markdown groups findings by the qualified upstream interface (file, owner,
+name), not by a short method name. Within each chapter, argument and return
+changes have separately labelled root IDs and explicit old/new contracts. All
+finding IDs and override/patch relations remain visible. Pinned source locations
+are rendered once per interface and referenced by evidence IDs. Adapter/QA
+coverage remains one decision per root, not one decision per chapter. The handoff
+reader accepts both legacy level-two root headings and grouped level-three
+root headings, rejecting duplicate IDs across both layouts.
+
 ## Adapter decisions and original QA consumer
 
 The flow automatically binds its report to that flow instance. It takes
