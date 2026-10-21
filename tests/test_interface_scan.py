@@ -117,11 +117,11 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(self.status()["cache_status"], "bypassed")
         self.assertEqual(self.status()["model_calls"], 0)
         qa = (self.output / "qa-review.md").read_text(encoding="utf-8")
-        self.assertIn("prepared_not_executed", qa)
+        self.assertIn("固定的扫描输入快照", qa)
         self.assertIn("required", qa)
         self.assertIn(f"/blob/{self.old}/vllm/api.py", qa)
         self.assertIn(f"/blob/{self.new}/vllm/api.py", qa)
-        self.assertIn("QA 结论", qa)
+        self.assertIn("复核要求", qa)
         self.assertFalse((self.output / "qa-input.json").exists())
 
     def test_fixed_snapshot_invalidates_cache(self):

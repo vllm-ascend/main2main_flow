@@ -78,6 +78,24 @@ coverage remains one decision per root, not one decision per chapter. The handof
 reader accepts both legacy level-two root headings and grouped level-three
 root headings, rejecting duplicate IDs across both layouts.
 
+The report is a role-neutral, immutable scan-input snapshot. It states its
+Ascend scan baseline separately from the current adaptation tree, delegates
+actions to the adapter/QA prompts, and points to their existing per-step
+outputs instead of claiming QA has not run or filling in review verdicts.
+Evidence IDs link to anchors within the same Markdown file. Installation
+conditions are shared once per interface chapter.
+
+Source evidence uses a run-local Git-source/AST cache and bounded excerpts of
+complete declarations, scoped returns, output assignments, relevant assertions
+and branch headers. It excludes neighboring/nested functions' return evidence,
+marks omitted ranges and the 96-line cap, and explicitly reports missing or
+out-of-range locations. Syntax unsupported by the rendering runtime falls back
+to labelled position-only evidence. No scanned code is imported or executed.
+Inherited-state findings retain unknown old bindings as unknown, distinguish
+field existence from lifecycle validity, and separately show actual Ascend
+classes, upstream inheritance entries, constructor/super calls and field reads.
+Associated inherited members are listed even when they share one root ID.
+
 ## Adapter decisions and original QA consumer
 
 The flow automatically binds its report to that flow instance. It takes
