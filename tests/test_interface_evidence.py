@@ -100,10 +100,11 @@ class Consumer(Base):
         text = render_qa(report, dict(vllm_old_sha=self.old, vllm_new_sha=new, vllm_ascend_sha=sha, engine_sha="fixture"),
                          dict(vllm_root=self.up, ascend_root=self.down), {"source_mode": "incremental_rebased"})
         self.assertEqual(report, original)
-        self.assertIn("未知：继承绑定或状态行为尚未证实", text)
-        self.assertIn("已确认：构造函数建立字段 _metadata", text)
+        self.assertIn("待确认，未证明新增 break", text)
+        self.assertIn("unknown inherited binding", text)
+        self.assertIn("self._metadata = None", text)
         self.assertNotIn("DO_NOT_USE_AS_BOTH_CONTRACTS", text)
-        self.assertIn("字段存在不等于调用时值或生命周期有效", text)
+        self.assertIn("字段存在，不代表调用时值或生命周期有效", text)
         self.assertIn("受影响 Ascend 类", text)
         self.assertIn("vllm_ascend/consumer.py:2", text)
         self.assertIn("上游所需字段定义", text)
@@ -121,3 +122,35 @@ class Consumer(Base):
         path.write_text(text, encoding="utf-8")
         self.assertEqual(load_report(str(path)).roots, (finding["root_cause_id"],))
         self.assertIn(finding["id"], text)
+
+    def test_unchanged_base_property_is_not_promoted_to_confirmed_old_binding(self):
+        self.write(self.up, "vllm/base.py", """class Base:
+    def __init__(self, role):
+        self._role = role
+    @property
+    def role(self) -> str:
+        return self._role
+""")
+        old = self.commit(self.up)
+        self.write(self.up, "vllm/elsewhere.py", "changed = True\n")
+        new = self.commit(self.up)
+        finding = dict(id="1234567890abcdef", root_cause_id="abcdef0123456789", classification="analysis_unresolved",
+                       relation="inherited_state", contract_kind="required_instance_attribute", change="unresolved binding",
+                       gates={"contract_changed": True},
+                       upstream={"old": dict(file="vllm/entry.py", owner="Consumer", name="role", line=None),
+                                 "new": dict(file="vllm/base.py", owner="Base", name="role", line=5)},
+                       downstream=dict(file="vllm/base.py", owner="Base", name="_role", line=3),
+                       compatibility={"old": dict(exists=None, compatible=None, reason="old binding unknown"),
+                                      "new": dict(exists=True, compatible=True, reason="initialized")},
+                       evidence=[], details=dict(required_attribute="_role", initialization_status="established"))
+        report = dict(findings=[finding], metadata={"range_analyzer_version": "fixture"})
+        original = copy.deepcopy(report)
+        text = render_qa(report, dict(vllm_old_sha=old, vllm_new_sha=new, vllm_ascend_sha=self.ascend, engine_sha="fixture"),
+                         dict(vllm_root=self.up, ascend_root=self.down), {})
+        self.assertEqual(report, original)
+        self.assertEqual(text.count("@property role(self) -> str"), 2)
+        self.assertIn("该声明的签名和函数体未变化", text)
+        self.assertIn("文件在 old/new 两个固定提交中的内容相同", text)
+        self.assertIn("不代表已证明旧版继承绑定", text)
+        self.assertIn("原始状态：待确认，未证明新增 break", text)
+        self.assertIn("old binding unknown", text)

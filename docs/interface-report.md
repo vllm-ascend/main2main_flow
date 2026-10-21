@@ -75,8 +75,23 @@ changes have separately labelled root IDs and explicit old/new contracts. All
 finding IDs and override/patch relations remain visible. Pinned source locations
 are rendered once per interface and referenced by evidence IDs. Adapter/QA
 coverage remains one decision per root, not one decision per chapter. The handoff
-reader accepts both legacy level-two root headings and grouped level-three
-root headings, rejecting duplicate IDs across both layouts.
+reader accepts level-two, level-three and level-four root headings, rejecting
+duplicate IDs across legacy and current layouts.
+
+Each interface chapter follows five sections: changed location; problem types
+and IDs; old/new upstream declarations and return behavior; the pinned downstream
+baseline; and per-root mismatch/trigger explanations. Confirmed candidates are
+listed before unresolved checks, with a short overview and explicit record/root/
+chapter counts. Machine-facing root headings live under the fifth section;
+every underlying finding ID and relation remains visible.
+
+Where the old inherited binding is unresolved, a directly located old declaration
+of the same qualified base member may supplement the presentation. This is only
+a source fact: it does not repair the old binding, rewrite raw classifications,
+or establish whole-chain compatibility. Equal declaration ASTs/file contents are
+labelled unchanged within that scope. Parsing limitations remain in notes rather
+than being presented as interface modifications. Parameter and return mismatches
+explain the pinned downstream contract and conditional runtime consequence.
 
 The report is a role-neutral, immutable scan-input snapshot. It states its
 Ascend scan baseline separately from the current adaptation tree, delegates

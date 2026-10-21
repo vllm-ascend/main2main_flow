@@ -63,6 +63,45 @@ class SourceCatalog:
         node = min(nodes, key=lambda n: n.end_lineno - n.lineno)
         return {**endpoint, "line": node.lineno, "name": node.name}
 
+    def declaration(self, root: Path, sha: str, endpoint: dict):
+        """Find only the exact declaration; never infer an inherited binding."""
+        path = endpoint.get("file")
+        if not path or not endpoint.get("name"):
+            return None
+        code, tree = self.read(root, sha, path)
+        matches = []
+
+        def visit(node, owners=()):
+            for child in getattr(node, "body", []):
+                if isinstance(child, ast.ClassDef):
+                    visit(child, (*owners, child.name))
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if child.name == endpoint["name"] and ".".join(owners) == (endpoint.get("owner") or ""):
+                        matches.append(child)
+
+        visit(tree)
+        if len(matches) != 1:
+            matches = [node for node in matches if node.lineno == endpoint.get("line")]
+        if len(matches) != 1:
+            return None
+        node = matches[0]
+        decorators = [ast.unparse(d) for d in node.decorator_list]
+        signature = ("async " if isinstance(node, ast.AsyncFunctionDef) else "") + node.name + "(" + ast.unparse(node.args) + ")"
+        if node.returns is not None:
+            signature += " -> " + ast.unparse(node.returns)
+        if "property" in decorators:
+            signature = "@property " + signature
+        nodes = list(_scoped_nodes(node))
+        returns = list(dict.fromkeys(ast.unparse(n) for n in nodes if isinstance(n, ast.Return)))
+        if returns:
+            behavior = "；".join(returns)
+        elif any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in nodes):
+            behavior = "包含 yield；生成器协议须结合源码核验"
+        else:
+            behavior = "无显式 return；正常执行到末尾返回 None"
+        return {"endpoint": {**endpoint, "line": node.lineno}, "signature": signature,
+                "behavior": behavior, "definition": ast.dump(node, include_attributes=False), "file_source": code}
+
 
 def _scoped_nodes(node):
     for child in ast.iter_child_nodes(node):

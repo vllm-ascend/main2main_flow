@@ -32,7 +32,7 @@ def load_report(path: str) -> Report | None:
         text = data.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         raise ValueError("interface report missing or unreadable") from exc
-    roots = tuple(re.findall(r"^#{2,3} ([0-9a-f]{16})\b", text, re.MULTILINE))
+    roots = tuple(re.findall(r"^#{2,4} ([0-9a-f]{16})\b", text, re.MULTILINE))
     if len(roots) != len(set(roots)):
         raise ValueError("duplicate interface report root IDs")
     return Report(report, hashlib.sha256(data).hexdigest(), roots)

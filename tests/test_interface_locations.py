@@ -64,8 +64,12 @@ class PatchLocationTests(unittest.TestCase):
         self.assertIn("返回值变化", text)
         self.assertIn("forward(self, value, output)", text)
         self.assertIn("forward(self, value)", text)
-        self.assertIn("旧版契约：`None`", text)
-        self.assertIn("新版契约：`builtins.int`", text)
+        self.assertIn("下游返回契约为 `None`", text)
+        self.assertIn("新版上游要求 `builtins.int`", text)
+        for heading in ("1. 修改位置", "2. 问题类型及检测 ID", "3. 上游修改前后",
+                        "4. 下游扫描基线", "5. 不匹配点与触发后果"):
+            self.assertIn(heading, text)
+        self.assertIn("TypeError", text)
         self.assertEqual(text.count(f"/blob/{sha}/vllm_ascend/impl.py#L3"), 1)
         self.assertEqual(text.count(f"/blob/{sha}/vllm_ascend/patch.py#L8"), 1)
         for finding in report["findings"]:
