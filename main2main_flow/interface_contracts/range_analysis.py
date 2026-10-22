@@ -83,6 +83,7 @@ from .generator import (
     STDLIB_STRUCTURAL_BASES,
     HistoricalOverrideCandidate,
     InterfaceBoundaryGenerator,
+    MroResult,
     Relation,
     RelationEvidence,
     RepositoryIndex,
@@ -98,6 +99,7 @@ from .generator import (
     _ScopeBinding,
     _statements_must_terminate,
     _tag_guard_names,
+    linearized_mro,
 )
 from .method_context import FactoryCallProof, MethodContextLookup, MethodProof, method_body_hash
 from .models import (
@@ -120,7 +122,7 @@ from .type_flow import (
 )
 
 RANGE_SCHEMA_VERSION = 48
-RANGE_ANALYZER_VERSION = "2.34.0"
+RANGE_ANALYZER_VERSION = "2.34.1"
 SNAPSHOT_CACHE_SCHEMA_VERSION = 16
 _GIT_BATCH_CLOSE_TIMEOUT_SECONDS = 5
 RELATION_CACHE_SCHEMA_VERSION = 2
@@ -1243,6 +1245,41 @@ class GitSnapshot:
             return "builtins.object"
         return self._return_resolver(file_name)(expression)
 
+    def _canonical_class_name(self, name: str) -> str:
+        resolved = self._resolve_qualified_node(name)
+        if resolved is not None and resolved.status == "exact" and isinstance(resolved.node, ast.ClassDef):
+            module, _ = _file_module(resolved.file)
+            return ".".join(part for part in (module, resolved.owner, resolved.node.name) if part)
+        return name
+
+    def _class_bases(self, name: str, *, generated_storage: bool = False) -> tuple[list[str], list[str]]:
+        if name in STDLIB_STRUCTURAL_BASES:
+            return list(STDLIB_STRUCTURAL_BASES[name]), []
+        resolved = self._resolve_qualified_node(name)
+        if resolved is None or resolved.status != "exact" or not isinstance(resolved.node, ast.ClassDef):
+            return [], [name]
+        node = resolved.node
+        supported_storage = generated_storage and dataclass_storage(name, self._type_source) is not None
+        if (node.decorator_list and not supported_storage) or node.keywords:
+            return [], [f"decorated class or custom metaclass: {name}"]
+        bases, missing = [], []
+        for expression in node.bases:
+            base = self._base_reference(resolved.file, expression)
+            if base == "builtins.object":
+                continue
+            if base in STDLIB_STRUCTURAL_BASES:
+                bases.append(base)
+            elif base is not None and base.startswith(self._reference_prefixes):
+                bases.append(self._canonical_class_name(base))
+            else:
+                missing.append(f"opaque or unresolved base: {base or ast.unparse(expression)}")
+        return bases, missing
+
+    def _linearized_mro(self, receiver_type: str, *, generated_storage: bool = False) -> MroResult:
+        name = self._canonical_class_name(receiver_type)
+        bases = partial(self._class_bases, generated_storage=generated_storage)
+        return self._memo.get("snapshot_mro", (name, generated_storage), lambda: linearized_mro(name, bases, {}))
+
     def _effective_member(
         self,
         receiver_type: str,
@@ -1266,11 +1303,10 @@ class GitSnapshot:
         *,
         generated_storage: bool = False,
     ) -> _QualifiedBinding | None:
-        """Resolve a member through a provable single-inheritance chain.
+        """Resolve a member using the same conservative C3 ordering as the index.
 
-        Multiple inheritance requires a complete C3 index.  The range layer
-        deliberately returns ``unknown`` for that case instead of borrowing
-        the checked-out new endpoint's owner or guessing a DFS order.
+        Every lookup uses this snapshot's own source. Opaque, cyclic and invalid
+        base chains stay unknown; no new-version owner is borrowed for old.
         """
 
         if receiver_type in seen:
@@ -1321,7 +1357,8 @@ class GitSnapshot:
             )
         if not class_node.bases:
             return _QualifiedBinding(resolved.file, actual_owner, member, None, "missing")
-        if len(class_node.bases) != 1:
+        mro = self._linearized_mro(receiver_type, generated_storage=generated_storage)
+        if not mro.complete:
             return _QualifiedBinding(
                 resolved.file,
                 actual_owner,
@@ -1330,30 +1367,17 @@ class GitSnapshot:
                 "unknown",
                 _node_fingerprint(class_node),
             )
-        base = self._base_reference(resolved.file, class_node.bases[0])
-        if base == "builtins.object":
-            return _QualifiedBinding(resolved.file, actual_owner, member, None, "missing")
-        if base in STDLIB_STRUCTURAL_BASES:
-            # The generator models these stdlib marker bases as structural
-            # MRO nodes with no interface members.  Mirror that exact model in
-            # snapshot lookup so an otherwise complete vLLM chain does not
-            # become unknown merely because it terminates at ``abc.ABC``.
-            return _QualifiedBinding(resolved.file, actual_owner, member, None, "missing")
-        if base is None or not base.startswith(self._reference_prefixes):
-            return _QualifiedBinding(
-                resolved.file,
-                actual_owner,
-                member,
-                None,
-                "unknown",
-                _node_fingerprint(class_node),
-            )
-        return self._effective_member(
-            base,
-            member,
-            frozenset((*seen, receiver_type)),
-            generated_storage=generated_storage,
-        )
+        for owner in mro.owners[1:]:
+            if owner in STDLIB_STRUCTURAL_BASES:
+                continue
+            base = self._resolve_qualified_node(owner)
+            if base is None or base.status != "exact" or not isinstance(base.node, ast.ClassDef):
+                return _QualifiedBinding(resolved.file, actual_owner, member, None, "unknown")
+            direct = self._body_named_binding(base.node.body, member)
+            if direct.status != "missing":
+                base_owner = ".".join(part for part in (base.owner, base.node.name) if part)
+                return _QualifiedBinding(base.file, base_owner, member, direct.node, direct.status, direct.fingerprint)
+        return _QualifiedBinding(resolved.file, actual_owner, member, None, "missing")
 
     @staticmethod
     def _instance_assignment(
@@ -3359,7 +3383,7 @@ def _relation_downstream_endpoint(
     return downstream
 
 
-def _finding_action(classification: str, gates: dict[str, bool]) -> str:
+def _finding_action(classification: str, gates: dict[str, bool | None]) -> str:
     if classification == "introduced_break" and all(gates.values()):
         return "modify"
     return "dismiss" if classification in {"preexisting", "fixed"} else "review"
@@ -5250,7 +5274,10 @@ def _inherited_state_findings(
         tuple[str, str],
         tuple[dict[str, tuple[int, bool]] | None, SourceEndpoint],
     ] = {}
-    new_read_cache: dict[str, dict[str, tuple[int, bool]]] = {}
+    new_read_cache: dict[
+        tuple[str, str],
+        tuple[dict[str, tuple[int, bool]] | None, SourceEndpoint],
+    ] = {}
     new_field_cache: dict[tuple[str, str], bool] = {}
     state_cache: dict[tuple[str, str, str], tuple[CompatibilityState, SourceEndpoint]] = {}
 
@@ -5294,9 +5321,13 @@ def _inherited_state_findings(
             node = callable_info.node
             if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                 continue
-            if qualified_member not in new_read_cache:
-                new_read_cache[qualified_member] = _instance_attribute_reads(node)
-            new_reads = new_read_cache[qualified_member]
+            read_key = (upstream_root, method_name)
+            if read_key not in new_read_cache:
+                new_read_cache[read_key] = _snapshot_inherited_reads(new_snapshot, upstream_root, method_name)
+            resolved_new_reads, new_endpoint = new_read_cache[read_key]
+            # The dependency graph supplies candidate reads if snapshot lookup
+            # is unresolved; it must not turn an unknown comparison into a delta.
+            new_reads = resolved_new_reads if resolved_new_reads is not None else _instance_attribute_reads(node)
             if not new_reads:
                 continue
             old_key = (upstream_root, method_name)
@@ -5307,13 +5338,8 @@ def _inherited_state_findings(
                     method_name,
                 )
             old_reads, old_endpoint = old_read_cache[old_key]
-            new_endpoint = new_snapshot.endpoint(
-                callable_info.file,
-                callable_info.owner,
-                callable_info.name,
-            )
             for required_attribute, (read_line, conditional_read) in sorted(new_reads.items()):
-                if old_reads is not None and required_attribute in old_reads:
+                if resolved_new_reads is not None and old_reads is not None and required_attribute in old_reads:
                     continue
                 field_key = (upstream_root, required_attribute)
                 if field_key not in new_field_cache:
@@ -5377,6 +5403,8 @@ def _inherited_state_findings(
                     if conditional_unresolved and initialization_state.compatible is False
                     else initialization_state
                 )
+                if resolved_new_reads is None:
+                    new_state = CompatibilityState(None, None, "the new inherited callable binding could not be proven")
                 old_state = (
                     CompatibilityState(
                         None,
@@ -5390,10 +5418,11 @@ def _inherited_state_findings(
                         f"the old inherited callable did not read {required_attribute}",
                     )
                 )
-                classification = _classify(old_state, new_state, True)
+                contract_changed = True if old_reads is not None and resolved_new_reads is not None else None
+                classification = _classify(old_state, new_state, contract_changed is True)
                 gates = {
                     "relationship_verified": True,
-                    "contract_changed": True,
+                    "contract_changed": contract_changed,
                     "runtime_reachable": not conditional_unresolved,
                     "version_lane_matches": True,
                 }
@@ -5444,12 +5473,18 @@ def _inherited_state_findings(
                     downstream=constructor,
                     old_state=old_state,
                     new_state=new_state,
-                    change=(f"inherited upstream member newly reads required instance attribute {required_attribute}"),
+                    change=(
+                        f"inherited upstream member newly reads required instance attribute {required_attribute}"
+                        if contract_changed is True
+                        else f"could not determine whether inherited read of {required_attribute} changed"
+                    ),
                     evidence=[dependency.as_dict()],
                     gates=gates,
                     suggestion=(
                         f"Initialize {required_attribute} in the downstream constructor or call "
                         "super().__init__(), then add an inherited-state regression test."
+                        if contract_changed is True and new_state.compatible is False
+                        else "Review old/new inherited bindings and constructor evidence before deciding whether adaptation is needed."
                     ),
                     source="inherited_state_detector",
                     contract_kind="required_instance_attribute",
@@ -5464,6 +5499,7 @@ def _inherited_state_findings(
                         "downstream_class": class_info.qualified_name,
                         "initialization_status": dependency.initialization_status,
                         "initialization_reason": dependency.initialization_reason,
+                        "contract_change_status": "confirmed" if contract_changed is True else "unresolved",
                         "inherited_members": [qualified_member],
                         "impacted_downstream_classes": [class_info.qualified_name],
                     },

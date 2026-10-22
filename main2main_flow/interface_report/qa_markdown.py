@@ -99,7 +99,8 @@ def render_qa(report: dict, inputs: dict, roots: dict[str, Path], resolution: di
     findings = report["findings"]
     selected = [f for f in findings if f["classification"] == "introduced_break"]
     pending = [f for f in findings if f["classification"] == "analysis_unresolved"
-               and f.get("gates", {}).get("contract_changed") is True]
+               and (f.get("gates", {}).get("contract_changed") is True
+                    or f.get("details", {}).get("contract_change_status") == "unresolved")]
     groups = {}
     for finding in selected + pending:
         groups.setdefault(_interface_key(finding), []).append(finding)

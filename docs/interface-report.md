@@ -33,7 +33,11 @@ detection without these actions, use the standalone entrypoint below.
 
 ## Inputs, isolation and failures
 
-The optimized v2.34.0 engine is packaged at `main2main_flow/interface_contracts`.
+The optimized v2.34.1 engine is packaged at `main2main_flow/interface_contracts`.
+Historical snapshots and the current index share conservative C3 inheritance
+ordering. Inherited-state reads are resolved independently with the same snapshot
+lookup at both pinned revisions. Unchanged reads are excluded; an unknown binding
+remains a review item with `contract_changed: null`, rather than a claimed new read.
 `interface_report/runtime.py` integrates it with the flow; `run.py` shares the
 scan, report validation, cache verification and Markdown rendering pipeline.
 Installed wheels and editable checkouts use the same packaged engine.

@@ -62,7 +62,7 @@ class RangeFinding:
     new_state: CompatibilityState
     change: str
     evidence: list[dict[str, Any]]
-    gates: dict[str, bool]
+    gates: dict[str, bool | None]
     suggestion: str
     source: str = "dynamic_relation_graph"
     contract_kind: str = "call_arguments"

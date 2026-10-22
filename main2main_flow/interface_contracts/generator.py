@@ -2206,6 +2206,50 @@ class MroResult:
     reason: str | None = None
 
 
+def linearized_mro(
+    qualified_name: str,
+    class_bases: Callable[[str], tuple[list[str], list[str]]],
+    cache: dict[str, MroResult],
+    stack: tuple[str, ...] = (),
+) -> MroResult:
+    """Shared conservative C3 ordering for indexed and historical sources."""
+    if qualified_name in cache:
+        return cache[qualified_name]
+    if qualified_name in stack:
+        return MroResult((qualified_name,), False, f"inheritance cycle at {qualified_name}")
+    bases, missing = class_bases(qualified_name)
+    base_results = [linearized_mro(base, class_bases, cache, (*stack, qualified_name)) for base in bases]
+    incomplete = next((result for result in base_results if not result.complete), None)
+    if missing or incomplete is not None:
+        prefix = (qualified_name,)
+        if len(base_results) == 1:
+            prefix = (*prefix, *base_results[0].owners)
+        reasons = [f"unresolved base(s): {', '.join(sorted(missing))}"] if missing else []
+        if incomplete is not None and incomplete.reason:
+            reasons.append(incomplete.reason)
+        result = MroResult(prefix, False, "; ".join(reasons))
+    else:
+        sequences = [list(result.owners) for result in base_results] + [bases.copy()]
+        owners = [qualified_name]
+        while any(sequences):
+            sequences = [sequence for sequence in sequences if sequence]
+            candidate = next(
+                (sequence[0] for sequence in sequences if not any(sequence[0] in other[1:] for other in sequences)),
+                None,
+            )
+            if candidate is None:
+                result = MroResult(tuple(owners), False, f"invalid or ambiguous MRO at {qualified_name}")
+                break
+            owners.append(candidate)
+            for sequence in sequences:
+                if sequence[0] == candidate:
+                    sequence.pop(0)
+        else:
+            result = MroResult(tuple(owners), True)
+    cache[qualified_name] = result
+    return result
+
+
 @dataclass(frozen=True)
 class EffectiveMethodResolution:
     """All outcomes of Python attribute lookup for one method name."""
@@ -5934,82 +5978,7 @@ class InterfaceBoundaryGenerator:
         qualified_name: str,
         stack: tuple[str, ...] = (),
     ) -> MroResult:
-        if qualified_name in self._mro_cache:
-            return self._mro_cache[qualified_name]
-        if qualified_name in stack:
-            return MroResult(
-                owners=(qualified_name,),
-                complete=False,
-                reason=f"inheritance cycle at {qualified_name}",
-            )
-
-        bases, missing = self._class_bases(qualified_name)
-        if not bases:
-            if missing:
-                result = MroResult(
-                    owners=(qualified_name,),
-                    complete=False,
-                    reason=(f"unresolved base(s): {', '.join(sorted(missing))}"),
-                )
-                self._mro_cache[qualified_name] = result
-                return result
-            result = MroResult(
-                owners=(qualified_name,),
-                complete=True,
-            )
-            self._mro_cache[qualified_name] = result
-            return result
-
-        base_results = [self._linearized_mro(base, (*stack, qualified_name)) for base in bases]
-        incomplete = next(
-            (result for result in base_results if not result.complete),
-            None,
-        )
-        if missing or incomplete is not None:
-            prefix: tuple[str, ...] = (qualified_name,)
-            if len(base_results) == 1:
-                prefix = (*prefix, *base_results[0].owners)
-            reason_parts = []
-            if missing:
-                reason_parts.append(f"unresolved base(s): {', '.join(sorted(missing))}")
-            if incomplete is not None and incomplete.reason:
-                reason_parts.append(incomplete.reason)
-            result = MroResult(
-                owners=prefix,
-                complete=False,
-                reason="; ".join(reason_parts),
-            )
-            self._mro_cache[qualified_name] = result
-            return result
-
-        sequences = [list(result.owners) for result in base_results]
-        sequences.append(bases.copy())
-        linearized_owners = [qualified_name]
-        while any(sequences):
-            sequences = [sequence for sequence in sequences if sequence]
-            candidate = next(
-                (sequence[0] for sequence in sequences if not any(sequence[0] in other[1:] for other in sequences)),
-                None,
-            )
-            if candidate is None:
-                incomplete_result = MroResult(
-                    owners=tuple(linearized_owners),
-                    complete=False,
-                    reason=f"invalid or ambiguous MRO at {qualified_name}",
-                )
-                self._mro_cache[qualified_name] = incomplete_result
-                return incomplete_result
-            linearized_owners.append(candidate)
-            for sequence in sequences:
-                if sequence and sequence[0] == candidate:
-                    sequence.pop(0)
-
-        complete_result = MroResult(
-            owners=tuple(linearized_owners),
-            complete=True,
-        )
-        self._mro_cache[qualified_name] = complete_result
-        return complete_result
+        return linearized_mro(qualified_name, self._class_bases, self._mro_cache, stack)
 
     def _collect_inheritance(self) -> None:
         for class_info in self.downstream.classes.values():
