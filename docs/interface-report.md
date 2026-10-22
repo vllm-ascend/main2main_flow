@@ -150,6 +150,18 @@ Every root needs `judgment` (`agree`, `disagree`, `deferred`, or
 decision is a disagreement, requires `verdict: fail` and an actionable issue.
 Uncertainty alone is not proof of a break or of safety.
 
+Fork-only read-only exercises may explicitly call `_run_adapter_qa` with
+`read_only_interface_review=True` against a committed fixture with zero diff.
+The adapter block must then declare `review_mode: read_only_gray`. A confirmed
+current-step break uses `decision: needs_adaptation` and
+`execution_status: not_executed_read_only`; `insufficient_evidence` remains an
+unproven contract, not a substitute for an intentionally skipped repair.
+QA independently checks the decision and may `agree` while returning `fail`
+with actionable issues for the still-unfixed code. Confirmed unadapted code
+cannot return `pass`. Production defaults reject gray-mode assessments and
+`needs_adaptation`; gray mode rejects `adapted`. No environment variable enables
+this mode, and it does not enter the production adaptation/test loop.
+
 Missing/duplicate/unknown roots, stale report/step/range identity and empty
 reasons/evidence are mechanical handoff failures. They retry through existing
 adapter-fix error feedback and cannot use the semantic QA one-fix escape. A

@@ -181,6 +181,82 @@ class HandoffTests(unittest.TestCase):
             self.review["interface_report_usage"][0]["judgment"] = decision
             validate_review(self.review, self.report, "s1")
 
+    def gray_assessment(self, decision="needs_adaptation"):
+        data = copy.deepcopy(self.assessment)
+        data["review_mode"] = "read_only_gray"
+        data["items"][0]["decision"] = decision
+        if decision == "needs_adaptation":
+            data["items"][0].update(execution_status="not_executed_read_only",
+                                    reason="Confirmed missing argument; read-only gray intentionally made no repair")
+        self.write_assessment(data)
+        return data
+
+    def test_confirmed_unadapted_is_only_accepted_in_explicit_gray_mode(self):
+        data = self.gray_assessment()
+        self.assertEqual(load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40, read_only=True), data)
+        with self.assertRaisesRegex(ValueError, "production"):
+            load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40)
+        data.pop("review_mode")
+        self.write_assessment(data)
+        with self.assertRaisesRegex(ValueError, "review_mode"):
+            load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40, read_only=True)
+        with self.assertRaisesRegex(ValueError, "invalid interface decision"):
+            load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40)
+
+    def test_gray_separates_unknown_evidence_from_confirmed_skipped_repair(self):
+        data = self.gray_assessment("insufficient_evidence")
+        self.assertEqual(load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40, read_only=True), data)
+        data["items"][0]["execution_status"] = "not_executed_read_only"
+        self.write_assessment(data)
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40, read_only=True)
+        for value in (None, "completed", "skipped"):
+            data = self.gray_assessment()
+            data["items"][0]["execution_status"] = value
+            self.write_assessment(data)
+            with self.assertRaisesRegex(ValueError, "execution_status"):
+                load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40, read_only=True)
+        self.gray_assessment("adapted")
+        with self.assertRaisesRegex(ValueError, "invalid interface decision"):
+            load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40, read_only=True)
+
+    def test_qa_agreement_on_unfixed_break_requires_fail_and_issue(self):
+        data = self.gray_assessment()
+        with self.assertRaisesRegex(ValueError, "unadapted"):
+            validate_review(self.review, self.report, "s1", assessment=data)
+        self.review["verdict"] = "fail"
+        with self.assertRaisesRegex(ValueError, "actionable"):
+            validate_review(self.review, self.report, "s1", assessment=data)
+        self.review["issues"] = [dict(file="vllm_ascend/caller.py", line=3, issue="confirmed missing argument")]
+        validate_review(self.review, self.report, "s1", assessment=data)
+
+    def test_original_qa_gray_review_can_agree_and_still_fail(self):
+        self.gray_assessment()
+        self.review.update(verdict="fail", issues=[dict(file="vllm_ascend/caller.py", line=3, issue="confirmed missing argument")])
+        with (
+            patch("main2main_flow.flow.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="")),
+            patch("main2main_flow.flow.run_opencode_review", side_effect=self.model) as model,
+        ):
+            issues, _ = self.flow._run_adapter_qa(**self.args)
+            self.assertTrue(issues[0].startswith("interface-handoff:"))
+            model.assert_not_called()
+            issues, session = self.flow._run_adapter_qa(**self.args, read_only_interface_review=True)
+        self.assertEqual(session, "independent-qa")
+        self.assertIn("confirmed missing argument", issues[0])
+        self.assertIn("not_executed_read_only", self.prompt)
+        self.assertIn("Agreement assesses the decision's accuracy, not code readiness", self.prompt)
+        model.assert_called_once()
+
+    def test_gray_review_rejects_dirty_fixture_before_model(self):
+        self.gray_assessment()
+        with (
+            patch("main2main_flow.flow.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="business diff")),
+            patch("main2main_flow.flow.run_opencode_review") as model,
+        ):
+            issues, _ = self.flow._run_adapter_qa(**self.args, read_only_interface_review=True)
+        self.assertIn("committed, unchanged fixture", issues[0])
+        model.assert_not_called()
+
     def test_production_loop_passes_report_to_adapter_and_fix_and_rechecks_noop(self):
         # Even an empty per-step patch cannot bypass pending candidate review.
         self.step["upstream_patch"] = ""

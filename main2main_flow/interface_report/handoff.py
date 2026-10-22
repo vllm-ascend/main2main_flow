@@ -100,7 +100,10 @@ def _items(items: object, roots: tuple[str, ...], field: str, choices: set[str])
     return items
 
 
-def load_assessment(report: Report | None, step_dir: str | Path, step_id: str, start: str, end: str) -> dict | None:
+def load_assessment(
+    report: Report | None, step_dir: str | Path, step_id: str, start: str, end: str,
+    *, read_only: bool = False,
+) -> dict | None:
     if report is None or not report.roots:
         return None
     try:
@@ -121,11 +124,25 @@ def load_assessment(report: Report | None, step_dir: str | Path, step_id: str, s
         }.items()
     ):
         raise ValueError("adapter assessment report/step/range identity mismatch")
-    _items(data.get("items"), report.roots, "decision", {"adapted", "no_change", "deferred", "insufficient_evidence"})
+    choices = {"adapted", "no_change", "deferred", "insufficient_evidence"}
+    if read_only:
+        if data.get("review_mode") != "read_only_gray":
+            raise ValueError("read-only assessment requires explicit read_only_gray review_mode")
+        choices = {"needs_adaptation", "no_change", "deferred", "insufficient_evidence"}
+    elif "review_mode" in data:
+        raise ValueError("gray assessment is not allowed in production adaptation")
+    items = _items(data.get("items"), report.roots, "decision", choices)
+    for item in items:
+        execution = item.get("execution_status")
+        if item["decision"] == "needs_adaptation":
+            if execution != "not_executed_read_only":
+                raise ValueError("needs_adaptation requires not_executed_read_only execution_status")
+        elif execution is not None:
+            raise ValueError("execution_status is reserved for confirmed read-only needs_adaptation")
     return data
 
 
-def qa_context(report: Report, assessment: dict, step_dir: str | Path) -> str:
+def qa_context(report: Report, assessment: dict, step_dir: str | Path, *, read_only: bool = False) -> str:
     return (
         "\n\n## Interface candidate and adapter-decision review\n"
         f"Read the report at {report.path} AND the adapter decisions in "
@@ -145,12 +162,23 @@ def qa_context(report: Report, assessment: dict, step_dir: str | Path) -> str:
         "evidence is an explicit open question, not proof of a break or of safety. If the bounded "
         "review budget runs out, record insufficient_evidence with the source locations still "
         "requiring verification; do not silently omit roots.\n"
-        "Mechanically validated adapter decisions (content still requires independent verification):\n"
+        + (
+            "This caller explicitly selected read_only_gray review. needs_adaptation with "
+            "execution_status=not_executed_read_only means the adapter CONFIRMED a current-step "
+            "incompatibility but intentionally made no repair in this read-only exercise. It does "
+            "not mean insufficient evidence or a completed adaptation. Independently verify it: "
+            "use judgment agree if confirmed, while keeping verdict fail and actionable issues "
+            "for the unfixed code. Agreement assesses the decision's accuracy, not code readiness. "
+            "Use disagree only for an incorrect decision, not merely because a correctly reported "
+            "break remains unfixed. Reserve insufficient_evidence for a genuinely unproven contract.\n"
+            if read_only else ""
+        )
+        + "Mechanically validated adapter decisions (content still requires independent verification):\n"
         + json.dumps(assessment, ensure_ascii=False)
     )
 
 
-def validate_review(review: dict, report: Report, step_id: str) -> None:
+def validate_review(review: dict, report: Report, step_id: str, *, assessment: dict | None = None) -> None:
     if review.get("interface_report_sha256") != report.sha256 or review.get("interface_step_id") != step_id:
         raise ValueError("QA interface report/step identity mismatch")
     usages = _items(
@@ -161,5 +189,9 @@ def validate_review(review: dict, report: Report, step_id: str) -> None:
         raise ValueError("invalid QA verdict/issues")
     if any(u["judgment"] == "disagree" for u in usages) and review["verdict"] != "fail":
         raise ValueError("QA disagreement must not return pass")
+    pending = {item["root_cause_id"] for item in (assessment or {}).get("items", [])
+               if item["decision"] == "needs_adaptation"}
+    if any(u["root_cause_id"] in pending and u["judgment"] == "agree" for u in usages) and review["verdict"] != "fail":
+        raise ValueError("QA-confirmed unadapted code must not return pass")
     if review["verdict"] == "fail" and not review["issues"]:
         raise ValueError("QA fail requires an actionable issue")

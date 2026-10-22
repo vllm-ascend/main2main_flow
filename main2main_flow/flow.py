@@ -502,12 +502,13 @@ class Main2MainFlow:
             "end_commit": step.get("end_commit", self.state.target_commit),
         }
 
-    def _interface_assessment(self, step_id: str, step_dir: str):
+    def _interface_assessment(self, step_id: str, step_dir: str, *, read_only: bool = False):
         step = next((s for s in self.state.steps if s["id"] == step_id), {})
         inputs = self._interface_adapter_inputs(step)
         report = load_report(inputs["interface_report"])
         assessment = load_assessment(
             report, step_dir, step_id, inputs["start_commit"], inputs["end_commit"],
+            read_only=read_only,
         )
         return report, assessment
 
@@ -516,14 +517,17 @@ class Main2MainFlow:
         step_dir: str, release_tag: str,
         upstream_patch_path: str = "",
         qa_session_id: str = "",
+        *, read_only_interface_review: bool = False,
     ) -> tuple[list[str], str]:
         """adapter-qa: independent review of the current diff."""
         diff = subprocess.run(
             ["git", "diff", "HEAD"], cwd=ascend_path,
             capture_output=True, text=True,
         ).stdout.strip()
+        if read_only_interface_review and diff:
+            return ["interface-handoff: read-only gray review requires a committed, unchanged fixture"], qa_session_id
         try:
-            report, assessment = self._interface_assessment(step_id, step_dir)
+            report, assessment = self._interface_assessment(step_id, step_dir, read_only=read_only_interface_review)
         except ValueError as exc:
             return [f"interface-handoff: {exc}"], qa_session_id
         if not diff and assessment is None:
@@ -579,7 +583,7 @@ Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
 DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         if report is not None and assessment is not None:
-            prompt += qa_context(report, assessment, step_dir)
+            prompt += qa_context(report, assessment, step_dir, read_only=read_only_interface_review)
         elif report is not None:
             prompt += (f"\nInterface report: {report.path}; no expanded candidate roots. "
                        "This does not prove complete compatibility.\n")
@@ -607,7 +611,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             try:
                 review = json.loads(review_json.read_text(encoding="utf-8"))
                 if report is not None and assessment is not None:
-                    validate_review(review, report, step_id)
+                    validate_review(review, report, step_id, assessment=assessment)
                 verdict = review.get("verdict", "")
                 issues = review.get("issues", [])
                 if verdict == "pass":
