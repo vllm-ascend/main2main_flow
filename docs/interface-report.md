@@ -13,9 +13,12 @@ The order inside `kickoff` is:
 2. Call the existing `detect()` to select the verified old SHA and target new
    SHA (explicit `--target-commit`, otherwise the local vLLM HEAD).
 3. If there is no upgrade, exit without scanning or calling QA. Otherwise,
-   scan the entire selected range once, before planning or adapting any step.
+   attempt to scan the entire selected range once, before planning or adapting
+   any step.
    The Ascend baseline is the committed HEAD actually supplied to kickoff,
-   including any cumulative adaptations/rebase selected by the caller.
+   including any cumulative adaptations/rebase selected by the caller. If the
+   scan fails or produces an invalid report, record a warning and continue the
+   original planning/adaptation/QA flow without interface evidence.
 4. Plan steps. The adapter and adapter-fix read the same single
    `workspace/interface_scan/qa-review.md`, verify candidates against the
    current upstream/downstream source, and adapt only confirmed current-step
@@ -47,9 +50,20 @@ local Git clones of the exact vLLM target and Ascend baseline instead of moving
 the live checkouts. Tracked content changes must be committed first; the helper
 chmod performed by initialization is allowed. Existing legacy `conf.py` baseline
 resolution remains supported. Missing commits, inconsistent baselines, reverse
-ranges, execution failures and invalid reports stop the flow before adaptation
-and leave `workspace/interface_scan/run-status.json` with `scan: failed`.
-Candidate findings are advisory (`--fail-on never`), not automatic failures.
+ranges, execution failures and invalid reports raise from the scan helper.
+Production kickoff catches ordinary scan exceptions, clears the bound report
+and hash, disables manual/environment report fallback for that run, and
+continues planning, adaptation and QA using the original source/diff analysis.
+The failed or stale Markdown is removed where possible. A warning is emitted
+to the log and Actions annotation, with a job-summary notice; failure status
+is saved as `scan: failed` and `adaptation: continued_without_interface_report`
+in `workspace/interface_scan/run-status.json`. Failure to write diagnostics
+does not block adaptation either. An unavailable scan is never reported as
+clean compatibility. Process cancellation and failures in the original
+detect/plan/adaptation/test stages retain their existing behavior.
+The standalone prepare/scan CLI remains strict and returns failure for invalid
+inputs or execution errors. Candidate findings are advisory (`--fail-on never`),
+not automatic failures.
 
 Only checksum-verified JSON/Markdown/CSV reports are cached under
 `$XDG_CACHE_HOME/main2main_flow/interface-reports` (default
@@ -162,8 +176,9 @@ cannot return `pass`. Production defaults reject gray-mode assessments and
 `needs_adaptation`; gray mode rejects `adapted`. No environment variable enables
 this mode, and it does not enter the production adaptation/test loop.
 
-Missing/duplicate/unknown roots, stale report/step/range identity and empty
-reasons/evidence are mechanical handoff failures. They retry through existing
+For a successfully bound report, missing/duplicate/unknown roots, stale
+report/step/range identity and empty reasons/evidence are mechanical handoff
+failures. They retry through existing
 adapter-fix error feedback and cannot use the semantic QA one-fix escape. A
 malformed handoff cannot reach NPU tests by exhausting that escape. Source
 citations are checked for presence, not semantic truth: model output and even a

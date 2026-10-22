@@ -328,6 +328,47 @@ class HandoffTests(unittest.TestCase):
                 self.assertEqual(qa.call_count, 0 if malformed_adapter else 5)
                 self.assertEqual(check.call_count, 0 if malformed_adapter else 5)
 
+    def test_failed_scan_restores_original_adapter_fix_and_qa_without_assessments(self):
+        self.flow.state.interface_scan_failed = True
+        # Even stale state and an environment override cannot resurrect evidence.
+        self.flow.state.interface_report_sha256 = "stale hash"
+        (self.step_dir / "step_summary.md").unlink()
+        calls, prompts = [], []
+
+        def adapter(inputs, **kwargs):
+            calls.append(inputs)
+            return AdaptResult(is_noop=False, step_summary="- s1: Adapted — source change")
+
+        def qa(prompt, **kwargs):
+            prompts.append(prompt)
+            review = {"verdict": "fail", "issues": [{"file": "vllm_ascend/client.py", "line": 1,
+                                                     "issue": "existing code-review issue"}]} if len(prompts) == 1 else {
+                "verdict": "pass", "issues": []}
+            (self.step_dir / "review.json").write_text(json.dumps(review), encoding="utf-8")
+            return "saved", "qa-session"
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"SKIP_AI_ANALYSIS": "false",
+                                                       "MAIN2MAIN_INTERFACE_REPORT": str(self.path)}))
+            for name, value in (
+                ("WORKSPACE_DIR", self.root), ("run_git", lambda *a, **k: ""),
+                ("run_update", lambda **k: {"files_updated": []}),
+                ("_build_upstream_fix_diff", lambda *a: ""), ("_revert_e2e_test_edits", lambda *a: []),
+                ("run_check", lambda *a, **k: {"all_passed": True, "checks": []}),
+                ("record_pre_ci_attempt", lambda *a: None),
+            ):
+                stack.enter_context(patch("main2main_flow.flow." + name, value))
+            stack.enter_context(patch("main2main_flow.flow.subprocess.run",
+                                      return_value=subprocess.CompletedProcess([], 0, stdout="business diff", stderr="")))
+            stack.enter_context(patch("main2main_flow.flow.run_opencode_adapter", side_effect=adapter))
+            stack.enter_context(patch("main2main_flow.flow.run_opencode_review", side_effect=qa))
+            self.assertTrue(self.flow._ai_analysis())
+        self.assertEqual([c["role"] for c in calls], ["adapter", "adapter-fix"])
+        self.assertTrue(all(c["interface_report"] == "" for c in calls))
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(all("interface-assessment" not in prompt and str(self.path) not in prompt for prompt in prompts))
+        self.assertEqual(json.loads((self.step_dir / "review.json").read_text())["verdict"], "pass")
+
 
 if __name__ == "__main__":
     unittest.main()

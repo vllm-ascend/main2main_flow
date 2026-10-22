@@ -75,8 +75,8 @@ def scan_for_flow(
 ) -> Path:
     """Scan detect()'s exact range once before planning; return one QA Markdown.
 
-    Findings are advisory. Input/engine/report failures propagate to kickoff
-    before any adapter call; a failed scan cannot silently become a clean run.
+    Findings are advisory. Input/engine/report failures are raised to the caller;
+    kickoff records them and continues without evidence, never as a clean scan.
     """
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)

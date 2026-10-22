@@ -3,6 +3,7 @@
 
 import json
 import os
+from pathlib import Path
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from main2main_flow.interface_report import runtime
 from main2main_flow.interface_report.handoff import load_report
 from main2main_flow.interface_report.run import git
+from main2main_flow.scripts.utils.utils import INTERFACE_QA_REPORT_FILE, INTERFACE_RUN_DIR, INTERFACE_STATUS_FILE
 import test_interface_scan as fixtures
 
 with patch("shutil.which", return_value="opencode"):
@@ -100,6 +102,8 @@ class RuntimeTests(unittest.TestCase):
 
     def test_original_qa_reuses_auto_report_across_retries(self):
         flow = Main2MainFlow()
+        # A fresh analyze call clears a prior run's unavailable-scan state.
+        flow.state.interface_scan_failed = True
         flow.state.vllm_path, flow.state.vllm_ascend_path = str(self.up), str(self.down)
         flow.state.target_commit = self.new
         workspace = self.root / "workspace"
@@ -137,6 +141,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(flow.analyze_commit_and_plan_step(), "HasCommit")
             self.assertEqual(calls, ["scan", "plan"])
             scanner.assert_called_once()
+            self.assertFalse(flow.state.interface_scan_failed)
         self.assertIn("## Main2Main step plan", summary_file.read_text(encoding="utf-8"))
 
         prompts = []
@@ -182,7 +187,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(qa.call_count, 3)
         self.assertTrue(all(flow.state.interface_report in prompt for prompt in prompts))
 
-    def test_no_change_skips_scan_and_scan_failure_stops_before_plan(self):
+    def test_no_change_skips_scan(self):
         workspace = self.root / "workspace"
         workspace.mkdir()
         flow = Main2MainFlow()
@@ -195,16 +200,107 @@ class RuntimeTests(unittest.TestCase):
         ):
             self.assertEqual(flow.analyze_commit_and_plan_step(), "HasNoCommit")
             scanner.assert_not_called()
+
+    def test_scan_failures_continue_planning_without_stale_report(self):
+        for failure in (ValueError("bad scan input"), subprocess.TimeoutExpired("engine", 2400),
+                        RuntimeError("engine crashed"), None):
+            with self.subTest(failure=failure):
+                workspace = self.root / "workspace"
+                workspace.mkdir(exist_ok=True)
+                scan_dir = workspace / INTERFACE_RUN_DIR
+                scan_dir.mkdir(exist_ok=True)
+                stale = scan_dir / INTERFACE_QA_REPORT_FILE
+                stale.write_text("## abcdef0123456789 — stale\n", encoding="utf-8")
+                flow = Main2MainFlow(vllm_path=str(self.up), vllm_ascend_path=str(self.down))
+                flow.state.interface_report = str(stale)
+                flow.state.interface_report_sha256 = "stale hash"
+                step = dict(id="step-1", start_commit=self.old, end_commit=self.new,
+                            upstream_patch="diff", changed_files="vllm_ascend/client.py",
+                            index=1, commit_count=1, effective_lines=2,
+                            commits=[{"sha": self.new, "date": "2026-01-01"}])
+                summary = self.root / "job-summary.md"
+
+                def scan(*args):
+                    if failure is not None:
+                        raise failure
+                    # Successful execution with an invalid final handoff report
+                    # is unavailable evidence too, not a blocker for adaptation.
+                    stale.write_text("## abcdef0123456789 — a\n## abcdef0123456789 — b\n", encoding="utf-8")
+                    return stale
+
+                with (
+                    patch.dict(os.environ, {"MAIN2MAIN_INTERFACE_REPORT": str(self.root / "missing.md"),
+                                            "GITHUB_STEP_SUMMARY": str(summary)}),
+                    patch("main2main_flow.flow.WORKSPACE_DIR", workspace),
+                    patch("main2main_flow.flow.scan_for_flow", side_effect=scan) as scanner,
+                    patch("main2main_flow.flow.run_plan", return_value={"steps": [step], "total_commits": 1}) as planner,
+                    patch("main2main_flow.flow.compute_base_ut_baseline"),
+                    patch("main2main_flow.flow.run_git"),
+                ):
+                    self.assertEqual(flow.analyze_commit_and_plan_step(), "HasCommit")
+                    scanner.assert_called_once()
+                    planner.assert_called_once()
+                    self.assertEqual(flow.state.steps, [step])
+                    self.assertEqual(flow.state.total_steps, 1)
+                    self.assertTrue(flow.state.interface_scan_failed)
+                    self.assertEqual(flow.state.interface_report, "")
+                    self.assertEqual(flow.state.interface_report_sha256, "")
+                    self.assertEqual(flow._interface_adapter_inputs(step)["interface_report"], "")
+                    self.assertEqual(flow._interface_assessment("step-1", workspace / "steps/step-1"), (None, None))
+                    self.assertFalse(stale.exists())
+                    status = json.loads((scan_dir / INTERFACE_STATUS_FILE).read_text(encoding="utf-8"))
+                    self.assertEqual(status["scan"], "failed")
+                    self.assertEqual(status["adaptation"], "continued_without_interface_report")
+                    self.assertIn("This is not a clean interface scan", summary.read_text(encoding="utf-8"))
+                    self.assertTrue((workspace / "steps/step-1/upstream.patch").exists())
+
+    def test_scan_diagnostic_write_failures_do_not_stop_planning(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        flow = Main2MainFlow(vllm_path=str(self.up), vllm_ascend_path=str(self.down))
+        result = {"base_commit": self.old, "target_commit": self.new, "compat_tag": ""}
+        original_write = Path.write_text
+
+        def write(path, *args, **kwargs):
+            if INTERFACE_RUN_DIR in path.parts:
+                raise PermissionError("diagnostics unavailable")
+            return original_write(path, *args, **kwargs)
+
+        with (
+            patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(self.root / "missing-parent/summary.md")}),
+            patch("main2main_flow.flow.WORKSPACE_DIR", workspace),
+            patch("main2main_flow.flow.detect", return_value=(result, True)),
+            patch("main2main_flow.flow.scan_for_flow", side_effect=PermissionError("scan unavailable")),
+            patch("main2main_flow.flow.run_plan", return_value={"steps": [], "total_commits": 1}) as planner,
+            patch.object(Path, "unlink", side_effect=PermissionError("cleanup unavailable")),
+            patch.object(Path, "write_text", write),
+        ):
+            self.assertEqual(flow.analyze_commit_and_plan_step(), "HasNoCommit")
+            planner.assert_called_once()
+            self.assertTrue(flow.state.interface_scan_failed)
+
+    def test_original_detect_and_plan_failures_still_propagate(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        flow = Main2MainFlow(vllm_path=str(self.up), vllm_ascend_path=str(self.down))
+        with (
+            patch("main2main_flow.flow.WORKSPACE_DIR", workspace),
+            patch("main2main_flow.flow.detect", side_effect=ValueError("original detect failed")),
+            patch("main2main_flow.flow.scan_for_flow") as scanner,
+            patch("main2main_flow.flow.run_plan") as planner,
+        ):
+            with self.assertRaisesRegex(ValueError, "original detect failed"):
+                flow.analyze_commit_and_plan_step()
+            scanner.assert_not_called()
+            planner.assert_not_called()
         with (
             patch("main2main_flow.flow.WORKSPACE_DIR", workspace),
             patch("main2main_flow.flow.scan_for_flow", side_effect=ValueError("scan failed")),
-            patch("main2main_flow.flow.run_plan") as planner,
-            patch.object(flow, "process_steps") as adapter,
+            patch("main2main_flow.flow.run_plan", side_effect=ValueError("original plan failed")) as planner,
         ):
-            with self.assertRaisesRegex(ValueError, "scan failed"):
+            with self.assertRaisesRegex(ValueError, "original plan failed"):
                 flow.analyze_commit_and_plan_step()
-            planner.assert_not_called()
-            adapter.assert_not_called()
+            planner.assert_called_once()
 
 
 if __name__ == "__main__":

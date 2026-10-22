@@ -52,6 +52,7 @@ from main2main_flow.scripts.utils.utils import (
     EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE, ADAPTER_QA_FILE,
     FINAL_CODE_STRUCTURE_GUIDE_FILE, GENERATED_ARTIFACT_DIRS, run_git, ts_print,
     GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE, FINAL_STATUS_FILE, INTERFACE_RUN_DIR,
+    INTERFACE_QA_REPORT_FILE, INTERFACE_STATUS_FILE,
 )
 
 # Files that are tracking/metadata, not real adaptation changes — excluded
@@ -422,6 +423,8 @@ class Main2MainState(BaseModel):
     # One pre-adaptation report for the full range, reused by every QA retry.
     interface_report: str = ""
     interface_report_sha256: str = ""
+    # An unavailable automatic scan must not fall back to an unrelated report.
+    interface_scan_failed: bool = False
 
     steps: list = []
     release_tag: str = ""
@@ -492,15 +495,61 @@ class Main2MainFlow:
 
     def _interface_adapter_inputs(self, step: dict) -> dict:
         """Same report/scope for initial adaptation, fixes and independent QA."""
-        if self.state.interface_report and self.state.interface_report_sha256:
+        path = "" if self.state.interface_scan_failed else (
+            self.state.interface_report or os.environ.get("MAIN2MAIN_INTERFACE_REPORT", ""))
+        if path and self.state.interface_report and self.state.interface_report_sha256:
             report = load_report(self.state.interface_report)
             if report.sha256 != self.state.interface_report_sha256:
                 raise ValueError("flow-bound interface report changed after scanning")
         return {
-            "interface_report": self.state.interface_report or os.environ.get("MAIN2MAIN_INTERFACE_REPORT", ""),
+            "interface_report": path,
             "start_commit": step.get("start_commit", self.state.base_commit),
             "end_commit": step.get("end_commit", self.state.target_commit),
         }
+
+    def _scan_interface_report(self, vllm_path: Path, ascend_path: Path) -> None:
+        """Best-effort pre-adaptation evidence; failure preserves the original flow."""
+        output = WORKSPACE_DIR / INTERFACE_RUN_DIR
+        try:
+            path = scan_for_flow(
+                vllm_path, ascend_path, self.state.base_commit, self.state.target_commit, output,
+            )
+            report = load_report(str(path))
+            self.state.interface_report = str(report.path)
+            self.state.interface_report_sha256 = report.sha256
+        except Exception as exc:
+            self.state.interface_report = ""
+            self.state.interface_report_sha256 = ""
+            self.state.interface_scan_failed = True
+            error = f"{type(exc).__name__}: {exc}"
+            warning = "Interface scan unavailable; continuing original adaptation and QA without a report. " + error
+            ts_print("[interface-scan] WARNING: " + warning)
+            annotation = warning.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print("::warning::" + annotation, flush=True)
+            # A partially written or preceding report must never become input.
+            # Diagnostics are best effort too: a full/read-only disk cannot
+            # turn an advisory scan into a new blocker for adaptation.
+            try:
+                (output / INTERFACE_QA_REPORT_FILE).unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                ts_print(f"[interface-scan] WARNING: cannot remove invalid report: {cleanup_error}")
+            try:
+                output.mkdir(parents=True, exist_ok=True)
+                (output / INTERFACE_STATUS_FILE).write_text(json.dumps({
+                    "scan": "failed", "qa": "disabled", "error": error,
+                    "adaptation": "continued_without_interface_report",
+                }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            except OSError as status_error:
+                ts_print(f"[interface-scan] WARNING: cannot save failure status: {status_error}")
+            summary = os.environ.get("GITHUB_STEP_SUMMARY")
+            if summary:
+                try:
+                    with open(summary, "a", encoding="utf-8") as stream:
+                        stream.write("\n## Interface scan unavailable\n\n"
+                                     "Scan failed; adaptation and QA continue using the original source/diff analysis. "
+                                     "This is not a clean interface scan. See the interface-scan warning for details.\n")
+                except OSError as summary_error:
+                    ts_print(f"[interface-scan] WARNING: cannot append job summary: {summary_error}")
 
     def _interface_assessment(self, step_id: str, step_dir: str, *, read_only: bool = False):
         step = next((s for s in self.state.steps if s["id"] == step_id), {})
@@ -1048,6 +1097,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         self.state.target_commit = result["target_commit"]
         self.state.interface_report = ""
         self.state.interface_report_sha256 = ""
+        self.state.interface_scan_failed = False
 
         (WORKSPACE_DIR / DETECT_FILE).write_text(
             json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -1061,11 +1111,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         # The existing kickoff job owns detection too. This is deliberately
         # outside adaptation/QA retry loops and uses the exact detected range.
-        self.state.interface_report = str(scan_for_flow(
-            vllm_path, vllm_ascend_path, result["base_commit"], result["target_commit"],
-            WORKSPACE_DIR / INTERFACE_RUN_DIR,
-        ))
-        self.state.interface_report_sha256 = load_report(self.state.interface_report).sha256
+        self._scan_interface_report(vllm_path, vllm_ascend_path)
 
         # generate steps.json in workspace
         plan = run_plan(vllm_path, result["base_commit"], result["target_commit"],
