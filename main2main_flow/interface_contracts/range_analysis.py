@@ -1357,6 +1357,16 @@ class GitSnapshot:
             )
         if not class_node.bases:
             return _QualifiedBinding(resolved.file, actual_owner, member, None, "missing")
+        if len(class_node.bases) == 1:
+            # A known member on the sole base wins before that base's parents,
+            # even when a more distant ancestor is opaque. Preserve this proof
+            # rather than demanding a complete MRO beyond the selected owner.
+            base = self._base_reference(resolved.file, class_node.bases[0])
+            if base == "builtins.object" or base in STDLIB_STRUCTURAL_BASES:
+                return _QualifiedBinding(resolved.file, actual_owner, member, None, "missing")
+            if base is None or not base.startswith(self._reference_prefixes):
+                return _QualifiedBinding(resolved.file, actual_owner, member, None, "unknown", _node_fingerprint(class_node))
+            return self._effective_member(base, member, seen | {receiver_type}, generated_storage=generated_storage)
         mro = self._linearized_mro(receiver_type, generated_storage=generated_storage)
         if not mro.complete:
             return _QualifiedBinding(

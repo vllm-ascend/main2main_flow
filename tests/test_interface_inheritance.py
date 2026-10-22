@@ -194,6 +194,23 @@ class Connector(Shadow, Base):
         self.assertEqual(reads, {})
         self.assertEqual(endpoint.owner, "Shadow")
 
+    def test_known_single_base_member_survives_opaque_distant_ancestor(self):
+        self.write(self.up, "vllm/connector.py", """class Base(Opaque):
+    def value(self):
+        return self._role
+class Connector(Base):
+    pass
+""")
+        old = self.commit(self.up)
+        self.write(self.up, "vllm/unrelated.py", "changed = True\n")
+        new = self.commit(self.up)
+        for sha in (old, new):
+            snapshot = self.snapshot(sha)
+            self.assertFalse(snapshot._linearized_mro("vllm.connector.Connector").complete)
+            reads, endpoint = _snapshot_inherited_reads(snapshot, "vllm.connector.Connector", "value")
+            self.assertEqual(endpoint.owner, "Base")
+            self.assertEqual(set(reads), {"_role"})
+
 
 if __name__ == "__main__":
     unittest.main()
