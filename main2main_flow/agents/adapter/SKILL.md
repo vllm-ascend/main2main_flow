@@ -433,6 +433,9 @@ candidate evidence. Verify it against the current step's upstream source and
 actual downstream code before deciding whether to adapt. A no-op may still
 require a detailed interface assessment for independent QA; in that case the
 one-line no-op summary below is only the header, not the entire output.
+Interface structure checks only warn. They do not add a repair attempt or stop
+adaptation. Keep useful reasons and source references in the existing summary;
+QA reviews the report and source even if the structured block is incomplete.
 
 ## Output
 

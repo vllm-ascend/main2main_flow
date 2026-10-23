@@ -96,7 +96,7 @@ class HandoffTests(unittest.TestCase):
             issues, _ = self.flow._run_adapter_qa(**self.args)
         self.assertIn("positional caller remains", issues[0])
 
-    def test_missing_stale_or_incomplete_adapter_decisions_stop_before_qa(self):
+    def test_missing_stale_or_incomplete_adapter_decisions_warn_and_reach_qa(self):
         cases = []
         for field in ("report_sha256", "step_id", "start_commit", "end_commit"):
             data = copy.deepcopy(self.assessment)
@@ -113,13 +113,24 @@ class HandoffTests(unittest.TestCase):
                 self.write_assessment(data)
                 with self.assertRaises(ValueError):
                     load_assessment(self.report, self.step_dir, "s1", "a" * 40, "b" * 40)
+                with (
+                    patch("main2main_flow.flow.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="")),
+                    patch("main2main_flow.flow.warn_handoff") as warning,
+                    patch("main2main_flow.flow.run_opencode_review", side_effect=self.model) as model,
+                ):
+                    self.assertEqual(self.flow._run_adapter_qa(**self.args), ([], "independent-qa"))
+                warning.assert_called_once()
+                model.assert_called_once()
+                self.assertIn("QA must review", self.prompt)
+                self.assertIn(self.report.roots[0], self.prompt)
+                self.assertIn(str(self.step_dir / "step_summary.md"), self.prompt)
         (self.step_dir / "step_summary.md").unlink()
         with (
             patch("main2main_flow.flow.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="")),
-            patch("main2main_flow.flow.run_opencode_review") as model,
+            patch("main2main_flow.flow.run_opencode_review", side_effect=self.model) as model,
         ):
-            self.assertTrue(self.flow._run_adapter_qa(**self.args)[0][0].startswith("interface-handoff:"))
-            model.assert_not_called()
+            self.assertEqual(self.flow._run_adapter_qa(**self.args), ([], "independent-qa"))
+            model.assert_called_once()
 
     def test_qa_missing_roots_stale_identity_and_false_pass_are_rejected(self):
         for field, value in (("interface_report_sha256", "old"), ("interface_step_id", "old"),
@@ -144,8 +155,7 @@ class HandoffTests(unittest.TestCase):
             self.assertIn("no_change", prompt)
             self.assertIn("actual downstream", prompt)
         self.path.unlink()
-        with self.assertRaises(ValueError):
-            adapter_context(str(self.path), "s1", "a", "b")
+        self.assertIn("existing source/diff analysis", adapter_context(str(self.path), "s1", "a", "b"))
 
     def test_zero_roots_empty_diff_preserves_no_model_fast_path(self):
         self.path.write_text("# Report\nNo expanded candidates\n", encoding="utf-8")
@@ -156,11 +166,14 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual(self.flow._run_adapter_qa(**self.args), ([], ""))
             model.assert_not_called()
 
-    def test_bound_report_cannot_be_replaced_after_scan(self):
+    def test_replaced_report_is_disabled_without_blocking_or_environment_fallback(self):
         self.flow.state.interface_report_sha256 = self.report.sha256
         self.path.write_text("# replaced report", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "changed after scanning"):
-            self.flow._interface_adapter_inputs(self.step)
+        with patch.dict(os.environ, {"MAIN2MAIN_INTERFACE_REPORT": str(self.path)}):
+            self.assertEqual(self.flow._interface_adapter_inputs(self.step)["interface_report"], "")
+            self.assertEqual(self.flow._interface_adapter_inputs(self.step)["interface_report"], "")
+        self.assertTrue(self.flow.state.interface_scan_failed)
+        self.assertEqual(self.flow.state.interface_report_sha256, "")
 
     def test_stale_review_is_removed_and_no_output_does_not_pass(self):
         path = self.step_dir / "review.json"
@@ -170,7 +183,7 @@ class HandoffTests(unittest.TestCase):
             patch("main2main_flow.flow.run_opencode_review", return_value=("", "failed-qa")),
         ):
             issues, _ = self.flow._run_adapter_qa(**self.args)
-        self.assertTrue(issues[0].startswith("interface-handoff:"))
+        self.assertTrue(issues[0].startswith("critic:"))
         self.assertFalse(path.exists())
 
     def test_deferred_and_insufficient_evidence_are_explicit_supported_outcomes(self):
@@ -236,16 +249,17 @@ class HandoffTests(unittest.TestCase):
         with (
             patch("main2main_flow.flow.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="")),
             patch("main2main_flow.flow.run_opencode_review", side_effect=self.model) as model,
+            patch("main2main_flow.flow.warn_handoff") as warning,
         ):
             issues, _ = self.flow._run_adapter_qa(**self.args)
-            self.assertTrue(issues[0].startswith("interface-handoff:"))
-            model.assert_not_called()
+            self.assertIn("confirmed missing argument", issues[0])
+            warning.assert_called_once()
             issues, session = self.flow._run_adapter_qa(**self.args, read_only_interface_review=True)
         self.assertEqual(session, "independent-qa")
         self.assertIn("confirmed missing argument", issues[0])
         self.assertIn("not_executed_read_only", self.prompt)
         self.assertIn("Agreement assesses the decision's accuracy, not code readiness", self.prompt)
-        model.assert_called_once()
+        self.assertEqual(model.call_count, 2)
 
     def test_gray_review_rejects_dirty_fixture_before_model(self):
         self.gray_assessment()
@@ -257,7 +271,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("committed, unchanged fixture", issues[0])
         model.assert_not_called()
 
-    def test_production_loop_passes_report_to_adapter_and_fix_and_rechecks_noop(self):
+    def test_production_loop_passes_report_and_missing_summary_to_qa_without_extra_fix(self):
         # Even an empty per-step patch cannot bypass pending candidate review.
         self.step["upstream_patch"] = ""
         calls = []
@@ -286,15 +300,15 @@ class HandoffTests(unittest.TestCase):
             stack.enter_context(patch("main2main_flow.flow.run_opencode_adapter", side_effect=adapter))
             qa = stack.enter_context(patch("main2main_flow.flow.run_opencode_review", side_effect=self.model))
             self.assertTrue(self.flow._ai_analysis())
-        self.assertEqual([c["role"] for c in calls], ["adapter", "adapter-fix"])
+        self.assertEqual([c["role"] for c in calls], ["adapter"])
         self.assertTrue(all(c["interface_report"] == str(self.path) for c in calls))
         self.assertTrue(all(c["end_commit"] == "b" * 40 for c in calls))
         qa.assert_called_once()
         self.assertTrue(self.flow.state.last_step_is_noop)
 
-    def test_invalid_handoffs_cannot_use_semantic_qa_escape_after_two_attempts(self):
-        for malformed_adapter in (True, False):
-            with self.subTest(malformed_adapter=malformed_adapter), ExitStack() as stack:
+    def test_advisory_handoffs_preserve_original_qa_retry_policy(self):
+        for malformed_adapter, qa_fail in ((True, False), (False, False), (True, True), (False, True)):
+            with self.subTest(malformed_adapter=malformed_adapter, qa_fail=qa_fail), ExitStack() as stack:
                 self.flow.state.session_id = ""
                 self.flow.state.test_errors = []
 
@@ -305,7 +319,10 @@ class HandoffTests(unittest.TestCase):
                     return AdaptResult(is_noop=True, step_summary="noop")
 
                 def model(prompt, **kwargs):
-                    (self.step_dir / "review.json").write_text('{"verdict":"pass","issues":[]}', encoding="utf-8")
+                    data = {"verdict": "fail", "issues": [{"file": "vllm_ascend/client.py", "line": 3,
+                                                           "issue": "original QA code issue"}]} if qa_fail else {
+                        "verdict": "pass", "issues": []}
+                    (self.step_dir / "review.json").write_text(json.dumps(data), encoding="utf-8")
                     return "saved", "qa"
 
                 stack.enter_context(patch.dict(os.environ, {"SKIP_AI_ANALYSIS": "false"}))
@@ -323,10 +340,13 @@ class HandoffTests(unittest.TestCase):
                 check = stack.enter_context(patch("main2main_flow.flow.run_check",
                                                   return_value={"all_passed": True, "checks": []}))
                 qa = stack.enter_context(patch("main2main_flow.flow.run_opencode_review", side_effect=model))
-                self.assertFalse(self.flow._ai_analysis())
-                self.assertEqual(adapters.call_count, 5)
-                self.assertEqual(qa.call_count, 0 if malformed_adapter else 5)
-                self.assertEqual(check.call_count, 0 if malformed_adapter else 5)
+                warning = stack.enter_context(patch("main2main_flow.flow.warn_handoff"))
+                self.assertTrue(self.flow._ai_analysis())
+                expected = 2 if qa_fail else 1
+                self.assertEqual(adapters.call_count, expected)
+                self.assertEqual(qa.call_count, expected)
+                self.assertEqual(check.call_count, expected)
+                self.assertTrue(warning.called)
 
     def test_failed_scan_restores_original_adapter_fix_and_qa_without_assessments(self):
         self.flow.state.interface_scan_failed = True
@@ -368,6 +388,97 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(len(prompts), 2)
         self.assertTrue(all("interface-assessment" not in prompt and str(self.path) not in prompt for prompt in prompts))
         self.assertEqual(json.loads((self.step_dir / "review.json").read_text())["verdict"], "pass")
+
+    def test_qa_extra_field_warnings_preserve_original_pass_and_code_issues(self):
+        for fail, extra in ((False, {}), (False, {"interface_report_usage": "invalid"}),
+                            (False, {"interface_report_sha256": "stale"}), (True, {})):
+            with self.subTest(fail=fail, extra=extra):
+                self.review = {"verdict": "fail" if fail else "pass", "issues": [
+                    {"file": "vllm_ascend/client.py", "line": 3, "issue": "actual code bug"}
+                ] if fail else [], **extra}
+                with (
+                    patch("main2main_flow.flow.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="")),
+                    patch("main2main_flow.flow.run_opencode_review", side_effect=self.model) as model,
+                    patch("main2main_flow.flow.warn_handoff") as warning,
+                ):
+                    issues, _ = self.flow._run_adapter_qa(**self.args)
+                model.assert_called_once()
+                warning.assert_called_once()
+                self.assertEqual(bool(issues), fail)
+                if fail:
+                    self.assertIn("actual code bug", issues[0])
+
+    def test_original_missing_or_unparseable_qa_output_keeps_critic_error_path(self):
+        for contents, output in ((None, "saved"), ("{", "saved"), (None, "")):
+            with self.subTest(contents=contents, output=output):
+                def model(prompt, **kwargs):
+                    if contents is not None:
+                        (self.step_dir / "review.json").write_text(contents, encoding="utf-8")
+                    return output, "qa-session"
+
+                with (
+                    patch("main2main_flow.flow.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="")),
+                    patch("main2main_flow.flow.run_opencode_review", side_effect=model),
+                ):
+                    issues, _ = self.flow._run_adapter_qa(**self.args)
+                self.assertTrue(issues[0].startswith("critic:"))
+
+    def test_plain_summary_reaches_qa_with_report_roots_and_warning(self):
+        (self.step_dir / "step_summary.md").write_text(
+            "- s1: No-op — checked actual keyword caller vllm_ascend/caller.py:3\n", encoding="utf-8")
+        with (
+            patch("main2main_flow.flow.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="")),
+            patch("main2main_flow.flow.run_opencode_review", side_effect=self.model) as model,
+            patch("main2main_flow.flow.warn_handoff") as warning,
+        ):
+            self.assertEqual(self.flow._run_adapter_qa(**self.args), ([], "independent-qa"))
+        model.assert_called_once()
+        warning.assert_called_once()
+        self.assertIn(str(self.path), self.prompt)
+        self.assertIn(str(self.step_dir / "step_summary.md"), self.prompt)
+        self.assertIn(self.report.roots[0], self.prompt)
+        self.assertIn("expected one interface-assessment", self.prompt)
+
+    def test_format_warnings_do_not_block_e2e_or_its_original_qa_fix_cycle(self):
+        events = []
+
+        def adapter(inputs, **kwargs):
+            events.append(inputs["role"])
+            (self.step_dir / "step_summary.md").write_text("- s1: Adapted — source repair\n", encoding="utf-8")
+            return AdaptResult(is_noop=False, step_summary="- s1: Adapted — source repair")
+
+        def check(*args, **kwargs):
+            events.append("pre-ci")
+            return {"all_passed": True, "checks": []}
+
+        def qa(prompt, **kwargs):
+            events.append("qa")
+            (self.step_dir / "review.json").write_text('{"verdict":"pass","issues":[]}', encoding="utf-8")
+            return "saved", "qa-session"
+
+        def e2e():
+            events.append("e2e")
+            self.flow.state.test_errors = ["actual-e2e-error.log"]
+            return events.count("e2e") == 2
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"SKIP_AI_ANALYSIS": "false"}))
+            for name, value in (
+                ("WORKSPACE_DIR", self.root), ("run_git", lambda *a, **k: ""),
+                ("run_update", lambda **k: {"files_updated": []}),
+                ("_build_upstream_fix_diff", lambda *a: ""), ("_revert_e2e_test_edits", lambda *a: []),
+                ("record_pre_ci_attempt", lambda *a: None), ("submit_step_lesson", lambda *a: None),
+                ("run_opencode_adapter", adapter), ("run_opencode_review", qa), ("run_check", check),
+            ):
+                stack.enter_context(patch("main2main_flow.flow." + name, value))
+            stack.enter_context(patch("main2main_flow.flow.subprocess.run",
+                                      return_value=subprocess.CompletedProcess([], 0, stdout="business diff", stderr="")))
+            stack.enter_context(patch.object(self.flow, "_run_e2e_test", side_effect=e2e))
+            stack.enter_context(patch.object(self.flow, "_working_tree_diff_sha", side_effect=lambda *a: str(len(events))))
+            stack.enter_context(patch("main2main_flow.flow.warn_handoff"))
+            self.flow.process_steps()
+        self.assertEqual(events, ["adapter", "pre-ci", "qa", "e2e", "adapter-fix", "pre-ci", "qa", "e2e"])
+        self.assertEqual(self.flow.state.current_step, 1)
 
 
 if __name__ == "__main__":

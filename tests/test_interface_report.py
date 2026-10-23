@@ -60,18 +60,24 @@ class InterfaceReportTests(unittest.TestCase):
             self.assertEqual(self.flow._run_adapter_qa(**self.args), ([], "qa-session"))
         self.assertNotIn("Interface detection reference", self.prompt)
 
-    def test_invalid_reports_stop_before_model(self):
+    def test_invalid_reports_warn_and_preserve_original_diff_review(self):
         for contents in (b"", b" " * 1_000_001, b"\xff"):
             with self.subTest(contents=contents[:1]):
                 self.report.write_bytes(contents)
-                with patch("main2main_flow.flow.run_opencode_review") as model:
-                    issues, _ = self.flow._run_adapter_qa(**self.args)
-                    self.assertTrue(issues)
-                    model.assert_not_called()
+                self.flow.state.interface_scan_failed = False
+                with (
+                    patch("main2main_flow.flow.run_opencode_review", side_effect=self.review) as model,
+                    patch("main2main_flow.flow.warn_handoff") as warning,
+                ):
+                    self.assertEqual(self.flow._run_adapter_qa(**self.args), ([], "qa-session"))
+                    model.assert_called_once()
+                    warning.assert_called_once()
+                self.assertNotIn(str(self.report), self.prompt)
         self.report.unlink()
-        with patch("main2main_flow.flow.run_opencode_review") as model:
-            self.assertTrue(self.flow._run_adapter_qa(**self.args)[0])
-            model.assert_not_called()
+        self.flow.state.interface_scan_failed = False
+        with patch("main2main_flow.flow.run_opencode_review", side_effect=self.review) as model:
+            self.assertEqual(self.flow._run_adapter_qa(**self.args), ([], "qa-session"))
+            model.assert_called_once()
 
     def test_empty_diff_skips_review(self):
         os.environ.pop("MAIN2MAIN_INTERFACE_REPORT")

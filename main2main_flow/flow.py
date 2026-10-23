@@ -14,7 +14,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from main2main_flow.interface_report.runtime import scan_for_flow
-from main2main_flow.interface_report.handoff import load_report, load_assessment, qa_context, validate_review
+from main2main_flow.interface_report.handoff import load_report, load_assessment, qa_context, validate_review, warn_handoff
 from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter, run_opencode_review
 from main2main_flow.scripts.utils import ci_config_guard
 from main2main_flow.scripts.utils.detect_commits import detect
@@ -493,16 +493,29 @@ class Main2MainFlow:
     def __init__(self, **kwargs):
         self.state = Main2MainState(**kwargs)
 
-    def _interface_adapter_inputs(self, step: dict) -> dict:
-        """Same report/scope for initial adaptation, fixes and independent QA."""
+    def _load_interface_report(self):
+        """Disable unusable evidence instead of interrupting the existing flow."""
         path = "" if self.state.interface_scan_failed else (
             self.state.interface_report or os.environ.get("MAIN2MAIN_INTERFACE_REPORT", ""))
-        if path and self.state.interface_report and self.state.interface_report_sha256:
-            report = load_report(self.state.interface_report)
-            if report.sha256 != self.state.interface_report_sha256:
+        try:
+            report = load_report(path)
+            if report and self.state.interface_report and self.state.interface_report_sha256 and (
+                report.sha256 != self.state.interface_report_sha256
+            ):
                 raise ValueError("flow-bound interface report changed after scanning")
+            return report
+        except ValueError as exc:
+            warn_handoff(f"Report disabled; continuing original source/diff analysis. {exc}")
+            self.state.interface_report = ""
+            self.state.interface_report_sha256 = ""
+            self.state.interface_scan_failed = True
+            return None
+
+    def _interface_adapter_inputs(self, step: dict) -> dict:
+        """Same report/scope for initial adaptation, fixes and independent QA."""
+        report = self._load_interface_report()
         return {
-            "interface_report": path,
+            "interface_report": str(report.path) if report else "",
             "start_commit": step.get("start_commit", self.state.base_commit),
             "end_commit": step.get("end_commit", self.state.target_commit),
         }
@@ -551,14 +564,23 @@ class Main2MainFlow:
                 except OSError as summary_error:
                     ts_print(f"[interface-scan] WARNING: cannot append job summary: {summary_error}")
 
-    def _interface_assessment(self, step_id: str, step_dir: str, *, read_only: bool = False):
+    def _interface_assessment(
+        self, step_id: str, step_dir: str, *, read_only: bool = False, warnings: list[str] | None = None,
+    ):
         step = next((s for s in self.state.steps if s["id"] == step_id), {})
-        inputs = self._interface_adapter_inputs(step)
-        report = load_report(inputs["interface_report"])
-        assessment = load_assessment(
-            report, step_dir, step_id, inputs["start_commit"], inputs["end_commit"],
-            read_only=read_only,
-        )
+        report = self._load_interface_report()
+        try:
+            assessment = load_assessment(
+                report, step_dir, step_id, step.get("start_commit", self.state.base_commit),
+                step.get("end_commit", self.state.target_commit),
+                read_only=read_only,
+            )
+        except ValueError as exc:
+            detail = f"Adapter summary: {exc}. QA must review the report, summary prose and actual source."
+            warn_handoff(detail)
+            if warnings is not None:
+                warnings.append(detail)
+            assessment = None
         return report, assessment
 
     def _run_adapter_qa(
@@ -575,24 +597,20 @@ class Main2MainFlow:
         ).stdout.strip()
         if read_only_interface_review and diff:
             return ["interface-handoff: read-only gray review requires a committed, unchanged fixture"], qa_session_id
-        try:
-            report, assessment = self._interface_assessment(step_id, step_dir, read_only=read_only_interface_review)
-        except ValueError as exc:
-            return [f"interface-handoff: {exc}"], qa_session_id
-        if not diff and assessment is None:
+        handoff_warnings: list[str] = []
+        report, assessment = self._interface_assessment(
+            step_id, step_dir, read_only=read_only_interface_review, warnings=handoff_warnings,
+        )
+        if not diff and not (report and report.roots):
             return [], qa_session_id
 
         lessons_path = Path(__file__).parent / "agents" / "adapter-qa" / "reference" / "review-lessons.md"
         if not lessons_path.exists():
-            if assessment is not None:
-                return ["interface-handoff: QA review checklist missing"], qa_session_id
             return [], qa_session_id
         qa_template_path = Path(__file__).parent / "agents" / "adapter-qa" / "SKILL.md"
         qa_template = ""
         if qa_template_path.exists():
             qa_template = qa_template_path.read_text(encoding="utf-8")
-        elif assessment is not None:
-            return ["interface-handoff: QA prompt template missing"], qa_session_id
 
         lessons = lessons_path.read_text(encoding="utf-8")
         # Inject only the checklist skeleton (section/subsection headings) —
@@ -631,8 +649,11 @@ class Main2MainFlow:
 Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
 DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
-        if report is not None and assessment is not None:
-            prompt += qa_context(report, assessment, step_dir, read_only=read_only_interface_review)
+        if report is not None and report.roots:
+            prompt += qa_context(
+                report, assessment, step_dir, read_only=read_only_interface_review,
+                step_id=step_id, warnings=handoff_warnings,
+            )
         elif report is not None:
             prompt += (f"\nInterface report: {report.path}; no expanded candidate roots. "
                        "This does not prove complete compatibility.\n")
@@ -651,16 +672,17 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         )
         if not output_text.strip():
             ts_print(f"[adapter-qa] {step_id}: opencode produced no output")
-            if assessment is not None:
-                return ["interface-handoff: QA produced no output"], new_session_id
             return ["critic: opencode produced no output"], new_session_id
 
         review_json = Path(review_path)
         if review_json.exists():
             try:
                 review = json.loads(review_json.read_text(encoding="utf-8"))
-                if report is not None and assessment is not None:
-                    validate_review(review, report, step_id, assessment=assessment)
+                if report is not None and report.roots:
+                    try:
+                        validate_review(review, report, step_id, assessment=assessment)
+                    except (ValueError, TypeError, AttributeError) as exc:
+                        warn_handoff(f"QA extra interface fields: {exc}. Using the original verdict/issues policy.")
                 verdict = review.get("verdict", "")
                 issues = review.get("issues", [])
                 if verdict == "pass":
@@ -669,15 +691,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 ts_print(f"[adapter-qa] {step_id}: fail — {len(issues)} issue(s)")
                 return ([f"{i.get('file', '?')}:{i.get('line', '?')}: {i.get('issue', '?')}" for i in issues],
                         new_session_id)
-            except (ValueError, TypeError, AttributeError) as exc:
-                if assessment is not None:
-                    return [f"interface-handoff: {exc}"], new_session_id
+            except (ValueError, TypeError, AttributeError):
                 ts_print(f"[adapter-qa] {step_id}: fail (review.json unparseable)")
                 return ["critic: review.json could not be parsed"], new_session_id
 
         ts_print(f"[adapter-qa] {step_id}: fail (no review.json found)")
-        if assessment is not None:
-            return ["interface-handoff: QA did not produce review.json"], new_session_id
         return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
 
     def run(self, inputs: dict | None = None):
@@ -2368,7 +2386,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # adapter loop and just advance verified.commit.  If e2e then fails,
         # the retry (retry_count > 0) will fall through to the normal adapter
         # fix-mode loop so the adapter can fix the baseline bug.
-        report = load_report(self._interface_adapter_inputs(step)["interface_report"])
+        report = self._load_interface_report()
         if not upstream_patch.strip() and self.state.retry_count == 0 and not (report and report.roots):
             ts_print(f"[ai_analysis] {step_id}: no vllm/ code changes, skipping adaptation")
             vllm_path = self.state.vllm_path
@@ -2519,18 +2537,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             if adapt_result.session_id:
                 self.state.session_id = adapt_result.session_id
 
-            # A source assessment is required even for no-op/rejected roots.
-            # Missing/stale/malformed handoffs cannot use the semantic QA
-            # one-fix-round escape: retry before spending pre-CI/NPU time.
-            try:
-                self._interface_assessment(step_id, str(step_dir))
-            except ValueError as exc:
-                review_path = step_dir / ADAPTER_QA_FILE
-                review_path.write_text(f"interface-handoff: {exc}", encoding="utf-8")
-                error_logs = [str(review_path)] + list(error_logs)
-                pre_ci_passed = False
-                continue
-
             # E2E test cases are frozen: any adapter edit under tests/e2e/
             # is reverted immediately and voids the attempt.  The warning is
             # passed back via error_logs so the next attempt knows the rule
@@ -2671,9 +2677,6 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # packed-vs-summed KV pools), so iterating it further burns time
             # without converging; e2e verdict is the only signal that matters.
             # pre_ci stays a hard gate across all attempts.
-            handoff_failed = any(i.startswith("interface-handoff:") for i in review_issues)
-            if handoff_failed:
-                pre_ci_passed = False
             if pre_ci_passed and (review_passed or attempt >= 2):
                 if not review_passed:
                     ts_print(f"[ai_analysis] {step_id}: critic still has issues after "

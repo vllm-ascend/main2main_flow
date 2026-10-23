@@ -21,6 +21,9 @@ and does not improve review quality.
    candidate and changed no code. Independently verify no-change and deferred
    decisions; the adapter's explanation is not proof. Follow the appended
    interface handoff output schema and record unresolved roots explicitly.
+   Additional interface fields are advisory. Missing or malformed adapter
+   structure is a warning: read the summary prose, report and actual source,
+   then judge code correctness. Do not fail solely for these formatting gaps.
 2. **Budget: max 12 tool calls per review.** 2-4 targeted reads usually
    suffice. If you cannot reach a verdict in 12 calls, record the open
    questions in the review JSON with severity "low" and pass.
@@ -71,7 +74,7 @@ and does not improve review quality.
 ## Output
 
 Write ONE file to `{review_path}`, with this base shape (include the additional
-identity and per-root fields when the interface handoff below requires them):
+identity and per-root fields recommended by the interface handoff below):
 
 ```json
 {{

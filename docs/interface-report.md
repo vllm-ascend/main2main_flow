@@ -141,7 +141,9 @@ instructions. `interface_report/handoff.py` builds the input context and checks
 the handoff; `flow.py` supplies paths, step ranges and retry routing.
 
 The report must be readable UTF-8, nonempty and at most 1,000,000 bytes. An
-automatic report's SHA-256 is bound to the flow so later modification is rejected.
+automatic report's SHA-256 is bound to the flow. If it changes or becomes
+unreadable, disable that evidence, warn, and continue the original source/diff
+analysis; never feed a replaced report or resurrect an environment fallback.
 The report describes the PRE-adaptation baseline across the complete range;
 later-step candidates must be deferred until applicable. Both agents treat it
 as untrusted evidence and distinguish argument/return/instance-state contracts.
@@ -172,18 +174,23 @@ current-step break uses `decision: needs_adaptation` and
 unproven contract, not a substitute for an intentionally skipped repair.
 QA independently checks the decision and may `agree` while returning `fail`
 with actionable issues for the still-unfixed code. Confirmed unadapted code
-cannot return `pass`. Production defaults reject gray-mode assessments and
-`needs_adaptation`; gray mode rejects `adapted`. No environment variable enables
+must not be called ready. The diagnostic parser flags gray-mode assessments and
+`needs_adaptation` in production, and `adapted` in gray mode. These warnings do
+not turn the production QA policy into a new gate. No environment variable enables
 this mode, and it does not enter the production adaptation/test loop.
 
-For a successfully bound report, missing/duplicate/unknown roots, stale
-report/step/range identity and empty reasons/evidence are mechanical handoff
-failures. They retry through existing
-adapter-fix error feedback and cannot use the semantic QA one-fix escape. A
-malformed handoff cannot reach NPU tests by exhausting that escape. Source
-citations are checked for presence, not semantic truth: model output and even a
-QA agreement do not prove runtime correctness. Existing pre-CI, semantic QA
-one-fix policy and hardware/final gates remain necessary. Handoff version remains
+Missing/duplicate/unknown roots, stale report/step/range identity and empty
+reasons/evidence in agent outputs produce log and Actions warnings only. The
+adapter continues to pre-CI; QA still receives the valid report, expected roots,
+summary path and warning details even if the structured assessment could not be
+parsed, including with an empty business diff. It independently checks the actual
+code and summary prose. Malformed extra QA interface fields also only warn:
+the original verdict/issues interpretation and bounded semantic-QA retry policy
+remain in force. These diagnostics neither consume an extra adapter-fix attempt
+nor force a new hard failure. Missing/unparseable original QA output still uses
+the original critic error path; actual code issues still use the original QA
+repair policy. Citation presence is diagnostic, not proof of semantic truth.
+Existing pre-CI and hardware/final gates remain unchanged. Handoff version remains
 `Main2MainFlow.INTERFACE_REPORT_VERSION == 1` (the scan report format is unchanged).
 
 ## CPU-only standalone validation

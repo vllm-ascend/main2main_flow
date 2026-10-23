@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Checked report/decision handoff; semantic judgments remain the agents' job."""
+"""Advisory report/decision checks; semantic judgments remain the agents' job."""
 
 from __future__ import annotations
 
@@ -9,7 +9,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import EACH_STEP_SUMMARY_FILE
+from main2main_flow.scripts.utils.utils import EACH_STEP_SUMMARY_FILE, ts_print
+
+
+def warn_handoff(detail: str) -> None:
+    """Expose evidence gaps without adding an adaptation or QA gate."""
+    message = "Interface handoff advisory: " + detail
+    ts_print("[interface-handoff] WARNING: " + message)
+    annotation = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print("::warning::" + annotation, flush=True)
 
 
 @dataclass(frozen=True)
@@ -39,7 +47,11 @@ def load_report(path: str) -> Report | None:
 
 
 def adapter_context(path: str, step_id: str, start: str, end: str) -> str:
-    report = load_report(path)
+    try:
+        report = load_report(path)
+    except ValueError as exc:
+        warn_handoff(f"Report unavailable; use the existing source/diff analysis. {exc}")
+        return "Interface report unavailable; use the existing source/diff analysis."
     if report is None:
         return "No interface report supplied; use the existing source/diff analysis."
     if not report.roots:
@@ -63,14 +75,16 @@ def adapter_context(path: str, step_id: str, start: str, end: str) -> str:
         "After a confirmed repair use adapted. In fix mode refresh decisions for the current tree.\n"
         f"In the existing {EACH_STEP_SUMMARY_FILE}, preserve its normal summary header and prose, "
         "then write exactly ONE fenced block labelled interface-assessment containing JSON. "
-        "Replace this block on retries rather than appending stale copies. Required identity: "
+        "Replace this block on retries rather than appending stale copies. Recommended identity: "
         + json.dumps(identity)
         + '. Add "items": [{"root_cause_id": "<ID>", "decision": '
         '"adapted|no_change|deferred|insufficient_evidence", "reason": "<specific reason>", '
         '"evidence": ["vllm/<file>:<line>", "vllm_ascend/<file>:<line>"]}]. '
         "Every item needs a nonempty reason and source evidence (include both sides when relevant); "
         "missing evidence is not proof of safety. QA will independently verify these decisions, "
-        "including no_change even when you edit no business code."
+        "including no_change even when you edit no business code. Structural checks are advisory: "
+        "missing or malformed fields produce warnings, not a separate adaptation retry or gate. "
+        "Preserve useful source-based prose even if the structured block is incomplete."
     )
 
 
@@ -142,7 +156,10 @@ def load_assessment(
     return data
 
 
-def qa_context(report: Report, assessment: dict, step_dir: str | Path, *, read_only: bool = False) -> str:
+def qa_context(
+    report: Report, assessment: dict | None, step_dir: str | Path, *, read_only: bool = False,
+    step_id: str = "", warnings: list[str] | None = None,
+) -> str:
     return (
         "\n\n## Interface candidate and adapter-decision review\n"
         f"Read the report at {report.path} AND the adapter decisions in "
@@ -153,8 +170,12 @@ def qa_context(report: Report, assessment: dict, step_dir: str | Path, *, read_o
         "adapter's explanation as proof. The report describes the PRE-adaptation baseline and can "
         "span future steps: verify deferrals against this step's range; account for earlier repairs. "
         "Distinguish argument, return and state contracts. Do not adapt code or run tests.\n"
+        f"Review all report roots: {', '.join(report.roots)}. "
+        "Structured adapter decisions may be missing, malformed or stale. Read the existing "
+        "summary prose and source directly; do not skip candidate review or fail code solely "
+        "for an advisory formatting problem. Record actual unresolved or unsafe code separately.\n"
         "Keep verdict/issues. Add interface_report_sha256=" + report.sha256
-        + ", interface_step_id=" + assessment["step_id"]
+        + ", interface_step_id=" + (assessment["step_id"] if assessment else step_id)
         + ", and interface_report_usage: exactly one object per required root with root_cause_id, "
         "judgment (agree|disagree|deferred|insufficient_evidence), assessment (specific independent "
         "reason) and evidence (nonempty list of source file:line references). "
@@ -173,7 +194,12 @@ def qa_context(report: Report, assessment: dict, step_dir: str | Path, *, read_o
             "break remains unfixed. Reserve insufficient_evidence for a genuinely unproven contract.\n"
             if read_only else ""
         )
-        + "Mechanically validated adapter decisions (content still requires independent verification):\n"
+        + "The extra interface fields are advisory diagnostics; the existing verdict/issues "
+        "and QA/E2E retry policy remain authoritative.\n"
+        + "Adapter handoff warnings requiring source-based QA review:\n"
+        + json.dumps(warnings or [], ensure_ascii=False)
+        + "\nStructurally checked adapter decisions (null means use summary prose and source; "
+        "content still requires independent verification):\n"
         + json.dumps(assessment, ensure_ascii=False)
     )
 
