@@ -449,6 +449,19 @@ mypy override.  Mechanical fixes — do NOT re-analyze the upstream patch.
 After fixing, e2e re-runs; if it fails, the fix regressed — revert and
 retry.
 
+## Interface contract candidates
+
+{interface_report_context}
+
+This requirement applies in both adapter and adapter-fix modes. The report is
+candidate evidence. Verify it against the current step's upstream source and
+actual downstream code before deciding whether to adapt. A no-op may still
+require a detailed interface assessment for independent QA; in that case the
+one-line no-op summary below is only the header, not the entire output.
+Interface structure checks only warn. They do not add a repair attempt or stop
+adaptation. Keep useful reasons and source references in the existing summary;
+QA reviews the report and source even if the structured block is incomplete.
+
 ## Output
 
 Write to {step_dir}/:

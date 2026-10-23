@@ -12,10 +12,18 @@ Each tool call (bash/grep/read) costs 10-30s of model time. A review of a
 few-KB diff should take ~5 min of work. Over-exploration delays NPU tests
 and does not improve review quality.
 
-1. **Scope: review the diff, not the codebase.** Read the diff above and
+1. **Scope: review the diff and explicitly supplied interface candidates.** Read the diff above and
    check ONLY the files it touches plus the exact symbols those changes
    reference. Do NOT grep the repositories to "understand the subsystem",
    do NOT enumerate sibling files, do NOT re-derive the adaptation.
+   When an interface report and adapter decisions are supplied, also inspect
+   their exact symbols and actual callers, even if the adapter rejected the
+   candidate and changed no code. Independently verify no-change and deferred
+   decisions; the adapter's explanation is not proof. Follow the appended
+   interface handoff output schema and record unresolved roots explicitly.
+   Additional interface fields are advisory. Missing or malformed adapter
+   structure is a warning: read the summary prose, report and actual source,
+   then judge code correctness. Do not fail solely for these formatting gaps.
 2. **Budget: max 12 tool calls per review.** 2-4 targeted reads usually
    suffice. If you cannot reach a verdict in 12 calls, record the open
    questions in the review JSON with severity "low" and pass.
@@ -65,7 +73,8 @@ and does not improve review quality.
 
 ## Output
 
-Write ONE file to `{review_path}`, exactly this shape:
+Write ONE file to `{review_path}`, with this base shape (include the additional
+identity and per-root fields recommended by the interface handoff below):
 
 ```json
 {{

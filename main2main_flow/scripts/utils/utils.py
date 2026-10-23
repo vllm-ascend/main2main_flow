@@ -31,6 +31,22 @@ HasNoCommit = "HasNoCommit"
 import os as _os
 _ws_env = _os.environ.get("MAIN2MAIN_WORKSPACE", "")
 WORKSPACE_DIR = Path(_ws_env) if _ws_env else (Path(__file__).parent.parent.parent / "workspace")
+# Standalone reports live outside source checkouts; kickoff owns workspace copies.
+INTERFACE_RUN_DIR = "interface_scan"
+INTERFACE_RUNTIME_CACHE_DIR = "main2main_flow/interface-reports"
+INTERFACE_QA_REPORT_FILE = "qa-review.md"
+INTERFACE_METADATA_FILE = "run-metadata.json"
+INTERFACE_STATUS_FILE = "run-status.json"
+INTERFACE_SUMMARY_FILE = "summary.md"
+INTERFACE_CACHE_MANIFEST_FILE = "cache-manifest.json"
+INTERFACE_SCAN_LOG_FILE = "scan.log"
+INTERFACE_REPORT_DIR = "report"
+INTERFACE_REPORT_FILES = (
+    "main2main-range-report.json",
+    "main2main-range-report.md",
+    "main2main-introduced-breaks.csv",
+    "main2main-all-findings.csv",
+)
 DETECT_FILE = "detect.json"
 STEPS_FILE = "steps.json"
 STEPS_DIR = "steps"
@@ -38,6 +54,7 @@ VLLM_GIT_PATCH_FILE = "upstream.patch"
 VLLM_GIT_CHANGED_FILES = "changed_files.txt"
 PRE_CI_CHECK_FILE = "pre_ci_check.json"
 EACH_STEP_SUMMARY_FILE = "step_summary.md"
+ADAPTER_QA_FILE = "adapter-qa.md"
 EACH_STEP_TARGET_PATCH_FILE = "step_target.patch"
 EACH_STEP_CODE_STRUCTURE_GUIDE_FILE = "code-structure-guide.md"
 FINAL_SUMMARY_FILE = "final_summary.md"

@@ -141,6 +141,12 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
         )
         refs_loaded = ref_names
 
+    from main2main_flow.interface_report.handoff import adapter_context
+
+    ctx["interface_report_context"] = adapter_context(
+        inputs.get("interface_report", ""), inputs.get("step_id", ""),
+        inputs.get("start_commit", ""), inputs.get("end_commit", ""),
+    ) if agent_dir == "adapter" else ""
     ctx["reference_content"] = ref_content
     # Ensure placeholders referenced by SKILL.md are never empty (avoids
     # KeyError in format_map if flow did not pass them, e.g. CLI/debug
