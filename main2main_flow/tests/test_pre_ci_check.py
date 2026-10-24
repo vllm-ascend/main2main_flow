@@ -668,3 +668,28 @@ def test_final_gate_fails_on_missing_vllm_import_in_tests(
     bad = next(c for c in gate["checks"] if c["name"] == "mypy-tests-imports")
     assert bad["passed"] is False
     assert bad["violations"] == [violation]
+
+
+def test_check_format_timeout_is_not_retried(monkeypatch,
+                                             tmp_path: Path) -> None:
+    """A hung format.sh fails once instead of hanging twice."""
+    repo = tmp_path / "ascend"
+    repo.mkdir()
+    (repo / "format.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    calls: list[int] = []
+
+    def fake_run(repo_arg):
+        calls.append(1)
+        return subprocess.CompletedProcess(
+            ["bash"], pre_ci_check.FORMAT_TIMEOUT_RC,
+            "ruff-check...\n", "timed out after 1800s")
+
+    monkeypatch.setattr(pre_ci_check.shutil, "which",
+                        lambda name: "/usr/bin/pre-commit")
+    monkeypatch.setattr(pre_ci_check, "run_format_sh", fake_run)
+
+    result = pre_ci_check._check_format(repo)
+
+    assert len(calls) == 1
+    assert "TIMED OUT" in result["detail"]
+    assert any("timed out" in v for v in result["violations"])
