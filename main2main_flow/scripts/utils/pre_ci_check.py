@@ -26,7 +26,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from main2main_flow.scripts.utils.utils import (run_format_sh, run_git,
+from main2main_flow.scripts.utils.utils import (FORMAT_TIMEOUT_RC,
+                                                run_format_sh, run_git,
                                                 pip_install_with_fallback,
                                                 ts_print, WORKSPACE_DIR)
 from main2main_flow.scripts.utils.ut_check import (check_ut as _check_ut,
@@ -180,9 +181,12 @@ def _check_format(repo: Path) -> dict:
 
     def _run_once(tag: str) -> tuple[int, str, str]:
         ts_print(f"\n[pre_ci] === format.sh output begin ({tag}) ===")
+        # run_format_sh echoes the output live; only collect it here for
+        # violation extraction and for the final completed-process record.
         rr = run_format_sh(repo)
         out = _ANSI_RE.sub("", (rr.stdout + "\n" + rr.stderr))
-        ts_print(out.strip() or "(no output)")
+        if not out.strip():
+            ts_print("(no output)")
         ts_print(f"[pre_ci] === format.sh output end (exit={rr.returncode}) ===")
         diff_after = subprocess.run(
             ["git", "diff", "--stat"], cwd=str(repo), capture_output=True,
@@ -196,6 +200,15 @@ def _check_format(repo: Path) -> dict:
     if rc == 0:
         ts_print("\n[pre_ci] format: OK")
         return {"violations": [], "detail": "format.sh OK"}
+    if rc == FORMAT_TIMEOUT_RC:
+        # The hook cache / store lock is wedged, not the adapter's code.
+        # A second run would hang for the same timeout again, so stop here
+        # and hand the streamed log tail (which names the last hook) over.
+        ts_print("\n[pre_ci] format: TIMED OUT — not retrying")
+        violations = [ln for ln in output.splitlines() if ln.strip()]
+        violations.append("format.sh timed out; see the last hook in the log")
+        return {"violations": violations,
+                "detail": "format.sh TIMED OUT (exit=124) — not retried"}
     # exit != 0: auto-fix hooks may have fixed files (they exit 1 to ask
     # for a re-run).  Re-run to separate "fixed, clean now" from "real
     # residual errors".

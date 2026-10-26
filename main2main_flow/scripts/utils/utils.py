@@ -1,7 +1,10 @@
 import os
 import platform
+import re
 import shutil
+import signal
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -110,6 +113,116 @@ def resolve_path(raw: str, name: str) -> str:
     return raw
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# GNU timeout's exit status.  pre_ci treats it as terminal: re-running a
+# hung format.sh only doubles the wait.
+FORMAT_TIMEOUT_RC = 124
+# format.sh finishes in seconds once the hook cache is warm; a cold hook
+# environment install takes minutes.  30 min is a runaway backstop, not a
+# performance budget.  Override with MAIN2MAIN_FORMAT_TIMEOUT (0 = no cap).
+_DEFAULT_FORMAT_TIMEOUT_S = 1800
+
+
+def _echo_pipe(pipe, chunks: list[str], prefix: str = "") -> None:
+    """Drain one child pipe into *chunks*, echoing each line as it arrives."""
+    try:
+        for line in iter(pipe.readline, ""):
+            chunks.append(line)
+            shown = _ANSI_RE.sub("", line.rstrip("\n"))
+            if shown:
+                try:
+                    ts_print(f"{prefix}{shown}")
+                except OSError:
+                    # The job log went away (cancellation); keep draining so
+                    # the child never blocks on a full pipe.
+                    pass
+    finally:
+        try:
+            pipe.close()
+        except OSError:
+            pass
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the child *and* every hook it spawned.
+
+    The child runs in its own session (``start_new_session=True``), so its
+    pid is also the process-group id.  Killing only the bash wrapper would
+    leave pre-commit / hook processes holding the pipes (and the pre-commit
+    store lock) alive.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.kill()
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _run_streaming(cmd: list[str], *, cwd: str, env: dict[str, str],
+                   timeout: float | None = None) -> subprocess.CompletedProcess:
+    """Run *cmd* while echoing stdout/stderr live; capture them as usual.
+
+    ``subprocess.run(capture_output=True)`` shows nothing until the child
+    exits, so a hung pre-commit is indistinguishable from a dead job — run
+    39653196015 sat on ``format.sh`` for 17 hours with only the workflow
+    heartbeat visible.  Two reader threads keep the log live and must drain
+    both pipes: reading one synchronously can deadlock once the other pipe's
+    buffer fills.
+
+    With *timeout* set, the whole process group is SIGKILLed when it
+    expires and the result carries ``FORMAT_TIMEOUT_RC``.  A bare
+    ``proc.wait()`` let five nightly runs (10-19..10-23) hang for 6-17
+    hours each, so the caller must always bound this.  If the child is
+    stuck in uninterruptible
+    I/O (a dead NFS mount / pre-commit store lock), SIGKILL cannot reap it;
+    the reader threads are daemons and ``join`` is bounded so the flow
+    reports the timeout instead of hanging with it.
+    """
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, text=True, bufsize=1,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    stdout, stderr = proc.stdout, proc.stderr
+    if stdout is None or stderr is None:  # pragma: no cover - PIPE guarantees
+        raise RuntimeError("subprocess pipes were not created")
+    out: list[str] = []
+    err: list[str] = []
+    readers = [
+        threading.Thread(target=_echo_pipe, args=(stdout, out), daemon=True),
+        threading.Thread(target=_echo_pipe, args=(stderr, err, "[stderr] "),
+                         daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            ts_print(f"[format] TIMEOUT after {timeout}s — killing process "
+                     f"group (pid {proc.pid})")
+            _kill_process_group(proc)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                ts_print("[format] WARNING: process survived SIGKILL "
+                         "(uninterruptible I/O?); abandoning it")
+            rc = FORMAT_TIMEOUT_RC
+            err.append(f"\n[format] timed out after {timeout}s; "
+                       f"process group killed\n")
+    except BaseException:
+        # The flow itself is being cancelled (KeyboardInterrupt) or errored;
+        # don't leave pre-commit alive holding the store lock / pipes.
+        _kill_process_group(proc)
+        raise
+    for reader in readers:
+        reader.join(timeout=5)
+    return subprocess.CompletedProcess(cmd, rc, "".join(out), "".join(err))
+
+
 def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
     """Run ``bash format.sh ci`` and return the CompletedProcess result.
 
@@ -132,6 +245,13 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
     with ``[Errno 8] Exec format error`` on the amd64 CPU runner (run
     32969478105) — each arch gets its own cache so they never cross.
 
+    Output is echoed line-by-line while pre-commit runs (see
+    :func:`_run_streaming`), so the job page shows the current hook instead
+    of freezing on the "output begin" header.  The run is capped by
+    ``MAIN2MAIN_FORMAT_TIMEOUT`` seconds (default 1800, 0 disables) and the
+    whole process group is killed on expiry; timeouts return
+    ``FORMAT_TIMEOUT_RC`` instead of blocking forever.
+
     After format.sh, removes the ``gitleaks`` binary that ``gitleaks.sh``
     downloads to the repo root when the system has no gitleaks in PATH.
     This 22MB binary is a tool artifact, not an adaptation change - leaving
@@ -152,9 +272,22 @@ def run_format_sh(repo: Path) -> subprocess.CompletedProcess:
     # fresh download (run 33887181257).  Skipping the hook keeps every real
     # lint hook running while removing the permanent format.sh failure.
     env["SKIP"] = "gitleaks-offline-scan"
-    r = subprocess.run(
-        ["bash", str(fmt_script), "ci"], cwd=str(repo),
-        capture_output=True, text=True, env=env,
+    # pre-commit is Python: with stdout on a pipe it block-buffers, so
+    # without this the "streaming" would still arrive in 8KB bursts.
+    env["PYTHONUNBUFFERED"] = "1"
+    # Hard cap: five nightly runs (10-19..10-23) hung inside pre-commit for
+    # 6-17 h with no output; the workflow's 48 h job timeout was the only
+    # bound.  MAIN2MAIN_FORMAT_TIMEOUT=0 disables the cap for debugging.
+    raw_timeout = os.environ.get("MAIN2MAIN_FORMAT_TIMEOUT", "").strip()
+    try:
+        timeout = int(raw_timeout) if raw_timeout else _DEFAULT_FORMAT_TIMEOUT_S
+    except ValueError:
+        ts_print(f"[format] ignoring invalid MAIN2MAIN_FORMAT_TIMEOUT="
+                 f"{raw_timeout!r}; using {_DEFAULT_FORMAT_TIMEOUT_S}s")
+        timeout = _DEFAULT_FORMAT_TIMEOUT_S
+    r = _run_streaming(
+        ["bash", str(fmt_script), "ci"], cwd=str(repo), env=env,
+        timeout=timeout if timeout > 0 else None,
     )
     gitleaks_bin = repo / "gitleaks"
     if gitleaks_bin.exists():
