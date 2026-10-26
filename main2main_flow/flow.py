@@ -13,6 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from main2main_flow.interface_report.runtime import scan_for_flow
+from main2main_flow.interface_report.handoff import load_report, load_assessment, qa_context, validate_review, warn_handoff
 from main2main_flow.scripts.agent.opencode_adapter import AdaptResult, run_opencode_adapter, run_opencode_review
 from main2main_flow.scripts.utils import ci_config_guard
 from main2main_flow.scripts.utils.detect_commits import detect
@@ -48,9 +50,10 @@ from main2main_flow.scripts.utils.utils import (
     UpgradeCompleted, UpgradeFailed, UpgradePartial,
     HasCommit, HasNoCommit, resolve_path, WORKSPACE_DIR, DETECT_FILE, STEPS_FILE, FINAL_SUMMARY_FILE, FINAL_TARGET_PATCH_FILE,
     STEPS_DIR, VLLM_GIT_PATCH_FILE, VLLM_GIT_CHANGED_FILES, PRE_CI_CHECK_FILE,
-    EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
+    EACH_STEP_SUMMARY_FILE, EACH_STEP_TARGET_PATCH_FILE, EACH_STEP_CODE_STRUCTURE_GUIDE_FILE, ADAPTER_QA_FILE,
     FINAL_CODE_STRUCTURE_GUIDE_FILE, GENERATED_ARTIFACT_DIRS, run_git, ts_print,
-    GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE, FINAL_STATUS_FILE,
+    GATE_E2E_RESULT_FILE, GATE_E2E_INHERITED_FILE, FINAL_STATUS_FILE, INTERFACE_RUN_DIR,
+    INTERFACE_QA_REPORT_FILE, INTERFACE_STATUS_FILE,
 )
 
 # Files that are tracking/metadata, not real adaptation changes — excluded
@@ -420,6 +423,11 @@ class Main2MainState(BaseModel):
     vllm_path: str = ""
     vllm_ascend_path: str = ""
     target_commit: str = ""
+    # One pre-adaptation report for the full range, reused by every QA retry.
+    interface_report: str = ""
+    interface_report_sha256: str = ""
+    # An unavailable automatic scan must not fall back to an unrelated report.
+    interface_scan_failed: bool = False
 
     steps: list = []
     release_tag: str = ""
@@ -482,22 +490,121 @@ class Main2MainState(BaseModel):
 
 
 class Main2MainFlow:
+    # Capability checked by the workflow before passing an optional report.
+    INTERFACE_REPORT_VERSION = 1
 
     def __init__(self, **kwargs):
         self.state = Main2MainState(**kwargs)
+
+    def _load_interface_report(self):
+        """Disable unusable evidence instead of interrupting the existing flow."""
+        path = "" if self.state.interface_scan_failed else (
+            self.state.interface_report or os.environ.get("MAIN2MAIN_INTERFACE_REPORT", ""))
+        try:
+            report = load_report(path)
+            if report and self.state.interface_report and self.state.interface_report_sha256 and (
+                report.sha256 != self.state.interface_report_sha256
+            ):
+                raise ValueError("flow-bound interface report changed after scanning")
+            return report
+        except ValueError as exc:
+            warn_handoff(f"Report disabled; continuing original source/diff analysis. {exc}")
+            self.state.interface_report = ""
+            self.state.interface_report_sha256 = ""
+            self.state.interface_scan_failed = True
+            return None
+
+    def _interface_adapter_inputs(self, step: dict) -> dict:
+        """Same report/scope for initial adaptation, fixes and independent QA."""
+        report = self._load_interface_report()
+        return {
+            "interface_report": str(report.path) if report else "",
+            "start_commit": step.get("start_commit", self.state.base_commit),
+            "end_commit": step.get("end_commit", self.state.target_commit),
+        }
+
+    def _scan_interface_report(self, vllm_path: Path, ascend_path: Path) -> None:
+        """Best-effort pre-adaptation evidence; failure preserves the original flow."""
+        output = WORKSPACE_DIR / INTERFACE_RUN_DIR
+        try:
+            path = scan_for_flow(
+                vllm_path, ascend_path, self.state.base_commit, self.state.target_commit, output,
+            )
+            report = load_report(str(path))
+            self.state.interface_report = str(report.path)
+            self.state.interface_report_sha256 = report.sha256
+        except Exception as exc:
+            self.state.interface_report = ""
+            self.state.interface_report_sha256 = ""
+            self.state.interface_scan_failed = True
+            error = f"{type(exc).__name__}: {exc}"
+            warning = "Interface scan unavailable; continuing original adaptation and QA without a report. " + error
+            ts_print("[interface-scan] WARNING: " + warning)
+            annotation = warning.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print("::warning::" + annotation, flush=True)
+            # A partially written or preceding report must never become input.
+            # Diagnostics are best effort too: a full/read-only disk cannot
+            # turn an advisory scan into a new blocker for adaptation.
+            try:
+                (output / INTERFACE_QA_REPORT_FILE).unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                ts_print(f"[interface-scan] WARNING: cannot remove invalid report: {cleanup_error}")
+            try:
+                output.mkdir(parents=True, exist_ok=True)
+                (output / INTERFACE_STATUS_FILE).write_text(json.dumps({
+                    "scan": "failed", "qa": "disabled", "error": error,
+                    "adaptation": "continued_without_interface_report",
+                }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            except OSError as status_error:
+                ts_print(f"[interface-scan] WARNING: cannot save failure status: {status_error}")
+            summary = os.environ.get("GITHUB_STEP_SUMMARY")
+            if summary:
+                try:
+                    with open(summary, "a", encoding="utf-8") as stream:
+                        stream.write("\n## Interface scan unavailable\n\n"
+                                     "Scan failed; adaptation and QA continue using the original source/diff analysis. "
+                                     "This is not a clean interface scan. See the interface-scan warning for details.\n")
+                except OSError as summary_error:
+                    ts_print(f"[interface-scan] WARNING: cannot append job summary: {summary_error}")
+
+    def _interface_assessment(
+        self, step_id: str, step_dir: str, *, read_only: bool = False, warnings: list[str] | None = None,
+    ):
+        step = next((s for s in self.state.steps if s["id"] == step_id), {})
+        report = self._load_interface_report()
+        try:
+            assessment = load_assessment(
+                report, step_dir, step_id, step.get("start_commit", self.state.base_commit),
+                step.get("end_commit", self.state.target_commit),
+                read_only=read_only,
+            )
+        except ValueError as exc:
+            detail = f"Adapter summary: {exc}. QA must review the report, summary prose and actual source."
+            warn_handoff(detail)
+            if warnings is not None:
+                warnings.append(detail)
+            assessment = None
+        return report, assessment
 
     def _run_adapter_qa(
         self, ascend_path: str, vllm_path: str, step_id: str,
         step_dir: str, release_tag: str,
         upstream_patch_path: str = "",
         qa_session_id: str = "",
+        *, read_only_interface_review: bool = False,
     ) -> tuple[list[str], str]:
         """adapter-qa: independent review of the current diff."""
         diff = subprocess.run(
             ["git", "diff", "HEAD"], cwd=ascend_path,
             capture_output=True, text=True,
         ).stdout.strip()
-        if not diff:
+        if read_only_interface_review and diff:
+            return ["interface-handoff: read-only gray review requires a committed, unchanged fixture"], qa_session_id
+        handoff_warnings: list[str] = []
+        report, assessment = self._interface_assessment(
+            step_id, step_dir, read_only=read_only_interface_review, warnings=handoff_warnings,
+        )
+        if not diff and not (report and report.roots):
             return [], qa_session_id
 
         lessons_path = Path(__file__).parent / "agents" / "adapter-qa" / "reference" / "review-lessons.md"
@@ -545,12 +652,23 @@ class Main2MainFlow:
 Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
 DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
+        if report is not None and report.roots:
+            prompt += qa_context(
+                report, assessment, step_dir, read_only=read_only_interface_review,
+                step_id=step_id, warnings=handoff_warnings,
+            )
+        elif report is not None:
+            prompt += (f"\nInterface report: {report.path}; no expanded candidate roots. "
+                       "This does not prove complete compatibility.\n")
+
         model = os.environ.get("MAIN2MAIN_MODEL_REVIEW") or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-flash")
 
         ts_print(f"[adapter-qa] {step_id}: running review (model={model}, diff={len(diff)} bytes) ...")
         qa_log = Path(step_dir) / "opencode_qa.log"
         qa_raw = Path(step_dir) / "opencode_qa_raw.jsonl"
         qa_stderr = Path(step_dir) / "opencode_qa_stderr.log"
+        # A failed/no-output call must never reuse the preceding review verdict.
+        Path(review_path).unlink(missing_ok=True)
         output_text, new_session_id = run_opencode_review(
             prompt, log_path=qa_log, raw_path=qa_raw, stderr_path=qa_stderr,
             session_id=qa_session_id, model=model,
@@ -563,6 +681,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         if review_json.exists():
             try:
                 review = json.loads(review_json.read_text(encoding="utf-8"))
+                if report is not None and report.roots:
+                    try:
+                        validate_review(review, report, step_id, assessment=assessment)
+                    except (ValueError, TypeError, AttributeError) as exc:
+                        warn_handoff(f"QA extra interface fields: {exc}. Using the original verdict/issues policy.")
                 verdict = review.get("verdict", "")
                 issues = review.get("issues", [])
                 if verdict == "pass":
@@ -571,7 +694,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 ts_print(f"[adapter-qa] {step_id}: fail — {len(issues)} issue(s)")
                 return ([f"{i.get('file', '?')}:{i.get('line', '?')}: {i.get('issue', '?')}" for i in issues],
                         new_session_id)
-            except (json.JSONDecodeError, KeyError):
+            except (ValueError, TypeError, AttributeError):
                 ts_print(f"[adapter-qa] {step_id}: fail (review.json unparseable)")
                 return ["critic: review.json could not be parsed"], new_session_id
 
@@ -992,6 +1115,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                                     self.state.target_commit or None)
         self.state.release_tag = result.get("compat_tag") or ""
         self.state.base_commit = result.get("base_commit", "")
+        self.state.target_commit = result["target_commit"]
+        self.state.interface_report = ""
+        self.state.interface_report_sha256 = ""
+        self.state.interface_scan_failed = False
 
         (WORKSPACE_DIR / DETECT_FILE).write_text(
             json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -1002,6 +1129,10 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
 
         if not has_commit:
             return HasNoCommit
+
+        # The existing kickoff job owns detection too. This is deliberately
+        # outside adaptation/QA retry loops and uses the exact detected range.
+        self._scan_interface_report(vllm_path, vllm_ascend_path)
 
         # generate steps.json in workspace
         plan = run_plan(vllm_path, result["base_commit"], result["target_commit"],
@@ -2263,7 +2394,8 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # adapter loop and just advance verified.commit.  If e2e then fails,
         # the retry (retry_count > 0) will fall through to the normal adapter
         # fix-mode loop so the adapter can fix the baseline bug.
-        if not upstream_patch.strip() and self.state.retry_count == 0:
+        report = self._load_interface_report()
+        if not upstream_patch.strip() and self.state.retry_count == 0 and not (report and report.roots):
             ts_print(f"[ai_analysis] {step_id}: no vllm/ code changes, skipping adaptation")
             vllm_path = self.state.vllm_path
             ascend_path = self.state.vllm_ascend_path
@@ -2408,6 +2540,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
                 "mode": role,
                 "vllm_report_context": vllm_report_context,
+                **self._interface_adapter_inputs(step),
             }, session_id=self.state.session_id)
             if adapt_result.session_id:
                 self.state.session_id = adapt_result.session_id
@@ -2536,7 +2669,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 review_passed = False
                 ts_print(f"[ai_analysis] {step_id}: critic skipped (pre_ci failed)")
             if review_issues:
-                review_path = step_dir / "adapter-qa.md"
+                review_path = step_dir / ADAPTER_QA_FILE
                 review_path.write_text("\n".join(review_issues), encoding="utf-8")
                 ts_print(f"[ai_analysis] {step_id}: critic found {len(review_issues)} issue(s) → {review_path}")
                 if error_logs:

@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 kickoff = "main2main_flow.cli:kickoff"
+main2main-interface-report = "main2main_flow.interface_report.run:main"
 
 [build-system]
 requires = ["hatchling"]
