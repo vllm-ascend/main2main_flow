@@ -320,6 +320,70 @@ def test_oom_env_npumodelrunner_non_oom_payload_not_classified(tmp_path: Path):
     assert not _is_oom_env_failure(log)
 
 
+# ---- run 40653185487 shape (multi-rank OOM cascade) -------------------------
+
+DFLASH_OOM_LINE = (
+    "E1028 11:21:53.1 1210907 NPUCachingAllocator.cpp:1332] NPU out of "
+    "memory. Tried to allocate 1.17 GiB (NPU 0; 61.27 GiB total capacity; "
+    "53.23 GiB already allocated; 1.27 GiB free; 56.06 GiB reserved in "
+    "total by PyTorch)")
+RANK1_CASCADE_LINES = "\n".join([
+    "(Worker_TP1_EP1 pid=1360504) ERROR [multiproc_executor.py:1189] "
+    "RuntimeError: The Inner error is reported as above. The process exits "
+    "for this inner error, and the current working operator name is "
+    "aclnnMoeGatingTopK.",
+    "(Worker_TP1_EP1 pid=1360504) ERROR [multiproc_executor.py:1189] "
+    "RuntimeError: synchronize:../torch_npu/csrc/core/npu/NPUEvent.cpp:215 "
+    "NPU function error: aclrtSynchronizeEvent(event_), error code is 507034",
+    "(Worker_TP1_EP1 pid=1360504) ERROR [multiproc_executor.py:1189] "
+    "RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/"
+    "NPUStream.cpp:714 NPU function error: "
+    "AclrtSynchronizeDeviceWithTimeout, error code is 507034",
+    "(Worker_TP1_EP1 pid=1360504) ERROR [multiproc_executor.py:1189] "
+    "RuntimeError: synchronize:../torch_npu/csrc/core/npu/NPUStream.cpp:414 "
+    "NPU function error: c10_npu::acl::AclrtSynchronizeStreamWithTimeout"
+    "(stream()), error code is 507034",
+])
+
+
+def test_oom_env_multirank_cascade_classified(tmp_path: Path):
+    # Rank 0 OOMs; rank 1's aclnn inner error and every stream wait then
+    # re-report the dead device (location + code, no payload).  Those lines
+    # used to match _RAISED_ERROR_MSG_RE, so the gate's only blocker drifted
+    # from "8 sibling OOM suites pardoned" to "this one is a code bug".
+    log = _write_log(tmp_path, "\n".join([
+        DFLASH_OOM_LINE, RANK1_CASCADE_LINES,
+        "[TIMEOUT] suite exceeded 1800s, killing process group",
+    ]) + "\n")
+    assert _is_oom_env_failure(log)
+    # The signal-kill fallback (step 7) must agree: an OOM hang is not an
+    # observed failure just because the cascade left raised-error lines.
+    assert _no_observed_failure({"failed_test_cases": [],
+                                 "failed_test_files": []}, log)
+
+
+def test_oom_env_cascade_with_real_assertion_not_classified(tmp_path: Path):
+    # The cascade strip must not swallow a genuine failure sitting next to it
+    # (the whole point of the raised-error scan).
+    log = _write_log(tmp_path, "\n".join([
+        DFLASH_OOM_LINE, RANK1_CASCADE_LINES,
+        "E   AssertionError: vllm_output does not match golden",
+    ]) + "\n")
+    assert not _is_oom_env_failure(log)
+
+
+def test_oom_env_op_level_aclnn_failure_not_classified(tmp_path: Path):
+    # An OP-level aclnn failure is not the synchronize/dead-device family:
+    # a real bug that merely co-occurs with OOM text stays blocking.
+    log = _write_log(tmp_path, "\n".join([
+        DFLASH_OOM_LINE,
+        "(Worker_TP1_EP1 pid=1) ERROR [multiproc_executor.py:1189] "
+        "RuntimeError: aclnnMoeGatingTopK:../op/MoeGatingTopK.cpp:12 NPU "
+        "function error: aclnnMoeGatingTopK(...), error code is 561002",
+    ]) + "\n")
+    assert not _is_oom_env_failure(log)
+
+
 def test_run_one_test_oom_becomes_env_flake(monkeypatch, tmp_path: Path):
     # exit -9 (suite-timeout SIGKILL) + pure-OOM log → env_flake_pass, so the
     # round doesn't count as an adaptation failure.
