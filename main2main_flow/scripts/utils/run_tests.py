@@ -1153,6 +1153,28 @@ def _is_selection_not_found(log_path: Path) -> bool:
 # three 30-min rounds this way with zero fix signal for the adapter.
 _NPU_OOM_RE = re.compile(r"NPU out of memory", re.IGNORECASE)
 
+# An NPU OOM kills the device; every sibling rank then reports the dead
+# device through its own stream wait.  Those lines carry no payload of their
+# own — only an API location and an aclrt code — so they look like "real
+# raised errors" to _RAISED_ERROR_MSG_RE and block the OOM rescue.  Run
+# 40653185487: two_card/model_runner_v2/test_qwen3_6_dflash was the gate's
+# ONLY blocker across three rounds with byte-identical
+# "53.23 GiB already allocated; 1.27 GiB free" numbers, while eight other
+# OOM suites in the same round were pardoned — the difference was purely
+# this cascade shape (rank 1 died on the aclnnMoeGatingTopK inner error and
+# then re-reported "error code is 507034" from every synchronize).
+#
+# Deliberately narrow: the synchronize/dead-device family plus CANN's generic
+# inner-error wrapper.  An OP-level failure
+# ("RuntimeError: aclnnXxx:... NPU function error: aclnnXxx(...), error code
+# is 561002") does NOT match and keeps blocking.  Applied only where an NPU
+# OOM is already present in the log (see the two call sites).
+_OOM_CASCADE_LINE_RE = re.compile(
+    r"^.*(?:"
+    r"The Inner error is reported as above"
+    r"|NPU function error:\s*[^,\n]*[Ss]ynchroni[sz]e"
+    r").*$", re.MULTILINE)
+
 # The multiproc executor wraps each worker's death reason in this message.
 _WORKER_ERROR_REASON_RE = re.compile(r"Worker failed with error '([^']*)'")
 
@@ -1189,6 +1211,10 @@ def _is_oom_env_failure(log_path: Path) -> bool:
         if not _NPU_OOM_RE.search(text):
             return False
         rest = _SYMPTOM_LINE_RE.sub("", text)
+        # Multi-rank death: the surviving ranks' stream waits re-report the
+        # dead device (location + aclrt code, no payload) — see
+        # _OOM_CASCADE_LINE_RE.  They are effects of this OOM, not causes.
+        rest = _OOM_CASCADE_LINE_RE.sub("", rest)
         if _RAISED_ERROR_MSG_RE.search(rest):
             ts_print("  [env-flake] real error with message found next to "
                      "the OOM — NOT classifying as env flake")
@@ -1266,6 +1292,12 @@ def _no_observed_failure(summary: dict | None, log_path: Path) -> bool:
     except OSError:
         return False
     rest = _SYMPTOM_LINE_RE.sub("", text)
+    # Same multi-rank OOM shape as _is_oom_env_failure: when the engine hung
+    # instead of exiting, the surviving ranks' synchronize failures are the
+    # only "error" left in the log and must not turn a pure-OOM hang into an
+    # observed failure.
+    if _NPU_OOM_RE.search(text):
+        rest = _OOM_CASCADE_LINE_RE.sub("", rest)
     return not _RAISED_ERROR_MSG_RE.search(rest)
 
 
