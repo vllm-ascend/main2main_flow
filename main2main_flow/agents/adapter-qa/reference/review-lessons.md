@@ -169,3 +169,31 @@ when the tag advance makes it meaningless.
 appear in the diff. A hanging hook is a flow-environment problem; the flow
 suppresses it with `SKIP` and reverts committed config edits.
 
+### 10.7 No new environment variables
+`vllm_ascend/envs.py` is configuration surface, not adaptation surface. A
+new `VLLM_ASCEND_*` key — or an `os.getenv("VLLM_ASCEND_...")` read added
+elsewhere — turns a one-line contract difference into permanent user-facing
+configuration, and a "auto" default is the rejected capability probe wearing
+an env wrapper (the contract difference is the version, not the installed
+wheel). Rejected: PR #20223 added `VLLM_ASCEND_INDEX_SCORE_IMPL` because one
+container's CANN build did not export `msa_index_score`; that is an
+environment/dependency problem, and upstream fixed it by shipping the newer
+ops-transformer packages. Reading an ALREADY EXISTING variable is fine, and
+so is accepting a switch upstream itself added.
+
+### 10.8 No new patch modules
+Do not add a file under `vllm_ascend/patch/**` and do not add a registration
+entry for one: every patch module is permanent surface that must be
+re-validated against each upstream bump and hides which upstream contract it
+shadows. Extend the existing module with a guarded branch instead — and when
+upstream deletes or renames the patched symbol, delete or merge the patch,
+never add a `_v2`/`_compat` module.
+
+### 10.9 The justification marker (10.7/10.8 exception channel)
+A `# main2main-justification: <reason>` comment on the offending line, on the
+line above it, or among the first few lines of a new file makes 10.7/10.8 a
+non-finding — but only when the reason names a concrete upstream contract or
+container fact. A bare marker, an empty reason, or a reason that restates the
+change ("needed for compatibility") is still a finding.
+
+

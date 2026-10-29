@@ -222,6 +222,11 @@ upstream CI stays the only test executor — the watcher runs no tests itself.
 - No lint/typecheck/test commands are wired up. Verify changes by `SKIP_E2E_TEST=true SKIP_AI_ANALYSIS=true kickoff ...` against a small synthetic commit range.
 - All adapter outputs that need persistence go through `scripts/utils/utils.py` filename constants; introducing a new artifact means adding a constant there first.
 - vllm-ascend version guards must use `vllm_version_is("{release_tag}")` exactly — `pre_ci_check` will reject any new `vllm_version_is(...)` call whose tag doesn't match `state.release_tag`.
+- Three adaptation-shape rules are enforced in THREE layers (generation `agents/adapter/SKILL.md` + `adaptation-patterns.md` §0/§15.6-15.7, review `agents/adapter-qa/SKILL.md` Q1/Q6/Q7 + `gate-maintainability.md` + `review-lessons.md` §10.7-10.9, mechanism `pre_ci_check.py::_check_maintainability` advisories `new_def`/`new_env_var`/`new_patch_file`/`new_patch_entry`):
+  1. a contract difference is a `vllm_version_is` branch at the call/return site — any newly added `def` (helper, `_compat`/`_impl` variant, probe) is a finding;
+  2. no new `VLLM_ASCEND_*` env var (especially a key in `vllm_ascend/envs.py`) — that file is configuration surface, and a missing wheel in this container is an environment problem;
+  3. no new file under `vllm_ascend/patch/**` and no new patch registration — extend the existing module with a guarded branch.
+  Rules 2/3 are BLOCKING in adapter-qa and the gate; the only exception channel is a `# main2main-justification: <concrete reason>` marker on the offending line, the line above it, or the top of a new file. `_check_maintainability` suppresses its own advisory for a marked shape but never blocks (`violations` stays empty by design).
 
 ## Don'ts
 

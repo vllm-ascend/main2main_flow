@@ -11,31 +11,36 @@ Lines are relative to this file; read a section with `sed -n 'A,Bp' <this file>`
 
 | Section | Trigger — read when... | Lines |
 |---------|------------------------|-------|
-| §0 Decision order: guard first | ANY compatibility change — read this before choosing a shape | 31-54 |
-| §1 Upstream adds a parameter | a new param appears in an upstream signature | 55-66 |
-| §1b Removes a parameter + return change | a param is removed AND return semantics change | 67-83 |
-| §2 Constructor/factory signature change | a constructor or factory changes signature | 84-95 |
-| §3 Class moved to another module | a class moves modules upstream | 96-112 |
-| §4 Upstream deletes a patched module | vllm-ascend patches a module upstream deleted | 113-116 |
-| §5 Upstream fixes a bug with a workaround | upstream bugfix supersedes an ascend workaround | 117-126 |
-| §6 Refactoring too large for guards | >50 lines of guarded code | 127-137 |
-| §7 Runtime check Ascend can't satisfy | upstream adds an NPU-unsatisfiable check | 138-145 |
-| §8 PyTorch API not on NPU | upstream uses a torch API missing on NPU | 146-153 |
-| §9 Base class adds attr/method | base class gains fields/methods (incl. NVIDIA-only trap) | 154-194 |
-| §10 Method signature change — ALL overrides | a method signature changes; grep every override | 195-205 |
-| §11 Processor registrations removed | upstream unregisters processors | 206-214 |
-| §12 `next()` calls | changed code contains bare `next(...)` | 215-226 |
-| §13 Params added to an overridden method | overridden method gains params (two-version def) | 227-264 |
-| §14 Triton kernel signature change | a patched Triton kernel changes signature | 265-295 |
-| §15 Rejected shapes (PR #20156) | you are about to add a helper/probe/state/slice | 296-376 |
-| §16 Positive reference (PR #16527) | calibrating what a maintainer accepts | 377-395 |
-| Mypy prevention | final mypy errors on guards/imports/overrides | 396-403 |
+| §0 Decision order: guard first | ANY compatibility change — read this before choosing a shape | 34-62 |
+| §1 Upstream adds a parameter | a new param appears in an upstream signature | 64-74 |
+| §1b Removes a parameter + return change | a param is removed AND return semantics change | 76-91 |
+| §2 Constructor/factory signature change | a constructor or factory changes signature | 93-103 |
+| §3 Class moved to another module | a class moves modules upstream | 105-120 |
+| §4 Upstream deletes a patched module | vllm-ascend patches a module upstream deleted | 122-124 |
+| §5 Upstream fixes a bug with a workaround | upstream bugfix supersedes an ascend workaround | 126-134 |
+| §6 Refactoring too large for guards | >50 lines of guarded code | 136-145 |
+| §7 Runtime check Ascend can't satisfy | upstream adds an NPU-unsatisfiable check | 147-153 |
+| §8 PyTorch API not on NPU | upstream uses a torch API missing on NPU | 155-161 |
+| §9 Base class adds attr/method | base class gains fields/methods (incl. NVIDIA-only trap) | 163-202 |
+| §10 Method signature change — ALL overrides | a method signature changes; grep every override | 204-213 |
+| §11 Processor registrations removed | upstream unregisters processors | 215-222 |
+| §12 `next()` calls | changed code contains bare `next(...)` | 224-234 |
+| §13 Params added to an overridden method | overridden method gains params (two-version def) | 236-272 |
+| §14 Triton kernel signature change | a patched Triton kernel changes signature | 274-303 |
+| §15 Rejected shapes (PR #20156, #20223) | about to add a helper/probe/state/slice, an env var, or a patch module | 305-424 |
+| §16 Positive reference (PR #16527) | calibrating what a maintainer accepts | 426-443 |
+| Mypy prevention | final mypy errors on guards/imports/overrides | 445-451 |
 
 ## 0. Decision order: guard first
 
 **Rule**: main2main always supports two trees at once. Decide the SHAPE
 before writing code — in this order:
 
+0. Is the problem **not a code contract at all** — a wheel/op missing from
+   THIS container, a driver or image quirk, a kernel selector? → fix the
+   environment (upgrade the dependency) or report it. Do NOT add a
+   `VLLM_ASCEND_*` environment variable (§15.6) and do NOT add a new
+   module under `vllm_ascend/patch/**` (§15.7).
 1. Is the difference a **contract** (signature, arity, behavior, module
    path)? → **version-guard it at the narrowest site**:
    release behavior in the `if vllm_version_is("<tag>")` branch (copied
@@ -51,9 +56,10 @@ before writing code — in this order:
    version (§6).
 
 Everything else — a new helper, a new method, a capability probe, a
-state dict, a `[:N]` slice — is **rejected**; see §15. The guard is the
-default, and "both trees behave the same" is a claim that must be checked
-against the release tree, never assumed.
+state dict, a `[:N]` slice, a new env var, a new patch module — is
+**rejected**; see §15. The guard is the default, and "both trees behave the
+same" is a claim that must be checked against the release tree, never
+assumed.
 
 ## 1. Upstream adds a parameter
 
@@ -296,12 +302,15 @@ the caller passes the new arguments:
 grep -rn "_prepare_dflash_inputs_kernel_ascend" vllm_ascend/
 ```
 
-## 15. Rejected shapes — PR #20156 (auto-generated, maintainer-rejected)
+## 15. Rejected shapes — PR #20156 / #20223 (auto-generated, maintainer-rejected)
 
-All five were produced by an automated main2main run on a 7-file step. Each
-is "functionally green, structurally wrong": it makes the release lane
-inherit main's new behavior, or hides the difference behind an abstraction.
-They are BLOCKING in adapter-qa and in the push-time maintainability gate.
+§15.1-15.5 were produced by an automated main2main run on a 7-file step;
+§15.6-15.7 come from the same pipeline a few runs later. Each is
+"functionally green, structurally wrong": it makes the release lane
+inherit main's new behavior, hides the difference behind an abstraction, or
+adds permanent surface for a problem that is not an upstream contract at
+all. They are BLOCKING in adapter-qa and in the push-time maintainability
+gate.
 
 ### 15.1 New method + new state instead of a guarded branch
 
@@ -376,6 +385,43 @@ subprocesses because they hang in the flow's container.
 Rejected: the flow's environment problem must not be shipped as an upstream
 config change; the flow suppresses hooks itself (`SKIP`), and edits to
 `.github/**` / `.pre-commit-config.yaml` are reverted automatically.
+
+### 15.6 A new environment variable as a version / kernel switch
+
+`vllm_ascend/envs.py` gained
+`"VLLM_ASCEND_INDEX_SCORE_IMPL"` (`auto`/`ascendc`/`triton`) and
+`vllm_ascend/models/minimax_m3/msa_m3.py` read it to pick a kernel at import
+time, because one container's CANN build did not export
+`cann_ops_transformer.ops.msa_index_score`.
+
+Rejected: `envs.py` is configuration surface, not adaptation surface. The
+trigger was a missing wheel in THIS container, and the correct fix is the
+dependency (upstream added `[CI] Install CANN 9.3.0 ops-transformer
+packages` for exactly this reason), not a user-visible switch that silently
+changes the kernel on old images. `auto` is also just the rejected
+capability probe (§15.2) with an env wrapper around it.
+
+Accepted: a `vllm_version_is` branch when the two trees really differ; a
+reported environment failure when they do not. If a switch is genuinely
+unavoidable, it needs `# main2main-justification: <concrete reason>` on the
+line above the key, and the reason must name the upstream contract or
+container fact.
+
+### 15.7 A new patch module instead of one more guarded branch
+
+A version difference inside a patched upstream module was handled by adding
+`vllm_ascend/patch/worker/patch_v2/patch_x.py` plus a registration entry in
+that directory's `__init__.py`.
+
+Rejected: every patch module is permanent surface — it must be re-validated
+against each upstream bump, it changes import order, and reviewers cannot
+see which upstream contract it shadows. The existing module already owns
+that upstream symbol; put the difference in a guarded branch there.
+
+Accepted: extending the existing module (`(§1b)`/`(§13)` shapes), and
+DELETING a patch when upstream makes it unnecessary. When upstream deletes
+or renames the patched symbol, merge or remove the patch — a `_v2`/`_compat`
+file only moves the maintenance cost.
 
 ## 16. Positive reference — PR #16527 (main2main v0.30.0)
 

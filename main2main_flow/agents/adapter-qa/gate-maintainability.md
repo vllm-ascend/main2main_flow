@@ -51,6 +51,13 @@ write the verdict. Do not re-derive the adaptation and do not run tests.
 5. **CI/tooling config touched**: `.github/**` (other than the two
    `vllm-*-*.commit` pointer files), `.pre-commit-config.yaml`,
    `setup.cfg`, `tox.ini`, `tools/*.sh`.
+6. **New environment variable**: a `+` line adding a `VLLM_ASCEND_*` key to
+   `vllm_ascend/envs.py`, or an `os.getenv("VLLM_ASCEND_...")` read
+   elsewhere. That file is configuration surface; a version difference is a
+   `vllm_version_is` branch and a missing wheel is an environment problem.
+7. **New patch module**: a file added under `vllm_ascend/patch/**`, or a new
+   registration entry for one. Extending an existing patch module with a
+   guarded branch is the accepted shape.
 
 Explicitly NOT findings (allowed shapes):
 
@@ -58,11 +65,21 @@ Explicitly NOT findings (allowed shapes):
 - the two-`def` form under `vllm_version_is` for an overridden method;
 - a base-class attribute that upstream reads at runtime being accepted and
   set in the subclass;
+- editing an EXISTING patch module, or reading an already-existing
+  `VLLM_ASCEND_*` variable;
+- for findings 6 and 7 only: a `# main2main-justification: <reason>` comment
+  on the offending line, on the line above it, or among the first few lines
+  of a new file, WHEN the reason names a concrete upstream contract or
+  container fact. A bare marker or a vague reason is still a finding;
 - cosmetic preference (naming, comment wording, ordering).
 
 Calibration: PR vllm-ascend#20156 is the rejected shape (new
 `_add_cached_input_id` + new state, a `find_spec` capability probe, a
 `draft_split[:3]` slice, a `.pre-commit-config.yaml` edit).
+PR vllm-ascend#20223 is the rejected env-var shape: it added
+`VLLM_ASCEND_INDEX_SCORE_IMPL` because one container's CANN build did not
+export `cann_ops_transformer.ops.msa_index_score`; the fix was the
+dependency (upstream shipped it separately), never a switch in `envs.py`.
 PR vllm-ascend#16527 is the accepted shape (guards and defaulted parameters
 only; obsolete guards deleted when the tag advanced).
 

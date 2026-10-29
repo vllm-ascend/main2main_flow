@@ -112,8 +112,12 @@ pre-change behavior from memory.
   contract differs, write `if vllm_version_is("{release_tag}"):` (release
   behavior, copied from `{release_vllm_path}`) `else:` (upstream-main
   behavior) at the narrowest site. Never add a helper, method, or
-  capability probe whose only purpose is to bridge two versions — see the
-  Mainline-continuity rules below (BLOCKING in adapter-qa and the gate).
+  capability probe whose only purpose is to bridge two versions — the
+  guard belongs at the call or return site. ANY newly added callable
+  (`def`) is a `maintainability` finding in adapter-qa and the gate; the
+  only sanctioned new `def`s are the two-`def` override form and a
+  defaulted parameter — see the Mainline-continuity rules below
+  (BLOCKING in adapter-qa and the gate).
 - **CI / tooling configuration is not an adaptation surface.** Never edit
   `.pre-commit-config.yaml`, `.github/**` (except the two pointer files the
   flow owns), `setup.cfg`, `tox.ini`, `.shellcheckrc`, or `tools/*.sh`.
@@ -202,6 +206,27 @@ and in the push-time maintainability gate.
    whose signature changed gets the two-`def` form; a base-class attribute
    that upstream READS at runtime must be accepted and set. Those are the
    only non-guard shapes allowed.
+7. **No new environment variables.** `vllm_ascend/envs.py` is configuration
+   surface, not adaptation surface: never add a `VLLM_ASCEND_*` key, and
+   never add an `os.getenv("VLLM_ASCEND_...")` read, to bridge a version, to
+   pick a kernel, or to make a failing check go green. A version difference
+   is a `vllm_version_is` branch; a package missing from THIS container
+   (CANN/ops-transformer wheels, a driver, an image) is a flow-environment
+   problem — report it in `analysis.md` instead of shipping a switch.
+   Reading an ALREADY EXISTING var is fine.
+8. **No new patch modules.** Do not add a file under
+   `vllm_ascend/patch/**` and do not add a registration entry for one:
+   extend the existing patch module with a guarded branch. When upstream
+   deletes or renames the patched symbol, DELETE or merge the patch — never
+   add a `_v2`/`_compat` module.
+9. **The exception channel for rules 7 and 8.** If a new env var or a new
+   patch module is genuinely unavoidable (upstream itself added the switch,
+   or the upstream contract requires a patch of its own), put
+   `# main2main-justification: <concrete reason>` on the line above it (at
+   the top of a new file). That marker makes it a non-finding. Without the
+   marker, rules 7/8 are BLOCKING in adapter-qa and in the gate. Never use
+   the marker to restate the change ("needed for compatibility") — the
+   reason must name the upstream contract or container fact.
 
 Sanctioned shapes, in decision order:
 
@@ -214,7 +239,8 @@ Sanctioned shapes, in decision order:
 | whole module/class replaced (>~50 lines) | file split by version (§6) |
 
 Reference: `reference/adaptation-patterns.md` §0 (decision order), §15
-(rejected shapes, with the PR #20156 cases) and §16 (the PR #16527 shape).
+(rejected shapes: the PR #20156 cases, §15.6 the new-env-var shape from PR
+#20223 and §15.7 the new-patch-module shape) and §16 (the PR #16527 shape).
 
 ## UT adaptation rules (write tests that survive the shared-process batch)
 
