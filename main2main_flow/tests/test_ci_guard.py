@@ -15,6 +15,12 @@ Whitelist policy (user 2026-09-21): under .github/ only
 vllm-main-verified.commit and vllm-release-tag.commit may change — the
 guard covers composite actions, CODEOWNERS, dependabot, templates too,
 not just workflows/ (GitHub's PAT scope check sees only workflows/).
+
+Tooling-config policy (user 2026-10-29, PR #20156): .pre-commit-config.yaml
+is guarded in full.  That PR "fixed" a hanging actionlint hook by committing
+`args: ["-shellcheck=", "-pyflakes="]`, permanently disabling two upstream
+lint checks for every contributor; the flow suppresses environment-only
+hook problems itself (SKIP in run_format_sh) instead.
 """
 import subprocess
 from pathlib import Path
@@ -26,6 +32,7 @@ from main2main_flow.scripts.utils import ci_config_guard as guard
 from main2main_flow.scripts.utils.push_to_github import _force_squash, _git_push
 
 WF = ".github/workflows"
+PRECOMMIT = ".pre-commit-config.yaml"
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -50,6 +57,9 @@ def _init_repo(repo: Path) -> str:
                                                  encoding="utf-8")
     (repo / ".github" / "vllm-main-verified.commit").write_text(
         "aaa\n", encoding="utf-8")
+    (repo / PRECOMMIT).write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: actionlint\n        args: []\n", encoding="utf-8")
     (repo / "vllm_ascend").mkdir()
     (repo / "vllm_ascend" / "x.py").write_text("A = 1\n", encoding="utf-8")
     _git(repo, "add", "-A")
@@ -140,6 +150,55 @@ def test_restore_leaves_allowed_pointer_files_alone(tmp_path: Path) -> None:
     assert (repo / ".github" / "vllm-release-tag.commit").read_text() == "v0.13.0\n"
 
 
+# ---- layer 1 (tooling config): .pre-commit-config.yaml is guarded too ----
+
+def test_guarded_keeps_dot_prefix_in_tooling_config_name() -> None:
+    # Regression: a naive `rel.lstrip("./")` strips the leading dot of
+    # ".pre-commit-config.yaml" and silently un-guards it.
+    assert guard._guarded(PRECOMMIT)
+    assert guard._guarded("./" + PRECOMMIT)
+    assert guard._guarded(".github/workflows/a.yaml")
+    assert not guard._guarded(".github/vllm-main-verified.commit")
+    assert not guard._guarded("vllm_ascend/x.py")
+
+
+def test_restore_reverts_pre_commit_config_edit(tmp_path: Path) -> None:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    original = (repo / PRECOMMIT).read_text()
+    snap = guard.snapshot(repo)
+    # PR #20156's cheat: disable actionlint's shellcheck/pyflakes subprocesses
+    # because they hang in the flow container.
+    (repo / PRECOMMIT).write_text(
+        original.replace("args: []", 'args: ["-shellcheck=", "-pyflakes="]'),
+        encoding="utf-8")
+    (repo / "vllm_ascend" / "x.py").write_text("A = 2\n", encoding="utf-8")
+
+    touched = guard.restore(repo, snap, "test session")
+
+    assert touched == [PRECOMMIT]
+    assert (repo / PRECOMMIT).read_text() == original
+    # Real code edits are untouched.
+    assert (repo / "vllm_ascend" / "x.py").read_text() == "A = 2\n"
+
+
+def test_restore_removes_new_pre_commit_config(tmp_path: Path) -> None:
+    repo = tmp_path / "ascend"
+    _init_repo(repo)
+    (repo / PRECOMMIT).unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "drop pre-commit")
+    # Absent at snapshot time, then re-created by the adapter.
+    snap = guard.snapshot(repo)
+    (repo / PRECOMMIT).write_text("repos: []\n", encoding="utf-8")
+    _git(repo, "add", PRECOMMIT)
+
+    touched = guard.restore(repo, snap, "test session")
+
+    assert touched == [PRECOMMIT]
+    assert not (repo / PRECOMMIT).exists()
+
+
 # ---- layer 1 wiring: every adapter session is bracketed ----
 
 def test_adapter_session_ci_edits_are_reverted(tmp_path: Path,
@@ -204,6 +263,29 @@ def test_force_squash_strips_ci_edits_but_keeps_code(tmp_path: Path) -> None:
     assert (repo / WF / "a.yaml").read_text() == "name: nightly\n"
 
 
+def test_force_squash_strips_pre_commit_config_edit(tmp_path: Path) -> None:
+    repo = tmp_path / "ascend"
+    base = _init_repo(repo)
+    original = (repo / PRECOMMIT).read_text()
+    (repo / "vllm_ascend" / "x.py").write_text("A = 2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fix")
+    (repo / PRECOMMIT).write_text(
+        original.replace("args: []", 'args: ["-shellcheck=", "-pyflakes="]'),
+        encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "hack the linter")
+
+    _force_squash(repo, base, "branch-under-test")
+
+    r = subprocess.run(["git", "diff", "--name-only", f"{base}..HEAD"],
+                       cwd=str(repo), capture_output=True, text=True)
+    files = set(r.stdout.split())
+    assert PRECOMMIT not in files, files
+    assert "vllm_ascend/x.py" in files
+    assert (repo / PRECOMMIT).read_text() == original
+
+
 # ---- layer 3: push preflight aborts on any committed forbidden .github edit ----
 
 def test_git_push_preflight_aborts_on_committed_ci_edit(
@@ -231,6 +313,26 @@ def test_git_push_preflight_aborts_on_committed_action_edit(
     base = _init_repo(repo)
     (repo / ".github" / "actions" / "runner" / "action.yml").write_text(
         "runs: cheat\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "cheat")
+    pushed: list[tuple] = []
+    monkeypatch.setattr("main2main_flow.scripts.utils.push_to_github"
+                        "._push_with_lease",
+                        lambda ascend_path, branch: pushed.append(branch))
+
+    with pytest.raises(SystemExit):
+        _git_push(repo, "main2main_auto_x", base_ref=base)
+    assert pushed == []
+
+
+def test_git_push_preflight_aborts_on_committed_pre_commit_edit(
+        tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "ascend"
+    base = _init_repo(repo)
+    (repo / PRECOMMIT).write_text(
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: actionlint\n"
+        '        args: ["-shellcheck=", "-pyflakes="]\n', encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "cheat")
     pushed: list[tuple] = []

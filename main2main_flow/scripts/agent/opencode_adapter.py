@@ -154,6 +154,11 @@ def _build_prompt(inputs: dict[str, Any]) -> tuple[str, list[str]]:
     ctx.setdefault("vllm_report_context", "(vllm-report unavailable, use grep)")
     ctx.setdefault("start_commit", "")
     ctx.setdefault("end_commit", "")
+    # The release tree is the source of truth for the OLD branch of every
+    # version guard (mainline-continuity rules).  Flow passes the worktree
+    # path; standalone/debug invocations fall back to this marker.
+    ctx.setdefault("release_vllm_path",
+                   "(release worktree unavailable — reason from the pinned tag)")
 
     # Inline error content from error_logs files (if any).
     # error_logs is a JSON array of file paths, e.g. ["/path/a.txt", "/path/b.json"].

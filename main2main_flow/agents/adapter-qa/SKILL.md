@@ -39,6 +39,7 @@ and does not improve review quality.
 | repo | path |
 |------|------|
 | vllm (at target commit) | {vllm_path} |
+| vllm (release {release_tag}) | {release_vllm_path} |
 | vllm-ascend (adapted) | {ascend_path} |
 
 ## Inputs
@@ -65,6 +66,34 @@ and does not improve review quality.
 - No dead or commented-out code left behind.
 - No temp artifacts (scratch files, logs, backups) in the diff.
 
+## Maintainability review (BLOCKING — run this FIRST)
+
+The diff is CUMULATIVE: it may contain code produced by an earlier run whose
+PR is still open. That code is in scope — a shape problem there blocks the
+same way as one this step introduced.
+
+Check these five questions against the diff, in order. Any YES is a
+`maintainability` issue (severity "high"), not a style note:
+
+1. Was a method, function, `_impl`/`_main`/`_compat` variant, or module-level
+   capability probe (`find_spec`/`hasattr`) ADDED whose only purpose is to
+   bridge the two versions?  (`git diff` `+def` lines)
+2. Was upstream-main behavior mirrored on BOTH trees unconditionally — a new
+   state dict, refcount bookkeeping, a changed default — where the release
+   lane had different behavior before?
+3. Is a contract difference (arity/type/parameter set) hidden rather than
+   guarded: `result[:N]`, `**kwargs`, a bare `getattr(obj, "x", default)`?
+4. Does every behavior difference that IS guarded keep the release branch
+   faithful to `{release_vllm_path}` (spot-check one guard against it), with
+   main behavior in the `else` branch?
+5. Was any CI/tooling config edited (`.github/**`, `.pre-commit-config.yaml`,
+   `setup.cfg`, `tox.ini`, `tools/*.sh`)?
+
+Allowed shapes (never report these): a new defaulted parameter added to the
+signature; the two-`def` form under `vllm_version_is`; a base-class attribute
+that upstream reads at runtime being accepted and set. Calibration:
+PR #20156 is the rejected shape, PR #16527 the accepted one.
+
 ## Rules
 
 - You may read any file in both repositories
@@ -79,8 +108,17 @@ identity and per-root fields recommended by the interface handoff below):
 ```json
 {{
   "verdict": "pass" | "fail",
-  "issues": [{{"file": "...", "line": 0, "issue": "...", "severity": "high" | "medium" | "low"}}]
+  "issues": [
+    {{"file": "...", "line": 0, "issue": "...",
+      "severity": "high" | "medium" | "low",
+      "category": "runtime" | "maintainability"}}
+  ]
 }}
 ```
 
-Verdict "fail" only for issues that would break CI or runtime — not style.
+Verdict "fail" for issues that would break CI/runtime, **and** for
+maintainability violations (category "maintainability"). A maintainability
+issue means "rewrite the shape" — replace the added helper/state/probe with
+one guarded branch, per the Mainline-continuity rules; it does NOT mean
+"add a guard around the helper". Pure formatting taste (naming, comment
+wording, ordering) stays non-blocking — use severity "low" for those.

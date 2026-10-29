@@ -69,8 +69,13 @@ these rules to stay on the critical path:
 
 | repo | path |
 |------|------|
-| vllm (read-only) | {vllm_path} |
+| vllm (at target commit, read-only) | {vllm_path} |
+| vllm (release {release_tag}, read-only) | {release_vllm_path} |
 | vllm-ascend (edit here) | {ascend_path} |
+
+The release tree is the source of truth for the OLD branch of every version
+guard: read it (`{release_vllm_path}`) instead of reconstructing the
+pre-change behavior from memory.
 
 ## Inputs
 
@@ -102,6 +107,20 @@ these rules to stay on the critical path:
   write targets are {ascend_path} and the output paths this prompt names.
 - Do NOT run git add, git commit, git reset, or git checkout in vllm-ascend
 - Use `vllm_version_is("{release_tag}")` for version boundaries — never `hasattr` or `try/except`
+- **Prefer a version guard over a new implementation.** The unit of a
+  main2main change is ONE behavior branch, not a new abstraction: when a
+  contract differs, write `if vllm_version_is("{release_tag}"):` (release
+  behavior, copied from `{release_vllm_path}`) `else:` (upstream-main
+  behavior) at the narrowest site. Never add a helper, method, or
+  capability probe whose only purpose is to bridge two versions — see the
+  Mainline-continuity rules below (BLOCKING in adapter-qa and the gate).
+- **CI / tooling configuration is not an adaptation surface.** Never edit
+  `.pre-commit-config.yaml`, `.github/**` (except the two pointer files the
+  flow owns), `setup.cfg`, `tox.ini`, `.shellcheckrc`, or `tools/*.sh`.
+  A hook that hangs in this container is a flow-environment problem and the
+  flow suppresses it itself (`SKIP`); committing that change disables the
+  upstream repository's own linting, is reverted automatically, and fails
+  the push preflight.
 - All branches of a version guard must have identical function signatures
 - **Imports of new upstream symbols must be guarded too** — a module-level
   `from vllm... import NewSymbol` crashes older fixed branches (v0.27.1) at
@@ -150,6 +169,52 @@ these rules to stay on the critical path:
   that log exists precisely for you
 - Do NOT treat ModuleNotFoundError or missing NPU/GPU from local commands as adaptation failures
 - **NEVER modify anything under tests/e2e/ — E2E test cases (assertions, golden values, parametrizations) are frozen.** Edits there are automatically reverted and the attempt is voided; adapt the `vllm_ascend/` source instead. (`tests/ut/` MAY be adapted per the UT rules below.)
+
+## Mainline-continuity rules (MANDATORY — check before editing)
+
+vllm-ascend main tracks two trees at once (upstream main + the pinned
+`{release_tag}` release). Every change must read to a maintainer as a
+*compatibility* change, not a fork. These rules are BLOCKING in adapter-qa
+and in the push-time maintainability gate.
+
+1. **One behavior branch, not one new implementation.** When the trees
+   differ, the difference is expressed as a guarded branch at the call or
+   return site; the release branch is copied from `{release_vllm_path}`
+   (read it — never reconstruct the old behavior from memory).
+2. **No compat-only abstractions.** Do not add a method, function,
+   module-level capability probe, or `_main`/`_impl`/`_compat` variant whose
+   only purpose is to hide a version difference. `hasattr` /
+   `importlib.util.find_spec` are NOT version checks: when the difference
+   is a contract, it is a version boundary.
+3. **No unconditional mirroring.** Never reproduce upstream-main's new
+   behavior (a refcount fix, a new state dict, a changed default) on BOTH
+   trees "so they behave alike" — that silently changes release behavior
+   the release lane never asked for. Guard it instead.
+4. **No silent contract swallowing.** `result[:3]`, `**kwargs`, or a bare
+   `getattr(obj, "x", default)` over a value whose arity/type differs
+   across trees hides the difference from mypy, from the release lane and
+   from review. Unpack per version branch.
+5. **Tests follow the source, not the capability.** Do not fork every
+   assertion on a new flag; branch the test once on
+   `vllm_version_is("{release_tag}")` when the assertion itself differs.
+6. **Signature/param compat uses the sanctioned shapes**: a new parameter
+   with a default goes straight into the signature; an overridden method
+   whose signature changed gets the two-`def` form; a base-class attribute
+   that upstream READS at runtime must be accepted and set. Those are the
+   only non-guard shapes allowed.
+
+Sanctioned shapes, in decision order:
+
+| diff shape | shape to use |
+|---|---|
+| upstream adds a defaulted parameter | add it to the signature (§1) |
+| upstream changes/removes a parameter, or return arity | guarded branch at the call site (§1b) |
+| overridden method gains params | two `def`s under `vllm_version_is` (§13) |
+| upstream base class reads a new attribute | accept + set it in the subclass (§9) |
+| whole module/class replaced (>~50 lines) | file split by version (§6) |
+
+Reference: `reference/adaptation-patterns.md` §0 (decision order), §15
+(rejected shapes, with the PR #20156 cases) and §16 (the PR #16527 shape).
 
 ## UT adaptation rules (write tests that survive the shared-process batch)
 
@@ -246,14 +311,28 @@ The step_target.patch is cumulative (git diff HEAD).
      Do NOT modify `.github/workflows/scripts/` to fix these.
 
 
-**Guard decision tree**:
+**Guard decision tree** (guard-FIRST — main2main always supports two trees):
 
 ```
-Does this code path need to support BOTH the release version AND upstream main?
-  ├─ YES, and the API differs → use vllm_version_is("{release_tag}")
-  └─ NO  → no new guard needed
+Is there a version contract difference (signature, arity, behavior,
+module path) between upstream main and the pinned {release_tag}?
+  ├─ YES → guard it at the narrowest site:
+  │        if vllm_version_is("{release_tag}"):   # release behavior,
+  │            ...                                # copied from the
+  │        else:                                  # release tree below
+  │            ...                                # main behavior
+  └─ NO  → is it a new defaulted parameter, an overridden-method signature
+           change, or a base-class attribute upstream reads?
+             ├─ YES → sanctioned non-guard shape (§1 / §13 / §9)
+             └─ NO  → no change needed
 ```
 
+- A guard is the DEFAULT for every behavior difference. "The two trees
+  behave the same" is a CLAIM you must verify against `{release_vllm_path}`;
+  it is never an assumption that lets you skip compatibility work.
+- Resolve a difference by guarding it, never by adding a helper, method or
+  capability probe. If the branch would exceed ~50 lines, split the file by
+  version (§6).
 - New parameters with defaults: no guard needed
 - Constructor/factory signature changes: guard with `vllm_version_is()`
 - Import path changes: guard the import, import unconditionally if the symbol
@@ -346,6 +425,18 @@ four-axis verification matrix.
    TypeError), never an inline conditional kwargs spread (main mypy),
    never a runtime kwargs dict (AST structure tests).  See
    `reference/common-pitfalls.md` §"Dual-version dataclass fields".
+
+22. **No new compat-only abstraction**: every `def` you add must survive
+    the question "why can this not be one guarded branch?" — a helper,
+    method or probe that exists only to bridge the two versions is rejected
+    (blocking QA item).
+23. **No new state to emulate upstream**: an added `self.x = ...` that
+    mirrors upstream-main's new bookkeeping must become a guarded branch,
+    not an unconditional attribute both trees carry.
+24. **No module-level capability probes** (`find_spec`/`hasattr`) standing
+    in for a version boundary.  Version the contract, not the environment.
+25. **No CI/tooling-config edits** (`.github/**`, `.pre-commit-config.yaml`,
+    `setup.cfg`, `tox.ini`, `tools/*.sh`) — the flow reverts them.
 
 **Format rules — apply WHILE editing, not after:**
 
