@@ -454,6 +454,12 @@ class Main2MainState(BaseModel):
 
     final_status: str = ""
 
+    # Maintainability (mainline-continuity) findings that survived the
+    # per-step rework budget.  They never fail a step — they are surfaced
+    # in the PR body so a reviewer sees the known shape risks instead of
+    # discovering them in review.
+    style_risks: list[str] = []
+
     # Tracked from detect step for PR title / push
     base_commit: str = ""
 
@@ -592,24 +598,33 @@ class Main2MainFlow:
         upstream_patch_path: str = "",
         qa_session_id: str = "",
         *, read_only_interface_review: bool = False,
-    ) -> tuple[list[str], str]:
-        """adapter-qa: independent review of the current diff."""
+        vllm_release_path: str = "",
+    ) -> tuple[list[str], list[str], str]:
+        """adapter-qa: independent review of the current diff.
+
+        Returns ``(runtime_issues, style_issues, session_id)``.  Runtime
+        issues block the step as before; ``style_issues`` are the
+        maintainability (mainline-continuity) findings — the caller gives
+        them exactly one rework round, then records them as a PR-visible
+        risk instead of failing the step (a functionally correct PR must
+        not be blocked by shape, but the shape must not pass silently).
+        """
         diff = subprocess.run(
             ["git", "diff", "HEAD"], cwd=ascend_path,
             capture_output=True, text=True,
         ).stdout.strip()
         if read_only_interface_review and diff:
-            return ["interface-handoff: read-only gray review requires a committed, unchanged fixture"], qa_session_id
+            return ["interface-handoff: read-only gray review requires a committed, unchanged fixture"], [], qa_session_id
         handoff_warnings: list[str] = []
         report, assessment = self._interface_assessment(
             step_id, step_dir, read_only=read_only_interface_review, warnings=handoff_warnings,
         )
         if not diff and not (report and report.roots):
-            return [], qa_session_id
+            return [], [], qa_session_id
 
         lessons_path = Path(__file__).parent / "agents" / "adapter-qa" / "reference" / "review-lessons.md"
         if not lessons_path.exists():
-            return [], qa_session_id
+            return [], [], qa_session_id
         qa_template_path = Path(__file__).parent / "agents" / "adapter-qa" / "SKILL.md"
         qa_template = ""
         if qa_template_path.exists():
@@ -628,6 +643,16 @@ class Main2MainFlow:
 
         diff_limit = 8000
         diff_snippet = diff if len(diff) <= diff_limit else diff[:diff_limit] + "\n... [truncated]"
+        # The excerpt above is head-only; a cumulative multi-file diff (the
+        # normal shape after a handful of steps) exceeds it, which silently
+        # turned the second half of the diff into "blind review".  Persist
+        # the whole diff and point QA at it (it reads on demand, so the
+        # prompt itself stays small).
+        diff_full_path = Path(step_dir) / "review_diff.patch"
+        try:
+            diff_full_path.write_text(diff + "\n", encoding="utf-8")
+        except OSError:
+            diff_full_path = Path("")
 
         review_path = str(Path(step_dir) / "review.json")
         if qa_template:
@@ -642,11 +667,17 @@ class Main2MainFlow:
                 release_tag=release_tag,
                 vllm_path=vllm_path,
                 ascend_path=ascend_path,
+                release_vllm_path=(vllm_release_path
+                                   or "(release worktree unavailable)"),
                 patch_path=upstream_patch,
                 review_path=review_path,
                 diff_content=diff_snippet,
                 review_checklist=checklist,
             )
+            if str(diff_full_path):
+                prompt += (f"\nFull cumulative diff (the excerpt above is "
+                           f"capped at {diff_limit} chars): {diff_full_path}\n"
+                           f"Read it before judging files past the cap.\n")
         else:
             prompt = f"""You are a code reviewer. Review the following adaptation diff for policy violations.
 Return ONLY a JSON object: {{"verdict": "pass"|"fail", "issues": [...]}}.
@@ -675,7 +706,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         )
         if not output_text.strip():
             ts_print(f"[adapter-qa] {step_id}: opencode produced no output")
-            return ["critic: opencode produced no output"], new_session_id
+            return ["critic: opencode produced no output"], [], new_session_id
 
         review_json = Path(review_path)
         if review_json.exists():
@@ -688,18 +719,141 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                         warn_handoff(f"QA extra interface fields: {exc}. Using the original verdict/issues policy.")
                 verdict = review.get("verdict", "")
                 issues = review.get("issues", [])
-                if verdict == "pass":
+                runtime_issues: list[str] = []
+                style_issues: list[str] = []
+                for issue in issues:
+                    if not isinstance(issue, dict):
+                        continue
+                    line = (f"{issue.get('file', '?')}:{issue.get('line', '?')}: "
+                            f"{issue.get('issue', '?')}")
+                    if str(issue.get("category", "runtime")) == "maintainability":
+                        style_issues.append(f"[style] {line}")
+                    else:
+                        runtime_issues.append(line)
+                if verdict == "pass" and not runtime_issues and not style_issues:
                     ts_print(f"[adapter-qa] {step_id}: pass")
-                    return [], new_session_id
-                ts_print(f"[adapter-qa] {step_id}: fail — {len(issues)} issue(s)")
-                return ([f"{i.get('file', '?')}:{i.get('line', '?')}: {i.get('issue', '?')}" for i in issues],
-                        new_session_id)
+                    return [], [], new_session_id
+                ts_print(f"[adapter-qa] {step_id}: fail — {len(runtime_issues)} "
+                         f"runtime, {len(style_issues)} maintainability issue(s)")
+                return runtime_issues, style_issues, new_session_id
             except (ValueError, TypeError, AttributeError):
                 ts_print(f"[adapter-qa] {step_id}: fail (review.json unparseable)")
-                return ["critic: review.json could not be parsed"], new_session_id
+                return ["critic: review.json could not be parsed"], [], new_session_id
 
         ts_print(f"[adapter-qa] {step_id}: fail (no review.json found)")
-        return ["critic: no review.json found — opencode did not produce expected output"], new_session_id
+        return (["critic: no review.json found — opencode did not produce expected output"],
+                [], new_session_id)
+
+    def _gate_maintainability_review(self, gate_dir: Path) -> tuple[list[str], str]:
+        """Push-time shape review of the CUMULATIVE diff (gate layer).
+
+        Per-step adapter-qa only sees the step it runs for. A shape problem
+        that shipped in an earlier run — or that survived the one per-step
+        rework round — would otherwise ride into every later PR untouched
+        (PR #20156's new-method/refcount shape was inherited by the next
+        run's cumulative diff). This pass reviews the whole diff once per
+        gate run and hands its findings to the adapter-fix round; whatever
+        survives lands in the PR body as a known risk.
+
+        Fail-soft by design: the review is advisory, so a missing opencode
+        binary, an unavailable model or an unparseable verdict must never
+        break a gate that is otherwise green (SKIP_AI_ANALYSIS runs take
+        exactly this path).
+
+        Returns ``(issues, report_path)``; empty values mean "nothing to
+        report" (disabled, template missing, review failed, or pass).
+        """
+        if os.environ.get("SKIP_AI_ANALYSIS", "false").lower() == "true":
+            ts_print("[gate-shape] SKIP_AI_ANALYSIS=true — shape review skipped")
+            return [], ""
+        if os.environ.get("MAIN2MAIN_STYLE_GATE", "1").lower() in (
+                "0", "false", "no", "off"):
+            return [], ""
+        try:
+            return self._gate_maintainability_review_impl(gate_dir)
+        except Exception as exc:  # noqa: BLE001 - advisory layer must not block
+            ts_print(f"[gate-shape] review failed ({type(exc).__name__}: {exc}) "
+                     f"— no shape risk recorded, gate continues")
+            return [], ""
+
+    def _gate_maintainability_review_impl(
+            self, gate_dir: Path) -> tuple[list[str], str]:
+        ascend_path = self.state.vllm_ascend_path
+        template_path = (Path(__file__).parent / "agents" / "adapter-qa"
+                         / "gate-maintainability.md")
+        try:
+            template = template_path.read_text(encoding="utf-8")
+        except OSError:
+            ts_print("[gate-shape] template missing — shape review skipped")
+            return [], ""
+
+        review_path = gate_dir / "maintainability_review.json"
+        report_path = gate_dir / "maintainability_review.md"
+        # New modules the adapter created are invisible to `git diff` until
+        # intent-to-added (the gate does the same before regenerating its
+        # patch), so a brand-new helper file would escape the review.
+        subprocess.run(["git", "add", "-N", "."], cwd=ascend_path,
+                       capture_output=True)
+        diff = run_git(ascend_path, "diff", self.state.original_ascend_ref)
+        diff_path = gate_dir / "maintainability_diff.patch"
+        diff_path.write_text(diff + "\n", encoding="utf-8")
+        stat_path = gate_dir / "maintainability_diff.stat.txt"
+        stat_path.write_text(
+            run_git(ascend_path, "diff", "--stat",
+                    self.state.original_ascend_ref) + "\n",
+            encoding="utf-8")
+
+        review_path.unlink(missing_ok=True)
+        prompt = template.format(
+            release_tag=self.state.release_tag or "(unknown)",
+            vllm_path=self.state.vllm_path,
+            release_vllm_path=(self.state.vllm_release_path
+                               or "(release worktree unavailable)"),
+            ascend_path=ascend_path,
+            diff_path=diff_path,
+            stat_path=stat_path,
+            review_path=review_path,
+        )
+        model = (os.environ.get("MAIN2MAIN_MODEL_REVIEW")
+                 or os.environ.get("MAIN2MAIN_MODEL", "deepseek/deepseek-flash"))
+        ts_print(f"[gate-shape] reviewing cumulative diff ({len(diff)} bytes) "
+                 f"model={model} ...")
+        run_opencode_review(
+            prompt,
+            log_path=gate_dir / "opencode_shape.log",
+            raw_path=gate_dir / "opencode_shape_raw.jsonl",
+            stderr_path=gate_dir / "opencode_shape_stderr.log",
+            model=model,
+        )
+        if not review_path.exists():
+            ts_print("[gate-shape] no verdict produced — no shape risk recorded")
+            return [], ""
+        try:
+            review = json.loads(review_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError):
+            ts_print("[gate-shape] verdict unparseable — no shape risk recorded")
+            return [], ""
+        issues: list[str] = []
+        for issue in review.get("issues") or []:
+            if not isinstance(issue, dict):
+                continue
+            if str(issue.get("category", "maintainability")) != "maintainability":
+                continue
+            issues.append(f"{issue.get('file', '?')}:{issue.get('line', '?')}: "
+                          f"{issue.get('issue', '?')}")
+        if str(review.get("verdict", "")) == "fail" and not issues:
+            issues = ["maintainability review reported fail without an "
+                      "issue list — see maintainability_review.json"]
+        report_path.write_text(
+            json.dumps({"verdict": review.get("verdict", ""),
+                        "issues": issues}, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        if issues:
+            ts_print(f"[gate-shape] {len(issues)} maintainability finding(s) "
+                     f"-> {report_path}")
+            return issues, str(report_path)
+        ts_print("[gate-shape] cumulative diff shape OK")
+        return [], ""
 
     def run(self, inputs: dict | None = None):
         # The run summary is emitted from `finally` so that every exit — the
@@ -1432,9 +1586,36 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # so it isn't retried every iteration.  A red tree breaks the gate.
         smoke_passed_sha: str | None = None
         smoke_suppressed_sha: str | None = None
+        # Maintainability (shape) pass: at most TWO reviews per gate run —
+        # the first verdict, then one confirmation after the rework round.
+        # Findings are behaviour-neutral, so they never block: statics and
+        # e2e own correctness.  Whatever survives is recorded in
+        # state.style_risks and surfaced in the PR body.
+        shape_reviews_left = 2
+        shape_reviewed_sha: str | None = None
 
         while True:
             tree_sha = self._working_tree_diff_sha(ascend_path)
+            if shape_reviews_left > 0 and tree_sha != shape_reviewed_sha:
+                shape_reviews_left -= 1
+                shape_issues, shape_report = self._gate_maintainability_review(
+                    gate_dir)
+                # Re-sha: the review itself never edits, but the sha also
+                # guards against an identical tree being reviewed twice.
+                shape_reviewed_sha = self._working_tree_diff_sha(ascend_path)
+                if shape_issues and shape_reviews_left > 0 and shape_report:
+                    ts_print("\n[final_quality_gate] maintainability rework "
+                             "round: shape findings -> adapter-fix")
+                    self._gate_adapter_fix("adapter-fix", [shape_report],
+                                           gate_dir)
+                    fixes_applied = True
+                    continue
+                if shape_issues:
+                    self.state.style_risks.extend(
+                        f"gate: {issue}" for issue in shape_issues)
+                    ts_print(f"[final_quality_gate] {len(shape_issues)} "
+                             f"maintainability finding(s) survived the rework "
+                             f"round — recorded for the PR body")
             if tree_sha != static_passed_sha:
                 passed, new_error_logs = run_final_quality_gate(
                     ascend_path=ascend_path,
@@ -2117,6 +2298,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             "ascend_path": self.state.vllm_ascend_path,
             "release_tag": self.state.release_tag,
             "vllm_path": self.state.vllm_path,
+            "release_vllm_path": self.state.vllm_release_path or "",
             "role": role,
             "error_logs": json.dumps(error_logs, ensure_ascii=False),
             "code_structure_guide_file": EACH_STEP_CODE_STRUCTURE_GUIDE_FILE,
@@ -2475,6 +2657,11 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # UT failure count per attempt — the exhaustion lesson's convergence
         # evidence (run 34078835752: 34→30→5 then revert).
         ut_failures_per_attempt: list[int] = []
+        # Maintainability (mainline-continuity) rework budget: QA's style
+        # findings get exactly ONE rework round — a functionally correct
+        # adaptation must not be blocked by shape, but the shape must not
+        # pass silently either (what is left lands in the PR body).
+        style_rework_used = False
 
         # vllm-report MCP tools are called dynamically by the adapter during
         # analysis (not pre-loaded as static context here).  The MCP server
@@ -2533,6 +2720,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 "ascend_path": ascend_path,
                 "release_tag": self.state.release_tag,
                 "vllm_path": vllm_path,
+                "release_vllm_path": self.state.vllm_release_path or "",
                 "role": role,
                 "start_commit": step["start_commit"],
                 "end_commit": step["end_commit"],
@@ -2652,7 +2840,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # If pre_ci found mechanical issues the attempt will retry anyway,
             # so reviewing broken code is wasted time.
             if pre_ci_passed:
-                review_issues, new_qa_sid = self._run_adapter_qa(
+                review_issues, style_issues, new_qa_sid = self._run_adapter_qa(
                     ascend_path=ascend_path,
                     vllm_path=vllm_path,
                     step_id=step_id,
@@ -2660,18 +2848,28 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                     release_tag=self.state.release_tag,
                     upstream_patch_path=str(step_dir / VLLM_GIT_PATCH_FILE),
                     qa_session_id=self.state.qa_session_id,
+                    vllm_release_path=self.state.vllm_release_path or "",
                 )
                 if new_qa_sid:
                     self.state.qa_session_id = new_qa_sid
                 review_passed = not review_issues
             else:
                 review_issues = []
+                style_issues = []
                 review_passed = False
                 ts_print(f"[ai_analysis] {step_id}: critic skipped (pre_ci failed)")
-            if review_issues:
+            if review_issues or style_issues:
                 review_path = step_dir / ADAPTER_QA_FILE
-                review_path.write_text("\n".join(review_issues), encoding="utf-8")
-                ts_print(f"[ai_analysis] {step_id}: critic found {len(review_issues)} issue(s) → {review_path}")
+                findings = list(review_issues) + list(style_issues)
+                if style_issues:
+                    findings.append(
+                        "\n[style] The maintainability findings above are NOT "
+                        "mechanical: rewrite the shape (one guarded branch), "
+                        "do not wrap the added helper in a guard.")
+                review_path.write_text("\n".join(findings), encoding="utf-8")
+                ts_print(f"[ai_analysis] {step_id}: critic found "
+                         f"{len(review_issues)} runtime + {len(style_issues)} "
+                         f"maintainability issue(s) → {review_path}")
                 if error_logs:
                     error_logs.append(str(review_path))
                 else:
@@ -2685,10 +2883,25 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
             # packed-vs-summed KV pools), so iterating it further burns time
             # without converging; e2e verdict is the only signal that matters.
             # pre_ci stays a hard gate across all attempts.
-            if pre_ci_passed and (review_passed or attempt >= 2):
+            # Maintainability findings share the same one-round budget: the
+            # functional verdict still decides, and whatever shape issue
+            # survives is recorded for the PR body instead of failing a
+            # functionally correct step.
+            style_pending = bool(style_issues) and not style_rework_used
+            if style_pending:
+                style_rework_used = True
+                ts_print(f"[ai_analysis] {step_id}: maintainability rework "
+                         f"round (1 of 1) — shape issues fed back to adapter-fix")
+            if pre_ci_passed and (review_passed or attempt >= 2) and not style_pending:
                 if not review_passed:
                     ts_print(f"[ai_analysis] {step_id}: critic still has issues after "
                              f"1 fix round — proceeding to e2e anyway")
+                if style_issues:
+                    self.state.style_risks.extend(
+                        f"{step_id}: {issue}" for issue in style_issues)
+                    ts_print(f"[ai_analysis] {step_id}: {len(style_issues)} "
+                             f"maintainability issue(s) remain after the rework "
+                             f"round — recorded for the PR body")
                 break
 
         if pre_ci_passed and attempt >= 2 and last_failed_check is not None:
@@ -3391,6 +3604,31 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         gate_e2e_line = _gate_e2e_summary()
         if gate_e2e_line:
             parts.extend(["### Gate e2e", "", gate_e2e_line, ""])
+
+        # Maintainability (mainline-continuity) notes: shape findings that
+        # survived the per-step rework round and the gate's shape pass.
+        # They never block a functionally correct PR, but a maintainer must
+        # not have to discover them in review — PR #20156's rejected shapes
+        # shipped silently for exactly that reason.
+        if self.state.style_risks:
+            seen_risks: set[str] = set()
+            risk_lines: list[str] = []
+            for risk in self.state.style_risks:
+                if risk in seen_risks:
+                    continue
+                seen_risks.add(risk)
+                risk_lines.append(f"- {risk}")
+            parts.extend([
+                "### Maintainability notes",
+                "",
+                "The adaptation was reviewed for mainline continuity "
+                "(guard-first shapes, no compatibility-only helpers or "
+                "probes). These findings survived the automatic rework round "
+                "and are recorded here instead of blocking the PR:",
+                "",
+                *risk_lines,
+                "",
+            ])
 
         final_summary_path.write_text("\n".join(parts), encoding="utf-8")
 

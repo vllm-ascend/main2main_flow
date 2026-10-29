@@ -125,3 +125,47 @@ If a PR has not been merged for more than 2 weeks, rebase onto the latest upstre
 - [ ] No dead code, commented-out code, or redundant `type: ignore` markers
 - [ ] Old-version registrations migrated after deletion
 - [ ] Platform-specific code has guards
+- [ ] No compat-only helper/method/probe added (guarded branch instead)
+- [ ] No upstream-main behavior mirrored unconditionally onto the release lane
+- [ ] No contract difference hidden behind `[:N]`, `**kwargs` or `getattr`
+- [ ] No CI/tooling config edited
+
+---
+
+## 10. Mainline Continuity (blocking)
+
+### 10.1 Guard, don't abstract
+A version difference is expressed as one guarded branch at the narrowest
+site, never as a new method/function/capability probe that bridges two
+versions. Rejected: PR #20156 added `_add_cached_input_id()` plus a new
+`request_hash_refs` dict to emulate upstream's refcount fix on both trees;
+`_cann_index_score_available()` replaced a version boundary with a wheel
+probe. Accepted: PR #16527 keeps every difference as a guard or a defaulted
+parameter.
+
+### 10.2 Read the release tree before writing the old branch
+The `if vllm_version_is("<tag>")` branch must mirror the pinned release
+tree, not a remembered or simplified version of it. Verify one guard per
+diff against the release worktree path given in the prompt.
+
+### 10.3 No unconditional mirroring
+Upstream-main behavior that changes semantics (refcount bookkeeping, new
+state, changed defaults) must not be reproduced on both trees "so they
+behave alike" — that alters release-lane behavior no one asked to change.
+
+### 10.4 No silent contract swallowing
+`result[:3]`, `**kwargs`, and bare `getattr` over a value whose arity/type
+differs across trees hide the change from mypy, the release lane and
+review. Each version unpacks its own shape explicitly.
+
+### 10.5 Tests track the source, not capabilities
+Do not fork every assertion on a new capability flag. Branch the test once
+on `vllm_version_is` when the assertion itself differs, and delete the fork
+when the tag advance makes it meaningless.
+
+### 10.6 CI/tooling config is never an adaptation surface
+`.github/**` (except the two flow-owned pointer files),
+`.pre-commit-config.yaml`, `setup.cfg`, `tox.ini`, `tools/*.sh` must not
+appear in the diff. A hanging hook is a flow-environment problem; the flow
+suppresses it with `SKIP` and reverts committed config edits.
+

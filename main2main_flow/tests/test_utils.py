@@ -65,7 +65,11 @@ def test_run_format_sh_env_and_gitleaks_cleanup(monkeypatch, tmp_path: Path) -> 
     assert captured["cwd"] == str(repo)
     assert captured["timeout"] == 1800
     env = captured["env"]
-    assert env["SKIP"] == "gitleaks-offline-scan"
+    # Both skipped hooks are environment-only problems: gitleaks cannot run
+    # in the a3 image, and actionlint's shellcheck/pyflakes subprocesses hang
+    # (PR #20156 committed that suppression into .pre-commit-config.yaml;
+    # the guard reverts it, so it must live here).
+    assert env["SKIP"] == "gitleaks-offline-scan,actionlint"
     assert env["PYTHONUNBUFFERED"] == "1"
     assert env["PRE_COMMIT_HOME"] == str(
         tmp_path / ".cache"

@@ -70,7 +70,8 @@ def test_run_check_without_vllm_path_skips_mypy_ut(monkeypatch, tmp_path: Path) 
     assert result["all_passed"] is True
     assert called == []
     assert [c["name"] for c in result["checks"]] == [
-        "version_strings", "temp_files", "format", "release_lane"]
+        "version_strings", "temp_files", "format", "maintainability",
+        "release_lane"]
 
 
 def test_run_check_runs_mypy_ut_with_vllm_path(monkeypatch, tmp_path: Path) -> None:

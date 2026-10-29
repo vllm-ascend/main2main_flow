@@ -845,6 +845,94 @@ def _check_broken_imports(repo: Path, vllm_path: str | Path,
     return {"violations": violations}
 
 
+_NEW_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)")
+_NEW_SELF_STATE_RE = re.compile(r"^\s*self\.(\w+)\s*(?::[^=]+)?=(?!=)")
+_CAPABILITY_PROBE_RE = re.compile(
+    r"\b(?:importlib\.util\.)?find_spec\s*\(|\bhasattr\s*\(")
+# `a, b, c = <expr>[:3]` — unpacking a fixed-length slice swallows a field
+# that upstream main added (PR #20156's `draft_split[:3]`).
+_ARITY_SLICE_RE = re.compile(
+    r"^\s*[\w\s,.\[\]]+,[\w\s,.\[\]]+=\s*[\w.\[\]()'\" ]+\[\s*:\s*\d+\s*\]\s*$")
+
+
+def _check_maintainability(added_lines: list[dict[str, str]]) -> dict:
+    """ADVISORY shape check for mainline continuity (never blocks).
+
+    The mechanical half of the "guard first, don't abstract" policy: the
+    mechanical checks cannot decide whether a helper is justified, but the
+    REJECTED shapes are syntactically visible.  Per file, the added lines
+    are flagged when
+
+    - a new ``def`` / new ``self.x =`` appears and the same file's added
+      lines contain no ``vllm_version_is(...)`` (a compat-only helper or
+      mirrored upstream state — PR #20156's ``_add_cached_input_id`` and
+      ``request_hash_refs``), or
+    - a capability probe (``find_spec`` / ``hasattr``) is used as a version
+      boundary, or
+    - a tuple unpack takes a fixed slice (``a, b, c = f(x)[:3]``), which
+      hides an added upstream field from mypy and the release lane.
+
+    Returns ``{"violations": [], "advisories": [...], "detail": str}``.
+    ``violations`` is always empty by design: this check reports, it does
+    not fail the step — a functionally correct adaptation must not be
+    blocked by shape (adapter-qa and the gate review own the verdict).
+    """
+    by_file: dict[str, list[dict[str, str]]] = {}
+    for entry in added_lines:
+        by_file.setdefault(entry["file"], []).append(entry)
+
+    advisories: list[dict[str, str]] = []
+    for file_name, entries in sorted(by_file.items()):
+        if not file_name.endswith(".py"):
+            continue
+        guarded = any("vllm_version_is(" in e["text"] for e in entries)
+        for entry in entries:
+            text = entry["text"]
+            if text.lstrip().startswith("#"):
+                continue
+            rule = hint = ""
+            if _CAPABILITY_PROBE_RE.search(text):
+                rule = "capability_probe"
+                hint = ("find_spec/hasattr is not a version check — guard the "
+                        "contract with vllm_version_is at the call site")
+            elif _ARITY_SLICE_RE.match(text):
+                rule = "arity_slice"
+                hint = ("unpack per version branch instead of slicing a "
+                        "tuple whose arity differs across vllm versions")
+            elif not guarded:
+                m_def = _NEW_DEF_RE.match(text)
+                m_state = _NEW_SELF_STATE_RE.match(text)
+                if m_def:
+                    rule = "new_def"
+                    hint = (f"new definition '{m_def.group(1)}' with no version "
+                            f"guard in this file — can it be one guarded "
+                            f"branch instead of a compat helper?")
+                elif m_state:
+                    rule = "new_state"
+                    hint = (f"new state attribute '{m_state.group(1)}' with no "
+                            f"version guard in this file — upstream-main "
+                            f"bookkeeping must not be mirrored onto both trees")
+            if not rule:
+                continue
+            advisories.append({
+                "file": file_name,
+                "line": entry["line_no"],
+                "rule": rule,
+                "text": text.strip()[:160],
+                "hint": hint,
+            })
+
+    if not advisories:
+        detail = "no maintainability smells in added lines"
+    else:
+        detail = (f"{len(advisories)} maintainability advisory(ies) — "
+                  f"non-blocking; see the adapter's guard-first rules")
+        for adv in advisories[:12]:
+            ts_print(f"[pre_ci][maintainability] {adv['file']}:{adv['line']}: "
+                     f"{adv['rule']} — {adv['hint']}")
+    return {"violations": [], "advisories": advisories, "detail": detail}
+
+
 def run_check(ascend_path: str | Path, release_tag: str,
               vllm_path: str | Path | None = None,
               vllm_release_path: str | Path | None = None) -> dict:
@@ -936,6 +1024,20 @@ def run_check(ascend_path: str | Path, release_tag: str,
     })
     if not fmt_ok:
         all_passed = False
+
+    # Maintainability (mainline-continuity) ADVISORIES — passed is always
+    # True; the point is to surface the rejected shapes in
+    # pre_ci_check.json / the job log while adapter-qa and the gate review
+    # decide whether they block.
+    maint = _check_maintainability(added_lines)
+    checks.append({
+        "name": "maintainability",
+        "passed": True,
+        "blocking": False,
+        "detail": maint["detail"],
+        "violations": [],
+        "advisories": maint["advisories"],
+    })
 
     if vllm_path:
         # mypy + CPU-UT gates, main vllm version (+ release tree for mypy
