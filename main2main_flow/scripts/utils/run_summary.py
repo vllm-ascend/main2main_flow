@@ -284,7 +284,7 @@ def _outcome(view: dict[str, Any], index: int, done: int) -> str:
     if view["rounds"] and view["rounds"][max(view["rounds"])].get("passed"):
         return "passed, not committed"
     if len(view["rounds"]) >= 3:
-        return "e2e exhausted (3/3)"
+        return f"e2e exhausted ({len(view['rounds'])} rounds)"
     if not view["rounds"]:
         return "pre_ci exhausted"
     return "e2e stopped (blocking set unchanged)"
