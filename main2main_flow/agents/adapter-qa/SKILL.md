@@ -72,12 +72,15 @@ The diff is CUMULATIVE: it may contain code produced by an earlier run whose
 PR is still open. That code is in scope — a shape problem there blocks the
 same way as one this step introduced.
 
-Check these five questions against the diff, in order. Any YES is a
+Check these seven questions against the diff, in order. Any YES is a
 `maintainability` issue (severity "high"), not a style note:
 
-1. Was a method, function, `_impl`/`_main`/`_compat` variant, or module-level
-   capability probe (`find_spec`/`hasattr`) ADDED whose only purpose is to
-   bridge the two versions?  (`git diff` `+def` lines)
+1. Was ANY newly added callable — a method, function,
+   `_impl`/`_main`/`_compat` variant, or module-level capability probe
+   (`find_spec`/`hasattr`) — added whose only purpose is to bridge the two
+   versions?  (`git diff` `+def` lines)  If it is, ask yourself whether one
+   guarded branch at the existing call/return site would have done the same
+   job; that is the expected answer.
 2. Was upstream-main behavior mirrored on BOTH trees unconditionally — a new
    state dict, refcount bookkeeping, a changed default — where the release
    lane had different behavior before?
@@ -88,11 +91,31 @@ Check these five questions against the diff, in order. Any YES is a
    main behavior in the `else` branch?
 5. Was any CI/tooling config edited (`.github/**`, `.pre-commit-config.yaml`,
    `setup.cfg`, `tox.ini`, `tools/*.sh`)?
+6. Was a new environment variable added — a `VLLM_ASCEND_*` key in
+   `vllm_ascend/envs.py`, or an `os.getenv("VLLM_ASCEND_...")` read
+   elsewhere — to bridge a version, to pick a kernel, or to make a failing
+   check go green?
+7. Was a file added under `vllm_ascend/patch/**`, or a new registration
+   entry for a patch module added?
 
 Allowed shapes (never report these): a new defaulted parameter added to the
 signature; the two-`def` form under `vllm_version_is`; a base-class attribute
-that upstream reads at runtime being accepted and set. Calibration:
-PR #20156 is the rejected shape, PR #16527 the accepted one.
+that upstream reads at runtime being accepted and set; editing an EXISTING
+patch module; reading an ALREADY EXISTING `VLLM_ASCEND_*` variable.
+
+Exception channel for 6 and 7 only: a `# main2main-justification: <reason>`
+comment on the offending line, on the line above it, or among the first few
+lines of a new file makes it a NON-finding — but only when the reason names
+a concrete upstream contract or container fact (e.g. "upstream added this
+switch in vllm#xxxx", "the release tree's op has no equivalent"). A bare
+marker, an empty reason, or a reason that restates the change ("needed for
+compatibility") is still a finding.
+
+Calibration: PR #20156 is the rejected shape (new `_add_cached_input_id`,
+`find_spec` probe, `draft_split[:3]`, config edit); PR #20223 is the
+rejected env-var shape (`VLLM_ASCEND_INDEX_SCORE_IMPL` added because one
+container's CANN build lacked `msa_index_score` — the fix belongs in the
+dependency, not in `envs.py`); PR #16527 the accepted one.
 
 ## Rules
 

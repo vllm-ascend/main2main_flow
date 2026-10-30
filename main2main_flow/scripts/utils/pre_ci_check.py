@@ -77,13 +77,35 @@ def _get_added_lines(repo: Path, base_ref: str | None = None) -> list[dict[str, 
         except subprocess.CalledProcessError:
             base_ref = "HEAD"
     diff_output = run_git(repo, "diff", base_ref, "-U0")
+    return _parse_added_lines(diff_output)
+
+
+def _parse_added_lines(diff_output: str) -> list[dict[str, str]]:
+    """Parse a ``-U0`` unified diff into its added lines.
+
+    Every entry carries ``file``, ``line_no`` (new side), ``text`` and
+    ``new_file`` (``"1"``/``"0"``).  "This file is brand new" exists only in
+    the diff header (``new file mode`` / ``--- /dev/null``), and the
+    maintainability check needs it to spot a newly added patch module —
+    a file the adapter created on purpose, not a change to an existing one.
+    """
     added: list[dict[str, str]] = []
     current_file = None
     current_line = 0
+    pending_new = False
+    is_new = False
 
     for line in diff_output.splitlines():
-        if line.startswith("+++ b/"):
+        if line.startswith("diff --git "):
+            current_file = None
+            pending_new = False
+            is_new = False
+        elif line.startswith("new file mode") or line.startswith("--- /dev/null"):
+            pending_new = True
+        elif line.startswith("+++ b/"):
             current_file = line[6:]
+            is_new = pending_new
+            pending_new = False
         elif line.startswith("@@ "):
             match = re.search(r'\+(\d+)', line)
             if match:
@@ -94,6 +116,7 @@ def _get_added_lines(repo: Path, base_ref: str | None = None) -> list[dict[str, 
                     "file": current_file,
                     "line_no": str(current_line),
                     "text": line[1:],
+                    "new_file": "1" if is_new else "0",
                 })
             current_line += 1
         elif not line.startswith("-"):
@@ -853,6 +876,18 @@ _CAPABILITY_PROBE_RE = re.compile(
 # that upstream main added (PR #20156's `draft_split[:3]`).
 _ARITY_SLICE_RE = re.compile(
     r"^\s*[\w\s,.\[\]]+,[\w\s,.\[\]]+=\s*[\w.\[\]()'\" ]+\[\s*:\s*\d+\s*\]\s*$")
+# A new configuration key in `vllm_ascend/envs.py` (or an `os.getenv` read of
+# one elsewhere) — a user-visible switch added to bridge a version or to make
+# a container-specific failure go away (PR #20223's
+# `VLLM_ASCEND_INDEX_SCORE_IMPL`).
+_NEW_ENV_KEY_RE = re.compile(r'^\s*"VLLM_ASCEND_[A-Z0-9_]+"\s*:')
+_NEW_ENV_READ_RE = re.compile(r'os\.getenv\(\s*["\']VLLM_ASCEND_')
+# A new module registration inside `vllm_ascend/patch/**`.
+_PATCH_ENTRY_RE = re.compile(r'^\s*["\']vllm_ascend\.patch\.[\w.]+["\']')
+_PATCH_PREFIX = "vllm_ascend/patch/"
+# The exception channel for rules 7/8: a marker comment with a concrete
+# reason, on the line above the shape (or at the top of a new file).
+_JUSTIFY_RE = re.compile(r"main2main-justification\s*:\s*(\S.*)$")
 
 
 def _check_maintainability(added_lines: list[dict[str, str]]) -> dict:
@@ -870,7 +905,19 @@ def _check_maintainability(added_lines: list[dict[str, str]]) -> dict:
     - a capability probe (``find_spec`` / ``hasattr``) is used as a version
       boundary, or
     - a tuple unpack takes a fixed slice (``a, b, c = f(x)[:3]``), which
-      hides an added upstream field from mypy and the release lane.
+      hides an added upstream field from mypy and the release lane, or
+    - a new ``VLLM_ASCEND_*`` environment variable is added — a key in
+      ``vllm_ascend/envs.py`` or an ``os.getenv("VLLM_ASCEND_...")`` read —
+      which is configuration surface, not adaptation surface, or
+    - a file is added under ``vllm_ascend/patch/**`` (``new_patch_file``) or
+      a new patch module is registered in a patch ``__init__``
+      (``new_patch_entry``); extending an existing patch module is never
+      flagged.
+
+    A ``# main2main-justification: <reason>`` marker on the offending line,
+    the two lines above it, or among the first five lines of a newly added
+    file suppresses the env/patch advisories: the adapter has declared WHY
+    the shape is unavoidable, and adapter-qa / the gate judge the reason.
 
     Returns ``{"violations": [], "advisories": [...], "detail": str}``.
     ``violations`` is always empty by design: this check reports, it does
@@ -881,17 +928,57 @@ def _check_maintainability(added_lines: list[dict[str, str]]) -> dict:
     for entry in added_lines:
         by_file.setdefault(entry["file"], []).append(entry)
 
+    def _is_new_file(entries: list[dict[str, str]]) -> bool:
+        return any(str(e.get("new_file", "0")) == "1" for e in entries)
+
+    justified: dict[str, set[int]] = {}
+    header_justified: set[str] = set()
+    for fname, entries in by_file.items():
+        marks = {int(e["line_no"]) for e in entries
+                 if _JUSTIFY_RE.search(e["text"])}
+        # A marker covers itself and the two added lines below it.
+        justified[fname] = marks | {n + 1 for n in marks} | {n + 2 for n in marks}
+        if _is_new_file(entries) and \
+                any(_JUSTIFY_RE.search(e["text"]) for e in entries[:5]):
+            header_justified.add(fname)
+
     advisories: list[dict[str, str]] = []
     for file_name, entries in sorted(by_file.items()):
         if not file_name.endswith(".py"):
             continue
         guarded = any("vllm_version_is(" in e["text"] for e in entries)
+        if file_name.startswith(_PATCH_PREFIX) and _is_new_file(entries) \
+                and file_name not in header_justified:
+            advisories.append({
+                "file": file_name,
+                "line": entries[0]["line_no"],
+                "rule": "new_patch_file",
+                "text": entries[0]["text"].strip()[:160],
+                "hint": ("a brand-new patch module — extend an existing "
+                         "vllm_ascend/patch/** module with a vllm_version_is "
+                         "branch instead (or add a `# main2main-justification:` "
+                         "line at the top explaining why it is unavoidable)"),
+            })
         for entry in entries:
             text = entry["text"]
             if text.lstrip().startswith("#"):
                 continue
             rule = hint = ""
-            if _CAPABILITY_PROBE_RE.search(text):
+            marker_here = _JUSTIFY_RE.search(text) is not None
+            if (_NEW_ENV_KEY_RE.match(text) or _NEW_ENV_READ_RE.search(text)) \
+                    and not marker_here:
+                rule = "new_env_var"
+                hint = ("new VLLM_ASCEND_* environment variable / os.getenv "
+                        "read — envs.py is configuration surface, not an "
+                        "adaptation surface (a version difference is a "
+                        "vllm_version_is branch). Ignore if the variable "
+                        "already existed before this diff.")
+            elif _PATCH_ENTRY_RE.match(text) and \
+                    file_name.startswith(_PATCH_PREFIX) and not marker_here:
+                rule = "new_patch_entry"
+                hint = ("new patch-module registration — do not introduce "
+                        "another patch module for a version difference")
+            elif _CAPABILITY_PROBE_RE.search(text):
                 rule = "capability_probe"
                 hint = ("find_spec/hasattr is not a version check — guard the "
                         "contract with vllm_version_is at the call site")
@@ -913,6 +1000,9 @@ def _check_maintainability(added_lines: list[dict[str, str]]) -> dict:
                             f"version guard in this file — upstream-main "
                             f"bookkeeping must not be mirrored onto both trees")
             if not rule:
+                continue
+            if rule in ("new_env_var", "new_patch_entry") and \
+                    int(entry["line_no"]) in justified.get(file_name, set()):
                 continue
             advisories.append({
                 "file": file_name,
