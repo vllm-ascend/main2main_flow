@@ -1,8 +1,9 @@
 """Regression pins for the retry-budget policy (feature/e2e-external rules):
 
 - ai_analysis exhaustion reverts the working tree and ships as UpgradePartial
-- e2e exhaustion (retry_count >= 3) reverts and ships as UpgradePartial
-- budgets are hardcoded: no env-tunable pre_ci budget, no non-blocking gate
+- e2e exhaustion (_MAX_E2E_ROUNDS fix rounds) reverts and ships as
+  UpgradePartial
+- budgets stay hardcoded: no env-tunable pre_ci budget, no non-blocking gate
   e2e retry helper
 - gate regression e2e is BLOCKING: 4 total attempts, each failure retried
   ONCE on the same tree first (flake absorption — a flaky regression must
@@ -15,6 +16,12 @@
   (last_step_e2e_passed stays False).  A zero-source-delta FIRST attempt
   (marker bump / docs only) defers the same way; a fix round with a red
   e2e outstanding always re-runs run_tests
+- an e2e fix round re-runs ONLY the cases the previous round failed, and a
+  green reduced round is confirmed against the full allowlist before the
+  step may commit (that is what makes the 5-round budget affordable)
+- the e2e stop-loss compares the failing set at CASE granularity and needs
+  _DEFAULT_E2E_STOPLOSS_ROUNDS consecutive identical rounds (run 41014231793
+  lost a whole run to a one-shot verdict on a single-suite failure)
 """
 
 import inspect
@@ -73,19 +80,22 @@ def _e2e_with_blockings(f, blockings):
 
 def test_e2e_stop_loss_identical_blocking_set(monkeypatch):
     # run 34018086282: a fix round that reproduces the exact same blocking
-    # suite set cannot converge — stop-loss reverts immediately instead of
-    # burning another 1-2h e2e round (whisper OOM: 3 e2e rounds, ~7h step).
+    # set cannot converge — the stop-loss reverts instead of burning the
+    # whole budget.  Since 2026-10-30 a single repeat is tolerated (fix
+    # rounds are the cheap, reduced ones) and the rule needs
+    # _DEFAULT_E2E_STOPLOSS_ROUNDS consecutive identical rounds.
     f = _make_flow()
     monkeypatch.setattr(f, "_ai_analysis", lambda: True)
     monkeypatch.setattr(f, "_working_tree_diff_sha", lambda path: "")
+    monkeypatch.delenv("MAIN2MAIN_E2E_STOPLOSS_ROUNDS", raising=False)
     fake, calls = _e2e_with_blockings(f, [{"t_whisper"}, {"t_whisper"}])
     monkeypatch.setattr(f, "_run_e2e_test", fake)
     reverts = []
     monkeypatch.setattr(f, "_revert_working_tree",
                         lambda reason: reverts.append(reason))
     f.process_steps()
-    assert len(calls) == 2  # the third e2e round never launched
-    assert reverts == ["step step-1 e2e stop-loss (unchanged blocking set)"]
+    assert len(calls) == flow_mod._DEFAULT_E2E_STOPLOSS_ROUNDS
+    assert reverts == ["step step-1 e2e stop-loss (unchanged failing set)"]
     assert f.state.final_status == flow_mod.UpgradePartial
     assert f.state.current_step == 0
 
@@ -97,15 +107,103 @@ def test_e2e_no_stop_loss_when_blocking_set_changes(monkeypatch):
     f = _make_flow()
     monkeypatch.setattr(f, "_ai_analysis", lambda: True)
     monkeypatch.setattr(f, "_working_tree_diff_sha", lambda path: "")
-    fake, calls = _e2e_with_blockings(f, [{"t_a"}, {"t_b"}, {"t_c"}])
+    fake, calls = _e2e_with_blockings(
+        f, [{"t_a"}, {"t_b"}, {"t_c"}, {"t_d"}, {"t_e"}])
     monkeypatch.setattr(f, "_run_e2e_test", fake)
     reverts = []
     monkeypatch.setattr(f, "_revert_working_tree",
                         lambda reason: reverts.append(reason))
     f.process_steps()
-    assert len(calls) == 3  # full budget consumed
+    assert len(calls) == flow_mod._MAX_E2E_ROUNDS  # full budget consumed
     assert reverts == ["step step-1 e2e exhausted"]
     assert f.state.final_status == flow_mod.UpgradePartial
+
+
+def test_stop_loss_uses_case_granularity(monkeypatch):
+    # Run 41014231793: the same suite (test_cpu_offloading.py) failed two
+    # rounds in a row on the SAME assertion — a real non-converging picture
+    # — while the suite-level rule could not tell that apart from "same
+    # file, different cases" (which IS progress).  Cases moving resets the
+    # identical counter; a frozen case set trips the stop-loss.
+    f = _make_flow()
+    monkeypatch.setattr(f, "_ai_analysis", lambda: True)
+    monkeypatch.setattr(f, "_working_tree_diff_sha", lambda path: "")
+    monkeypatch.delenv("MAIN2MAIN_E2E_STOPLOSS_ROUNDS", raising=False)
+    rounds = [
+        ({"t_cpu_offloading"}, ["...test_cpu_offloading.py::test_cpu_offloading[True]"]),
+        ({"t_cpu_offloading"}, ["...test_cpu_offloading.py::test_cpu_offloading[True]",
+                                "...test_cpu_offloading.py::test_cpu_offloading[False]"]),
+        ({"t_cpu_offloading"}, ["...test_cpu_offloading.py::test_cpu_offloading[True]",
+                                "...test_cpu_offloading.py::test_cpu_offloading[False]"]),
+        ({"t_cpu_offloading"}, ["...test_cpu_offloading.py::test_cpu_offloading[True]",
+                                "...test_cpu_offloading.py::test_cpu_offloading[False]"]),
+    ]
+    calls: list[int] = []
+
+    def fake():
+        idx = min(len(calls), len(rounds) - 1)
+        suites, cases = rounds[idx]
+        f._last_e2e_blocking = sorted(suites)
+        f._last_e2e_cases = sorted(cases)
+        calls.append(1)
+        return False
+
+    monkeypatch.setattr(f, "_run_e2e_test", fake)
+    reverts = []
+    monkeypatch.setattr(f, "_revert_working_tree",
+                        lambda reason: reverts.append(reason))
+    f.process_steps()
+    # round 1 (fresh), round 2 (cases changed -> reset), rounds 3 and 4
+    # identical -> the stop-loss fires on the third identical picture
+    assert len(calls) == 4
+    assert reverts == ["step step-1 e2e stop-loss (unchanged failing set)"]
+
+
+def test_fix_round_reruns_only_failing_cases(monkeypatch, tmp_path):
+    # A fix round must not pay for the whole allowlist: it re-runs the node
+    # ids the previous round failed, then confirms the full set once green.
+    f = _make_flow()
+    f.state.changed_files = ["vllm_ascend/ops/foo.py"]
+    f.state.retry_count = 1
+    f.state.cur_patch_path = ""
+    f._last_e2e_cases = ["tests/e2e/one.py::t"]
+    f._e2e_retry_cases = ["tests/e2e/one.py::t"]
+    monkeypatch.setattr(flow_mod, "WORKSPACE_DIR", tmp_path)
+    (tmp_path / "steps" / "step-1").mkdir(parents=True)
+    calls: list[list[str] | None] = []
+
+    def fake_run(**kw):
+        calls.append(kw["test_cases"])
+        return {"can_commit": True, "ci_result": "passed", "suite_results": {}}
+
+    monkeypatch.setattr(flow_mod, "run_tests", fake_run)
+    monkeypatch.setattr(flow_mod, "build_test_errors_detail",
+                        lambda *a, **k: None)
+    monkeypatch.delenv("MAIN2MAIN_E2E_CONFIRM_FULL", raising=False)
+
+    assert f._run_e2e_test() is True
+    assert calls[0] == ["tests/e2e/one.py::t"]
+    assert calls[1] == flow_mod._resolve_test_cases()  # the confirmation
+
+
+def test_fix_round_first_attempt_runs_full_allowlist(monkeypatch, tmp_path):
+    # retry_count == 0 always runs the whole allowlist, whatever stale
+    # reuse list an earlier step left behind.
+    f = _make_flow()
+    f.state.changed_files = ["vllm_ascend/ops/foo.py"]
+    f.state.retry_count = 0
+    f._e2e_retry_cases = ["tests/e2e/one.py::t"]
+    monkeypatch.setattr(flow_mod, "WORKSPACE_DIR", tmp_path)
+    (tmp_path / "steps" / "step-1").mkdir(parents=True)
+    calls: list[list[str] | None] = []
+    monkeypatch.setattr(flow_mod, "run_tests", lambda **kw: (
+        calls.append(kw["test_cases"]),
+        {"can_commit": True, "ci_result": "passed", "suite_results": {}})[1])
+    monkeypatch.setattr(flow_mod, "build_test_errors_detail",
+                        lambda *a, **k: None)
+
+    assert f._run_e2e_test() is True
+    assert calls == [flow_mod._resolve_test_cases()]
 
 
 def _head(repo) -> str:
@@ -221,9 +319,10 @@ def test_budgets_are_hardcoded(monkeypatch):
     # "reverted one round short" family, aligned with the pre_ci budget.
     assert "fix_rounds_left = 5" in inspect.getsource(
         flow_mod.Main2MainFlow._final_quality_gate)
-    # e2e exhaustion threshold stays at 3 fix rounds.
+    # e2e exhaustion threshold keeps a hardcoded fix-round budget.
     src = inspect.getsource(flow_mod.Main2MainFlow.process_steps)
-    assert "retry_count >= 3" in src
+    assert "retry_count >= _MAX_E2E_ROUNDS" in src
+    assert flow_mod._MAX_E2E_ROUNDS >= 5
 
 
 def _gate_flow(monkeypatch, tmp_path, e2e_results):
@@ -382,7 +481,7 @@ def test_pre_ci_zero_progress_recovers_after_real_fix(monkeypatch, tmp_path):
         return {"all_passed": True, "checks": []}
 
     monkeypatch.setattr(flow_mod, "run_check", fake_check)
-    monkeypatch.setattr(f, "_run_adapter_qa", lambda **kw: ([], ""))
+    monkeypatch.setattr(f, "_run_adapter_qa", lambda **kw: ([], [], None))
 
     assert f._ai_analysis() is True
     assert len(adapter_calls) == 3

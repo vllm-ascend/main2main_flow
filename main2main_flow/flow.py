@@ -418,6 +418,32 @@ changes nothing will fail the step immediately.
 --- pre_ci failure details follow ---
 """
 
+# e2e retry budget per step: attempt 0 is the first adaptation, every retry
+# is one fix round.  Raised 3 -> 5 on 2026-10-30 only because fix rounds no
+# longer re-run the whole allowlist: they re-run the cases the previous round
+# failed (~3 min for one suite) and the passing reduced round is followed by
+# ONE full-allowlist confirmation before the step may commit (~25 min on a
+# 16-card pool).  A step's worst case is therefore 25 + 4*3 + 25 min instead
+# of 4*25 min, while the adapter gets two more genuine shots at the fix.
+_MAX_E2E_ROUNDS = 5
+
+# How many consecutive e2e rounds may report the SAME failing set (suites +
+# failed cases) before the step is abandoned as non-converging.  3 means the
+# adapter gets two fix rounds on an unchanged picture — run 41014231793's
+# step-1 died after a single real fix attempt while the retry budget still
+# had room (one round produced a byte-identical diff, one guessed and missed).
+# `MAIN2MAIN_E2E_STOPLOSS_ROUNDS` overrides it; 2 restores the old rule.
+_DEFAULT_E2E_STOPLOSS_ROUNDS = 3
+
+
+def _e2e_stop_loss_rounds() -> int:
+    """Consecutive identical failing rounds tolerated before the stop-loss."""
+    try:
+        return max(2, int(os.getenv("MAIN2MAIN_E2E_STOPLOSS_ROUNDS",
+                                    str(_DEFAULT_E2E_STOPLOSS_ROUNDS))))
+    except ValueError:
+        return _DEFAULT_E2E_STOPLOSS_ROUNDS
+
 
 class Main2MainState(BaseModel):
     vllm_path: str = ""
@@ -1347,12 +1373,22 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         # tested, and whether we already warned about an unchanged fix.
         last_tested_diff_sha = ""
         noop_fix_retried = False
-        # e2e stop-loss: blocking suite set of the previous e2e round.  An
-        # identical set after a fix round means the adapter's change did not
-        # move the outcome — another 1-2h e2e execution is pure waste
-        # (run 34018086282: three e2e rounds on the same whisper OOM, ~7h).
+        # e2e stop-loss: the failing set (blocking suites + the exact failed
+        # cases) of the previous e2e round, and how many consecutive rounds
+        # have reported it unchanged.  An unchanged set means the adapter's
+        # change did not move the outcome — but a single repeat is no longer
+        # fatal: with reduced fix rounds an extra attempt costs ~3 min, and
+        # run 41014231793 lost a whole run to a one-shot verdict (run
+        # 34018086282's three full rounds on the same whisper OOM, ~7h, are
+        # what the ORIGINAL rule was calibrated against).
         last_e2e_blocking: list[str] | None = None
+        last_e2e_cases: list[str] | None = None
+        identical_e2e_rounds = 0
+        stoploss_rounds = _e2e_stop_loss_rounds()
         self._last_e2e_blocking: list[str] | None = None
+        self._last_e2e_cases: list[str] | None = None
+        # Cases the NEXT fix round must re-run (set by _run_e2e_test).
+        self._e2e_retry_cases: list[str] = []
         while self.state.current_step < self.state.total_steps:
             step = self.state.steps[self.state.current_step]
             step_id = step["id"]
@@ -1428,23 +1464,49 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self.state.last_verified_commit = self.state.cur_vllm_commit
                 self.state.last_step_e2e_passed = False  # gate owes this run one e2e
                 last_e2e_blocking = None
+                last_e2e_cases = None
+                identical_e2e_rounds = 0
+                self._e2e_retry_cases = []
                 continue
 
             last_tested_diff_sha = self._working_tree_diff_sha(ascend_path)
             test_pass = self._run_e2e_test()
-            if not test_pass and (last_e2e_blocking is not None
-                                  and self._last_e2e_blocking
-                                  and self._last_e2e_blocking == last_e2e_blocking):
-                ts_print(f"[process_steps] {step_id}: e2e blocking set "
-                         f"unchanged after a fix round ({len(self._last_e2e_blocking)} "
-                         f"suite(s): {', '.join(self._last_e2e_blocking[:3])}) — "
-                         f"fix not converging, stop-loss before burning "
-                         f"another e2e round")
-                self._revert_working_tree(
-                    f"step {step_id} e2e stop-loss (unchanged blocking set)")
-                self.state.final_status = UpgradePartial
-                return
-            last_e2e_blocking = list(self._last_e2e_blocking or [])
+            if not test_pass:
+                cur_blocking = list(self._last_e2e_blocking or [])
+                cur_cases = list(self._last_e2e_cases or [])
+                if not (cur_blocking or cur_cases):
+                    # No usable failing set (an aggregate error with no suite
+                    # record): the stop-loss has nothing to compare against,
+                    # so let the round budget decide instead of pretending
+                    # the picture is unchanged.
+                    identical_e2e_rounds = 0
+                    last_e2e_blocking = None
+                    last_e2e_cases = None
+                elif (last_e2e_blocking is not None
+                        and cur_blocking == last_e2e_blocking
+                        and cur_cases == last_e2e_cases):
+                    identical_e2e_rounds += 1
+                else:
+                    identical_e2e_rounds = 1
+                if cur_blocking or cur_cases:
+                    last_e2e_blocking = cur_blocking
+                    last_e2e_cases = cur_cases
+                if identical_e2e_rounds >= stoploss_rounds:
+                    ts_print(f"[process_steps] {step_id}: e2e failing set "
+                             f"unchanged for {identical_e2e_rounds} round(s) "
+                             f"({len(cur_blocking)} suite(s), "
+                             f"{len(cur_cases)} case(s): "
+                             f"{', '.join(cur_blocking[:3])}) — fix not "
+                             f"converging, stop-loss before burning another "
+                             f"e2e round")
+                    self._revert_working_tree(
+                        f"step {step_id} e2e stop-loss (unchanged failing set)")
+                    self.state.final_status = UpgradePartial
+                    return
+            else:
+                identical_e2e_rounds = 0
+                last_e2e_blocking = None
+                last_e2e_cases = None
             if test_pass:
                 # The step needed >=1 E2E fix round (retry_count >= 1): the
                 # first adaptation wasn't right — record it as a lesson so
@@ -1462,10 +1524,12 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 self.state.retry_count = 0
                 self.state.last_verified_commit = self.state.cur_vllm_commit
                 last_e2e_blocking = None
+                last_e2e_cases = None
+                self._e2e_retry_cases = []
                 continue
             else:
                 self.state.retry_count += 1
-                if self.state.retry_count >= 3:
+                if self.state.retry_count >= _MAX_E2E_ROUNDS:
                     # Revert the broken adaptation (passed pre_ci/critic but
                     # failed e2e) so it doesn't leak into generate_final_post's
                     # squash via `git add -A`. Same revert as Path A above.
@@ -3000,6 +3064,7 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
         step_id = step["id"]
         ts_print(f"run_e2e_test: {step_id} round={self.state.retry_count}")
         self._last_e2e_blocking: list[str] | None = None
+        self._last_e2e_cases: list[str] | None = None
 
         if os.getenv("SKIP_E2E_TEST", "false").lower() == "true":
             ts_print("[run_e2e_test] SKIP_E2E_TEST=true, treating as passed")
@@ -3017,21 +3082,56 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                      f"({changed or '(none)'}), skipping e2e")
             return True
 
+        # Fix rounds re-run ONLY the cases the previous round failed.  A
+        # full allowlist round costs ~25 min of a 16-card pool no matter how
+        # small the failure is (the wall clock follows the slowest suite),
+        # while the failing suite alone is a couple of minutes — that is what
+        # makes the 5-round budget affordable.  The reduced round is not the
+        # verdict on its own: a green one is confirmed against the whole
+        # allowlist below, on the same tree.
+        reuse = list(getattr(self, "_e2e_retry_cases", None) or [])
+        reduced = bool(reuse) and self.state.retry_count > 0
+        if reduced:
+            ts_print(f"[run_e2e_test] {step_id}: fix round re-runs only the "
+                     f"{len(reuse)} case(s) the previous round failed")
+        test_cases = reuse if reduced else _resolve_test_cases()
+
         ts_print(f"The adaptation patch is at: {self.state.cur_patch_path}")
-        result = run_tests(
+        result = self._run_e2e_cases(step_id, test_cases)
+        test_passed = self._finish_e2e_round(step_id, result)
+
+        if (test_passed and reduced
+                and os.getenv("MAIN2MAIN_E2E_CONFIRM_FULL", "1") != "0"):
+            # A reduced round only proves the previously failing cases now
+            # pass; the fix could have broken a suite the reduced set
+            # skipped.  One full-allowlist round on the same tree is the
+            # price of the cheaper retries (MAIN2MAIN_E2E_CONFIRM_FULL=0
+            # opts out and leaves the final gate as the only sweep).
+            ts_print(f"[run_e2e_test] {step_id}: reduced fix round is green "
+                     f"— confirming the full allowlist before commit")
+            result = self._run_e2e_cases(step_id, _resolve_test_cases())
+            test_passed = self._finish_e2e_round(step_id, result)
+
+        return test_passed
+
+    def _run_e2e_cases(self, step_id: str, test_cases: list[str] | None) -> dict:
+        """One run_tests execution for this step's current tree."""
+        return run_tests(
             vllm_path=self.state.vllm_path,
             vllm_commit=self.state.cur_vllm_commit,
             ascend_path=self.state.vllm_ascend_path,
             ascend_commit=self.state.cur_ascend_commit,
             patch_path=self.state.cur_patch_path or None,
             step_id=step_id,
-            test_cases=_resolve_test_cases(),
+            test_cases=test_cases,
             test_timeouts=_resolve_test_timeouts(),
             remote=os.getenv("MAIN2MAIN_RUN_TESTS_REMOTE") or None,
             round_number=self.state.retry_count,
             log_dir=str(WORKSPACE_DIR / STEPS_DIR),
         )
 
+    def _finish_e2e_round(self, step_id: str, result: dict) -> bool:
+        """Record one e2e round's verdict and remember what to re-run next."""
         test_passed = result.get("can_commit", False)
         # Write the e2e result dict to a known path so fix-mode error_logs
         # can reference it.  run_tests also writes this file, but the dict
@@ -3066,10 +3166,48 @@ DIFF:\n{diff_snippet}\nVERDICT (JSON only):"""
                 r.get("test", "") for r in suites
                 if isinstance(r, dict) and r.get("ci_result") not in PASS_RESULTS
                 and r.get("test"))
+            self._last_e2e_cases = self._failed_case_ids(suites)
+            # Next fix round: the exact cases, or the whole suite when the
+            # failure has no case granularity (collection/import crash,
+            # timeout kill, empty pytest summary).
+            self._e2e_retry_cases = (
+                list(self._last_e2e_cases) or list(self._last_e2e_blocking))
         else:
             self._last_e2e_blocking = None
+            self._last_e2e_cases = []
+            self._e2e_retry_cases = []
 
         return test_passed
+
+    @staticmethod
+    def _failed_case_ids(suites: list[dict]) -> list[str]:
+        """The failing test NODE IDs of one round, from the per-suite summaries.
+
+        run_tests already writes ``<suite>-summary.json`` next to each log
+        (that is what the fix-mode error digest reads); the node ids there are
+        the only case-level record of the round, so the stop-loss can tell
+        "same suite, different cases" (progress) from "byte-for-byte the same
+        failures" (the run 41014231793 shape: one suite, one assertion, two
+        rounds, zero steps).
+        """
+        cases: list[str] = []
+        for r in suites:
+            if not isinstance(r, dict) or r.get("ci_result") in PASS_RESULTS:
+                continue
+            summary_path = Path(str(r.get("summary_path") or ""))
+            data: dict = {}
+            if summary_path.is_file():
+                try:
+                    data = json.loads(summary_path.read_text(
+                        encoding="utf-8", errors="replace"))
+                except (OSError, ValueError):
+                    data = {}
+            found = [c for c in (data.get("failed_test_cases") or []) if c]
+            if found:
+                cases.extend(found)
+            elif r.get("test"):
+                cases.append(str(r["test"]))
+        return sorted(set(cases))
 
     def _fill_unattributed_analysis(self, unattributed: list[str],
                                      cumulative_patch_path: Path) -> list[dict]:

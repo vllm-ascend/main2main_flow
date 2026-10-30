@@ -52,9 +52,28 @@ Both repos must be real git checkouts (or HTTPS URLs that will be cloned into `w
 
 ## Retry & test loop semantics
 
-`process_steps`: per step, run `_ai_analysis` then `_run_e2e_test`. Pass → next step, reset `retry_count`. Fail → `retry_count++` and re-enter `_ai_analysis` in fix mode. At `retry_count >= 3` the flow short-circuits to `UpgradeFailed`. Two skips:
+`process_steps`: per step, run `_ai_analysis` then `_run_e2e_test`. Pass → next step, reset `retry_count`. Fail → `retry_count++` and re-enter `_ai_analysis` in fix mode. At `retry_count >= _MAX_E2E_ROUNDS` (5) the step is reverted and the run ships as `UpgradePartial` (0 completed steps ⇒ no PR at all). Two skips:
 - adapter-declared **no-op** steps (`is_noop`, first attempt only) skip the per-step e2e and just commit the verified.commit bump
 - a **0-step run** (`current_step == 0` after process_steps) skips PR creation entirely
+
+Fix rounds are **reduced**: `retry_count > 0` re-runs only the cases the
+previous round failed (node IDs from the per-suite summaries; whole suites
+when the failure has no case granularity — collection crash, timeout kill).
+The first round is always the full allowlist.  A green reduced round is
+confirmed against the full allowlist on the same tree before the step may
+commit (`MAIN2MAIN_E2E_CONFIRM_FULL=0` opts out) — that is what makes the
+5-round budget affordable: a reduced round is ~3 min for one suite vs ~25
+min for the full set on a 16-card pool (run 41014231793 spent 24 min per
+round on a single failing suite).
+
+The e2e **stop-loss** compares the failing set at case granularity (suites
++ failed node IDs) and abandons the step after
+`MAIN2MAIN_E2E_STOPLOSS_ROUNDS` consecutive identical rounds (default 3, so
+the adapter gets two fix rounds on an unchanged picture; `2` restores the
+pre-2026-10-30 rule).  Case-level matters: the old suite-level rule could
+not tell "same file, same assertion" (no progress) from "same file,
+different cases" (progress) — run 41014231793's step-1 died after one real
+fix attempt on a single-suite blocker.
 
 Inside `_ai_analysis`, the attempt loop (up to 3×):
 1. **adapter** (role=adapter) — generates adaptations, consults vllm-report via MCP
@@ -214,6 +233,8 @@ upstream CI stays the only test executor — the watcher runs no tests itself.
 | `MAIN2MAIN_EXTENDED_TEST_CASES` | Space/newline-separated extended e2e cases replacing both sources entirely (drift guards still apply). |
 | `MAIN2MAIN_EXTENDED_INCLUDE_SKIPPED` | `1` keeps upstream `skip_tests` files in the `full`-mode set (default: `0`; no effect in `fixed` mode). |
 | `MAIN2MAIN_TEST_SCHEDULER` | `rounds` restores the legacy round-barrier e2e scheduler (default: `rolling` — suites dispatch as devices free up). |
+| `MAIN2MAIN_E2E_STOPLOSS_ROUNDS` | Consecutive e2e rounds allowed to report the same failing set before the step is abandoned (default `3`; `2` restores the old rule). |
+| `MAIN2MAIN_E2E_CONFIRM_FULL` | `0` skips the full-allowlist confirmation round after a green reduced fix round (default `1`; the final gate then is the only sweep). |
 | `MAIN2MAIN_MYPY_VENV` | Persistent mypy lint venv directory (default: `<workspace>/mypy_venv`; built once, rebuilt when triton-ascend's numpy constraint moves). |
 
 ## Conventions

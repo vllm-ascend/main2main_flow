@@ -218,7 +218,7 @@ def test_render_overview_table_and_step_details(ws):
     assert "`failed` · steps **0/2** · commits **0/58**" in text
     assert "PR **none** — no step passed e2e" in text
     # overview: per-round glyphs, unreached step is dash-only
-    assert "| 1 | `aaaaaaaa..bbbbbbbb` | 17 | ✅✅✅ | ❌❌❌ | e2e exhausted (3/3) |" \
+    assert "| 1 | `aaaaaaaa..bbbbbbbb` | 17 | ✅✅✅ | ❌❌❌ | e2e exhausted (3 rounds) |" \
         in text
     assert "| 2 | `bbbbbbbb..cccccccc` | 41 | — | — | not reached |" in text
     # details: round 0 cost two pre_ci attempts
