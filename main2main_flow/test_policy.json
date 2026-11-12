@@ -23,6 +23,7 @@
     "tests/e2e/pull_request/four_card/test_data_parallel_tp2.py"
   ],
   "blocklist": [
+    "tests/e2e/pull_request/one_card/test_cpu_offloading.py",
     "tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py",
     "tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py",
     "tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py",
