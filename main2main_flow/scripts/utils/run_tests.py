@@ -59,7 +59,7 @@ from main2main_flow.scripts.utils.utils import ts_print
 # 310p classification head).  Treating them as pass was a user decision
 # (2026-09-03): NPU precision drift is hard to fix and must not burn
 # adapter fix rounds — but it is tracked separately from env flakes.
-PASS_RESULTS = {"passed", "env_flake_pass", "precision_pass", "known_issue"}
+PASS_RESULTS = {"passed", "env_flake_pass", "precision_pass"}
 DEFAULT_VLLM_REPO = "https://github.com/vllm-project/vllm.git"
 DEFAULT_ASCEND_REPO = "https://github.com/vllm-project/vllm-ascend.git"
 
@@ -1486,29 +1486,6 @@ def _run_one_test(cmd: list[str], log_path: Path, summary_path: Path,
     sr = _run_summary(ci_log_summary, log_path, summary_path, step_id, round_number)
     s, se = sr["summary"], sr["summary_error"]
     ci_result = _classify(exit_code, s, se)
-    # Temporary A3 main-lane waiver for #292's missing CPU BlockStored event.
-    known_file = "tests/e2e/pull_request/one_card/test_cpu_offloading.py"
-    known_node = known_file + "::test_cpu_offloading[True]"
-    if (ci_result == "failed" and exit_code == 1 and not is_remote
-            and not env.get("VLLM_VERSION")
-            and re.search(r"(?:^|-)a3(?:-|$)", env.get("MAIN2MAIN_IMAGE_TAG", ""))
-            and test in {known_file, known_node}
-            and (s or {}).get("failed_test_cases") == [known_node]):
-        try:
-            raw = re.sub(r"\x1b\[[0-9;]*m", "", log_path.read_text(
-                encoding="utf-8", errors="replace"))
-        except OSError:
-            raw = ""
-        if (re.search(r"(?m)^>\s+assert subscriber\.get_new_cpu_stored_events\(\)$", raw)
-                and re.search(r"(?m)^E\s+assert \[\]$", raw)
-                and re.search(rf"(?m)^{re.escape(known_file)}:\d+: AssertionError$", raw)
-                and re.search(rf"(?m)^FAILED {re.escape(known_node)} - assert \[\]$", raw)
-                and re.search(r"(?m)^=+ 1 failed(?:, [^=\n]*)? in [^=\n]+ =+$", raw)
-                and not re.search(r"(?m)^ERROR\b|^INTERNALERROR\b|^Fatal Python error"
-                                  r"|\b\d+ errors?\b|NPU out of memory", raw)):
-            ci_result = "known_issue"
-            ts_print(f"  [known-issue] {known_node}: missing CPU BlockStored "
-                     "event; failure recorded, not blocking (temporary)")
     if ci_result == "failed" and _is_model_download_failure(log_path):
         ts_print(f"  [env-flake] {test}: model download/cache failure "
                  f"classified as environment, not blocking")
@@ -1921,8 +1898,6 @@ def aggregate_suite_results(
         overall = "failed"
     elif "summary_error" in outcomes:
         overall = "summary_error"
-    elif "known_issue" in outcomes:
-        overall = "known_issue"
     elif outcomes == {"passed"}:
         overall = "passed"
     elif "env_flake_pass" in outcomes:
@@ -1978,7 +1953,7 @@ def build_test_errors_detail(
     """
     detail_parts: list[str] = []
     for test_name, tr in suite_results.items():
-        if tr.get("ci_result") in {"passed", "known_issue"}:
+        if tr.get("ci_result") == "passed":
             continue
         parts = [f"=== {test_name} ==="]
         lp = Path(tr.get("log_path", ""))
